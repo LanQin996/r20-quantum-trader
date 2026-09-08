@@ -57,6 +57,26 @@ function statusColor(s: string) {
   return 'text-amber-400'
 }
 
+// 耗时单位自动晋级:毫秒 → 秒 → 分秒
+function fmtDuration(ms: number | null | undefined) {
+  if (ms == null || ms <= 0) return '--'
+  if (ms < 1000) return Math.round(ms) + 'ms'
+  const totalSec = ms / 1000
+  if (totalSec < 60) return (totalSec < 10 ? totalSec.toFixed(1) : String(Math.round(totalSec))) + 's'
+  const m = Math.floor(totalSec / 60)
+  const s = Math.round(totalSec % 60)
+  return s ? `${m}分${s}秒` : `${m}分钟`
+}
+
+// started_at 为北京时间 "YYYY-MM-DD HH:MM:SS";当天的调用只显示时分秒
+function fmtCallTime(ts: string | null | undefined) {
+  if (!ts) return '--'
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  return ts.startsWith(today) ? ts.slice(11) : ts.slice(5, 16)
+}
+
 onMounted(load)
 </script>
 
@@ -127,13 +147,14 @@ onMounted(load)
           <div class="grid grid-cols-3 gap-2.5 mb-3 text-center">
             <div class="rounded-lg border p-2" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle);"><div class="text-[10px] font-mono" style="color: var(--text-faint);">总调用量</div><div class="text-sm font-bold font-mono num-tabular mt-0.5" style="color: var(--text-main);">{{ data.model_stats?.total_calls ?? '--' }}</div></div>
             <div class="rounded-lg border p-2" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle);"><div class="text-[10px] font-mono" style="color: var(--text-faint);">调用成功率</div><div class="text-sm font-bold num-tabular mt-0.5" :class="(data.model_stats?.total_calls ?? 0) > 0 && (data.model_stats?.successful_calls ?? 0) < (data.model_stats?.total_calls ?? 0) ? 'text-amber-500' : 'text-emerald-500'">{{ (data.model_stats?.total_calls ?? 0) > 0 ? Math.round(100 * (data.model_stats?.successful_calls ?? 0) / data.model_stats.total_calls) + '%' : '--' }}</div></div>
-            <div class="rounded-lg border p-2" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle);"><div class="text-[10px] font-mono" style="color: var(--text-faint);">平均时延</div><div class="text-sm font-bold font-mono num-tabular mt-0.5" style="color: var(--text-main);">{{ data.model_stats?.avg_duration_ms ? Math.round(data.model_stats.avg_duration_ms) + 'ms' : '--' }}</div></div>
+            <div class="rounded-lg border p-2" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle);"><div class="text-[10px] font-mono" style="color: var(--text-faint);">平均时延</div><div class="text-sm font-bold font-mono num-tabular mt-0.5" style="color: var(--text-main);">{{ fmtDuration(data.model_stats?.avg_duration_ms) }}</div></div>
           </div>
           <div class="table-scroll-container max-h-60 overflow-y-auto rounded-lg border" style="border-color: var(--border-subtle);">
             <table class="w-full text-left text-xs font-mono whitespace-nowrap">
               <thead class="sticky top-0 z-10">
                 <tr class="border-b text-[11px] uppercase tracking-wider font-bold" style="border-color: var(--border-subtle); background-color: var(--bg-card-subtle); color: var(--text-muted);">
-                  <th class="py-2 px-3">调用方</th>
+                  <th class="py-2 px-3">时间</th>
+                  <th class="py-2 px-2">调用方</th>
                   <th class="py-2 px-2">模型</th>
                   <th class="py-2 px-2">状态</th>
                   <th class="py-2 px-2">错误</th>
@@ -142,13 +163,14 @@ onMounted(load)
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="c in (data.model_calls || []).slice(0, 30)" :key="c.id" class="border-b last:border-b-0 hover:bg-[var(--bg-card-hover)] transition-colors" style="border-color: var(--border-subtle);">
-                  <td class="py-1.5 px-3" style="color: var(--text-muted);">{{ c.caller || '--' }}</td>
+                <tr v-for="c in (data.model_calls || []).slice(0, 50)" :key="c.id" class="border-b last:border-b-0 hover:bg-[var(--bg-card-hover)] transition-colors" style="border-color: var(--border-subtle);">
+                  <td class="py-1.5 px-3 num-tabular" style="color: var(--text-faint);" :title="c.started_at || ''">{{ fmtCallTime(c.started_at) }}</td>
+                  <td class="py-1.5 px-2" style="color: var(--text-muted);">{{ c.caller || '--' }}</td>
                   <td class="py-1.5 px-2 num-tabular" style="color: var(--text-faint);">{{ c.model || '--' }}</td>
                   <td class="py-1.5 px-2 font-bold" :class="statusColor(c.status)">{{ c.status }}</td>
                   <td class="py-1.5 px-2 max-w-64 truncate" :class="c.status === 'success' ? '' : 'text-rose-400'" :title="c.error_detail || c.error_type || ''">{{ c.status === 'success' ? '--' : (c.error_detail || c.error_type || '--') }}</td>
                   <td class="py-1.5 px-2 num-tabular" style="color: var(--text-muted);">{{ c.total_tokens ?? '--' }}</td>
-                  <td class="py-1.5 px-3 text-right num-tabular" style="color: var(--text-muted);">{{ c.duration_ms ? Math.round(c.duration_ms) + 'ms' : '--' }}</td>
+                  <td class="py-1.5 px-3 text-right num-tabular" style="color: var(--text-muted);" :title="c.duration_ms != null ? c.duration_ms + 'ms' : ''">{{ fmtDuration(c.duration_ms) }}</td>
                 </tr>
               </tbody>
             </table>
