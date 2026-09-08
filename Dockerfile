@@ -5,7 +5,7 @@ FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 
 COPY frontend/ ./
 RUN npm run build
@@ -40,8 +40,8 @@ COPY r20_gateway/ ./r20_gateway/
 COPY scripts/ ./scripts/
 COPY plugins/ ./plugins/
 COPY dashboard/ ./dashboard/
+COPY docs/ ./docs/
 COPY tests/ ./tests/
-COPY static/ ./static/
 
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

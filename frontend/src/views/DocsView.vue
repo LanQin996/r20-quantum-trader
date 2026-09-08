@@ -301,10 +301,10 @@ onUnmounted(() => {
               <span class="font-bold" style="color: var(--color-brand);">点击图片放大</span>
             </div>
             <img
-              src="/images/v750_dashboard_dark.png"
+              :src="'/docs/images/v750_dashboard_dark.png'"
               alt="R20 量子交易系统暗色极客操盘台"
               class="w-full rounded-xl cursor-zoom-in group-hover:opacity-95 transition-opacity"
-              @click="zoomImage = '/images/v750_dashboard_dark.png'"
+              @click="zoomImage = '/docs/images/v750_dashboard_dark.png'"
             />
           </div>
 
@@ -315,10 +315,10 @@ onUnmounted(() => {
               <span class="font-bold" style="color: var(--color-brand);">点击图片放大</span>
             </div>
             <img
-              src="/images/v750_kline_tradingview.png"
+              :src="'/docs/images/v750_kline_tradingview.png'"
               alt="视觉 LLM 友好型多指标共存工作站"
               class="w-full rounded-xl cursor-zoom-in group-hover:opacity-95 transition-opacity"
-              @click="zoomImage = '/images/v750_kline_tradingview.png'"
+              @click="zoomImage = '/docs/images/v750_kline_tradingview.png'"
             />
           </div>
         </section>
