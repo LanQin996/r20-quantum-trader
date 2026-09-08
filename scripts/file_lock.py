@@ -49,17 +49,21 @@ def cycle_lock(lock_path: str, ensure_dir: bool = True, write_pid: bool = True):
         lock_handle.close()
 
 
-def single_cycle(lock_path: str, on_skip=None, ensure_dir: bool = True, write_pid: bool = True):
+def single_cycle(lock_path, on_skip=None, ensure_dir: bool = True, write_pid: bool = True):
     """Decorator: run ``func`` under ``cycle_lock``; skip (return None) on contention.
 
+    ``lock_path`` may be a string or a zero-argument callable returning the
+    path; pass a callable (e.g. ``lambda: LOCK_FILE``) when the path must be
+    resolved at call time rather than captured at decoration time.
     ``on_skip`` is an optional zero-argument callback invoked when the cycle is
     skipped because another process holds the lock.
     """
     def decorator(func):
         @wraps(func)
         def wrapped(*args, **kwargs):
+            path = lock_path() if callable(lock_path) else lock_path
             try:
-                with cycle_lock(lock_path, ensure_dir=ensure_dir, write_pid=write_pid):
+                with cycle_lock(path, ensure_dir=ensure_dir, write_pid=write_pid):
                     return func(*args, **kwargs)
             except LockContended:
                 if on_skip is not None:

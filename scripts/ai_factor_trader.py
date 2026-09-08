@@ -42,7 +42,10 @@ import time
 import datetime
 import subprocess
 import urllib.request
-from file_lock import LockContended, cycle_lock, write_pid_to_lock
+try:
+    from file_lock import LockContended, cycle_lock, write_pid_to_lock
+except ImportError:  # imported as scripts.ai_factor_trader (repo root on sys.path)
+    from scripts.file_lock import LockContended, cycle_lock, write_pid_to_lock
 from typing import Tuple, Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 from market_data_service import fetch_candles, fetch_ticker

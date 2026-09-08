@@ -103,7 +103,6 @@ TARGET_INSTRUMENTS = load_instruments()
 
 app = FastAPI(title="R20 AI Quantitative Matrix", docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory=os.path.join(DASHBOARD_DIR, "templates"))
-app.mount("/static", StaticFiles(directory=os.path.join(DASHBOARD_DIR, "static")), name="static")
 
 def run_json_cmd_status(cmd):
     try:

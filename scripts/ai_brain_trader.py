@@ -41,7 +41,10 @@ import datetime
 import urllib.request
 import subprocess
 import tempfile
-from file_lock import single_cycle
+try:
+    from file_lock import single_cycle
+except ImportError:  # imported as scripts.ai_brain_trader (repo root on sys.path)
+    from scripts.file_lock import single_cycle
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -100,7 +103,7 @@ def atomic_write_json(path: str, payload: Any) -> None:
 def single_brain_cycle(func):
     """Prevent overlapping cron runs from overwriting the shared decision cache."""
     return single_cycle(
-        AI_BRAIN_LOCK_FILE,
+        lambda: AI_BRAIN_LOCK_FILE,
         on_skip=lambda: print("[AI Brain Batch] Skip: another inference cycle is still running"),
     )(func)
 
