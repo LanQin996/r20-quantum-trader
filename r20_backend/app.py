@@ -933,7 +933,7 @@ def run_gateway_job(
         "trader": {
             "script": "ai_factor_trader.py",
             "args": [],
-            "timeout": 180,
+            "timeout": 600,
             "label": "AI量化主脑决策",
         },
         "factor_library": {

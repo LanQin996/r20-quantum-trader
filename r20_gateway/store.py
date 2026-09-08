@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS model_calls (
   input_tokens INTEGER,
   output_tokens INTEGER,
   total_tokens INTEGER,
-  error_type TEXT NOT NULL DEFAULT ''
+  error_type TEXT NOT NULL DEFAULT '',
+  error_detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_model_calls_caller ON model_calls(caller, id DESC);
 """
@@ -76,6 +77,13 @@ class GatewayStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            model_call_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(model_calls)").fetchall()
+            }
+            if "error_detail" not in model_call_columns:
+                connection.execute(
+                    "ALTER TABLE model_calls ADD COLUMN error_detail TEXT NOT NULL DEFAULT ''"
+                )
         self._secure_files()
 
     def _secure_files(self) -> None:
@@ -187,7 +195,7 @@ class GatewayStore:
         columns = (
             "caller", "model", "reasoning_effort", "status", "started_at", "duration_ms",
             "input_chars", "output_chars", "prompt_fingerprint", "prompt_transport",
-            "input_tokens", "output_tokens", "total_tokens", "error_type",
+            "input_tokens", "output_tokens", "total_tokens", "error_type", "error_detail",
         )
         with self.connect() as connection:
             cursor = connection.execute(

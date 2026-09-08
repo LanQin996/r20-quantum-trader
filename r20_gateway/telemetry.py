@@ -39,6 +39,8 @@ class ModelCallTelemetry:
             "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "error_type": type(error).__name__ if error else "",
+            # 截断的异常文案（如 HTTP 状态、超时原因），不含提示词或响应内容
+            "error_detail": str(error)[:300] if error else "",
         }
         try:
             GatewayStore(DB_PATH).record_model_call(record)

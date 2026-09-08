@@ -29,5 +29,5 @@ def agent_statuses(job_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             health = "degraded"
         if agent["output"] and age is None:
             health = "cold"
-        result.append({**agent, "health": health, "output_age_seconds": age, "last_run_status": run.get("status", "not-run"), "last_run_at": run.get("started_at", "")})
+        result.append({**agent, "health": health, "output_age_seconds": age, "last_run_status": run.get("status", "not-run"), "last_run_at": run.get("started_at", ""), "last_run_detail": str(run.get("detail", ""))[-500:]})
     return result
