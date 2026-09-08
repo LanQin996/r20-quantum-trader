@@ -61,9 +61,11 @@ class RetiredCoinContractSpecTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        with patch("urllib.request.urlopen", return_value=_Resp()) as mock_open:
-            self.assertEqual(sfl.get_ct_val("XRP"), 100.0)   # 不在池内 → 走公共规格端点
-            self.assertEqual(sfl.get_ct_val("XRP"), 100.0)   # 第二次命中进程缓存
+        # 显式隔离当前标的池，避免默认配置新增 XRP 后绕过公共端点回退逻辑。
+        with patch.object(sfl, "TARGET_INSTRUMENTS", []):
+            with patch("urllib.request.urlopen", return_value=_Resp()) as mock_open:
+                self.assertEqual(sfl.get_ct_val("XRP"), 100.0)   # 不在池内 → 走公共规格端点
+                self.assertEqual(sfl.get_ct_val("XRP"), 100.0)   # 第二次命中进程缓存
         mock_open.assert_called_once()
         sfl._CTVAL_CACHE.clear()
 
