@@ -13,12 +13,15 @@ services:
     # 首次使用前先执行: cp env.example .env 并填写密钥。
     # 注意不要用 volumes 单文件挂载 .env —— 后台保存配置时会原子重写 /app/.env，
     # 单文件挂载会导致写入失败。
+    # 后端 lifespan 会自动拉起并守护 r20_gateway.worker 调度子进程
+    # （15 分钟交易循环 / 60 秒因子 / 10 分钟快讯 / 晨报晚报 / 20:00 自进化 / 02:00 灾备），
+    # 无需额外跑调度容器。
     env_file:
       - .env
     environment:
       - PORT=8080
-      - OKX_DEMO=1
-      - R20_GATEWAY_WORKER_ENABLED=1
+      # OKX 环境总开关：demo=模拟盘（默认，安全）。改实盘前务必确认凭证与风险。
+      - R20_OKX_ENV=demo
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
