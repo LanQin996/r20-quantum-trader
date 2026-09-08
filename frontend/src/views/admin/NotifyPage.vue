@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { MessageCircle, Zap, CheckCircle2, AlertCircle } from 'lucide-vue-next'
 
@@ -222,6 +222,11 @@ async function saveSchedule() {
 
 onMounted(() => {
   loadConfig()
+})
+
+onUnmounted(() => {
+  if (captureTimer) { clearInterval(captureTimer); captureTimer = null }
+  stopBindPolling()
 })
 </script>
 

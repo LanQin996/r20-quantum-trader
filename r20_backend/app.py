@@ -539,7 +539,19 @@ def log_tail(filename: str, lines: int = 30) -> str:
     path = ROOT / "logs" / filename
     if not path.exists():
         return "暂无日志"
-    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, min(lines, 200)):])
+    capped = max(1, min(lines, 200))
+    # Read backwards from EOF in blocks instead of loading the whole log file.
+    block_size = 65536
+    data = b""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        while position > 0 and data.count(b"\n") <= capped:
+            read_size = min(block_size, position)
+            position -= read_size
+            handle.seek(position)
+            data = handle.read(read_size) + data
+    return "\n".join(data.decode("utf-8", errors="replace").splitlines()[-capped:])
 
 
 def decision_summary() -> list[dict[str, Any]]:
@@ -2903,8 +2915,11 @@ def download_backup_archive(
     )
 
 
+MAX_BACKUP_UPLOAD_BYTES = 200 * 1024 * 1024
+
+
 @app.post("/api/v1/admin/backups/upload")
-async def upload_backup_archive(file: UploadFile = File(...), x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
+async def upload_backup_archive(file: UploadFile = File(...), content_length: int | None = Header(default=None), x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
     refresh_settings()
     require_superadmin(x_r20_session)
     if not file.filename or not (file.filename.endswith(".tar.gz") or file.filename.endswith(".tgz")):
@@ -2917,10 +2932,28 @@ async def upload_backup_archive(file: UploadFile = File(...), x_r20_admin_token:
     dest_path = target_dir / clean_name
     if not dest_path.resolve().is_relative_to(target_dir.resolve()):
         raise HTTPException(status_code=400, detail="非法文件上传路径")
-    content = await file.read()
-    dest_path.write_bytes(content)
-    audit_record("backup.upload", "success", {"filename": clean_name, "bytes": len(content)})
-    return {"uploaded": True, "filename": clean_name, "bytes": len(content), "path": str(dest_path.relative_to(ROOT))}
+    size_limit_mb = MAX_BACKUP_UPLOAD_BYTES // (1024 * 1024)
+    if content_length is not None and content_length > MAX_BACKUP_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"备份包超过大小限制 ({size_limit_mb}MB)")
+    # Stream to a temp file in chunks instead of holding the whole archive in RAM.
+    fd, temp_name = tempfile.mkstemp(prefix=".upload-", suffix=".part", dir=target_dir)
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_BACKUP_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail=f"备份包超过大小限制 ({size_limit_mb}MB)")
+                handle.write(chunk)
+        os.replace(temp_name, dest_path)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    audit_record("backup.upload", "success", {"filename": clean_name, "bytes": total})
+    return {"uploaded": True, "filename": clean_name, "bytes": total, "path": str(dest_path.relative_to(ROOT))}
 
 
 @app.post("/api/v1/admin/backups/restore")
@@ -3160,6 +3193,17 @@ def market(inst_id: str) -> dict[str, Any]:
 
 
 _CANDLES_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_CANDLES_CACHE_MAX_KEYS = 500
+
+
+def _candles_cache_store(cache_key: str, now_ts: float, candles: list[dict[str, Any]]) -> None:
+    if cache_key not in _CANDLES_CACHE and len(_CANDLES_CACHE) >= _CANDLES_CACHE_MAX_KEYS:
+        # Evict the oldest ~10% by recorded timestamp to stay under the cap.
+        eviction_count = max(1, _CANDLES_CACHE_MAX_KEYS // 10)
+        oldest_keys = sorted(_CANDLES_CACHE, key=lambda key: _CANDLES_CACHE[key][0])[:eviction_count]
+        for oldest_key in oldest_keys:
+            _CANDLES_CACHE.pop(oldest_key, None)
+    _CANDLES_CACHE[cache_key] = (now_ts, candles)
 
 
 @app.get("/api/v1/market/{inst_id}/candles")
@@ -3202,7 +3246,7 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
                 except (ValueError, IndexError):
                     continue
             if candles:
-                _CANDLES_CACHE[cache_key] = (now_ts, candles)
+                _candles_cache_store(cache_key, now_ts, candles)
                 return {"instId": inst_id, "bar": bar, "candles": candles, "source": "OKX REST"}
     except Exception as exc:
         if cached:

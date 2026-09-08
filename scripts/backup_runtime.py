@@ -357,10 +357,7 @@ def upload_baidu_oauth(source: Path, target: dict[str, Any]) -> dict[str, Any]:
     chunk_size = 4 * 1024 * 1024
     block_list: list[str] = []
     with source.open("rb") as handle:
-        while True:
-            chunk = handle.read(chunk_size)
-            if not chunk:
-                break
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
             block_list.append(hashlib.md5(chunk).hexdigest())
     remote_dir = str(target.get("remote_path") or "R20_Backups").strip("/")
     remote_path = f"/apps/R20QuantumTrader/{remote_dir}/{source.name}" if remote_dir else f"/apps/R20QuantumTrader/{source.name}"
@@ -423,10 +420,7 @@ def upload_s3(source: Path, target: dict[str, Any]) -> dict[str, Any]:
         connection.putheader(k, v)
     connection.endheaders()
     with source.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             connection.send(chunk)
     response = connection.getresponse()
     response.read()
@@ -486,10 +480,7 @@ def upload_webdav(source: Path, target: dict[str, Any]) -> dict[str, Any]:
         connection.putheader("Authorization", auth)
     connection.endheaders()
     with source.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             connection.send(chunk)
     response = connection.getresponse()
     response.read()

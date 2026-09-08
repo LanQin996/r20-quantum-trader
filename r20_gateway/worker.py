@@ -42,10 +42,11 @@ def format_message(row: dict[str, object]) -> str:
 
 def run() -> None:
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_handle = LOCK_FILE.open("w", encoding="utf-8")
+    lock_handle = LOCK_FILE.open("a", encoding="utf-8")
     try:
         fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        lock_handle.close()
         log("gateway worker already running; exiting")
         return
     signal.signal(signal.SIGTERM, stop)
@@ -56,7 +57,13 @@ def run() -> None:
     scheduler = GatewayScheduler(store)
     scheduler.initialize_migration_baseline()
     log("gateway worker started with scheduler ownership")
+    last_prune = 0.0
     while RUNNING:
+        if time.monotonic() - last_prune >= 3600:
+            pruned = store.prune()
+            last_prune = time.monotonic()
+            if any(pruned.values()):
+                log(f"store pruned: {pruned}")
         launched = scheduler.tick()
         for job_name in launched:
             log(f"scheduled job={job_name}")

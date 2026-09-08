@@ -24,6 +24,9 @@ LOGS = ROOT / "logs"
 LOGS.mkdir(exist_ok=True)
 DATA.mkdir(exist_ok=True)
 
+# Held exclusively by r20_gateway.worker while the gateway scheduler is alive.
+GATEWAY_LOCK = DATA / ".r20_gateway.lock"
+
 logging.basicConfig(
     filename=LOGS / "r20_scheduler.log",
     level=logging.INFO,
@@ -38,6 +41,17 @@ JOBS = {
     "self_improvement": ("self_improvement_engine.py", None),
     "nightly_backup": ("nightly_backup_and_clean.py", None),
 }
+
+
+def gateway_scheduler_running() -> bool:
+    """Return True when the gateway worker holds its exclusive lock (i.e. is alive)."""
+    with GATEWAY_LOCK.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
 
 
 def run_script(name: str) -> None:
@@ -69,8 +83,20 @@ def main() -> None:
 
         tz = timezone(timedelta(hours=8))
         last: dict[str, datetime | None] = {key: None for key in JOBS}
+        gateway_active = False
         logging.info("R20 standalone scheduler v6.6.2 started")
         while True:
+            # The gateway scheduler owns these jobs; defer while it is alive
+            # so jobs like ai_factor_trader.py do not fire twice.
+            if gateway_scheduler_running():
+                if not gateway_active:
+                    logging.info("gateway scheduler holds %s; deferring all jobs to it", GATEWAY_LOCK.name)
+                    gateway_active = True
+                time.sleep(30)
+                continue
+            if gateway_active:
+                logging.info("gateway scheduler lock released; resuming standalone scheduling")
+                gateway_active = False
             now = datetime.now(tz).replace(second=0, microsecond=0)
             current = datetime.now(tz)
             if not last["trader"] or (current - last["trader"]).total_seconds() >= 15 * 60:

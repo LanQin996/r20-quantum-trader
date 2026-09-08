@@ -95,7 +95,6 @@ class GatewayStore:
     @contextmanager
     def connect(self):
         connection = sqlite3.connect(self.path, timeout=10)
-        self._secure_files()
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         try:
@@ -170,6 +169,30 @@ class GatewayStore:
                 "UPDATE job_runs SET status='failed', finished_at=?, return_code=1, detail=? WHERE status='running'",
                 (now, "worker restarted before job completion"),
             )
+
+    def prune(self, older_than_days: int = 30, keep_latest: int = 5000) -> dict[str, int]:
+        """Drop finished deliveries/events older than N days and cap job_runs/model_calls to the latest K rows."""
+        cutoff = (datetime.now(BJ_TZ) - timedelta(days=older_than_days)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            deliveries = connection.execute(
+                "DELETE FROM deliveries WHERE status IN ('delivered','accepted','dead') AND created_at < ?",
+                (cutoff,),
+            ).rowcount
+            events = connection.execute(
+                """DELETE FROM events WHERE created_at < ? AND NOT EXISTS (
+                     SELECT 1 FROM deliveries d WHERE d.event_id = events.event_id)""",
+                (cutoff,),
+            ).rowcount
+            job_runs = connection.execute(
+                "DELETE FROM job_runs WHERE id NOT IN (SELECT id FROM job_runs ORDER BY id DESC LIMIT ?)",
+                (keep_latest,),
+            ).rowcount
+            model_calls = connection.execute(
+                "DELETE FROM model_calls WHERE id NOT IN (SELECT id FROM model_calls ORDER BY id DESC LIMIT ?)",
+                (keep_latest,),
+            ).rowcount
+        return {"deliveries": deliveries, "events": events, "job_runs": job_runs, "model_calls": model_calls}
 
     def replay_dead(self, delivery_id: int) -> bool:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")

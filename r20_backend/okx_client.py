@@ -13,8 +13,10 @@ from .config import settings
 
 
 class OKXClient:
-    def __init__(self) -> None:
-        self.base_url = settings.okx_base_url.rstrip("/")
+    @property
+    def base_url(self) -> str:
+        # Resolved per request so refresh_settings() demo/live switches take effect.
+        return settings.okx_base_url.rstrip("/")
 
     def _request(self, method: str, path: str, params: dict[str, Any] | None = None) -> Any:
         params = params or {}

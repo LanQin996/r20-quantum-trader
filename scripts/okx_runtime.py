@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -10,19 +11,40 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_ENVIRONMENTS = {"demo", "live"}
 
 
-def _load_dotenv() -> dict[str, str]:
-    values: dict[str, str] = {}
-    path = ROOT / ".env"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line: continue
-            key, value = line.split("=", 1); values[key.strip()] = value.strip().strip('"').strip("'")
+_cache_lock = threading.Lock()
+_cache_sig: tuple = ()
+_cache_values: dict[str, str] = {}
+
+
+def _signature(path: Path) -> tuple:
     try:
-        from r20_gateway.secrets import load_secrets
-        values.update(load_secrets())
-    except Exception:
-        pass
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ()
+
+
+def _load_dotenv() -> dict[str, str]:
+    global _cache_sig, _cache_values
+    env_path = ROOT / ".env"
+    secret_files = sorted((ROOT / "data").glob(".r20_secret_key")) + sorted((ROOT / "data").glob("r20_secrets.enc"))
+    sig = (_signature(env_path), *(_signature(p) for p in secret_files))
+    with _cache_lock:
+        if sig == _cache_sig:
+            values = dict(_cache_values)
+        else:
+            values = {}
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line: continue
+                    key, value = line.split("=", 1); values[key.strip()] = value.strip().strip('"').strip("'")
+            try:
+                from r20_gateway.secrets import load_secrets
+                values.update(load_secrets())
+            except Exception:
+                pass
+            _cache_sig, _cache_values = sig, dict(values)
     # Dynamic project configuration and encrypted secrets override stale inherited process values.
     return {**os.environ, **values}
 

@@ -5,12 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=r20
+Group=r20
+Environment=HOME=/home/r20
+Environment=PATH=/opt/r20-quantum-trader/.venv/bin:/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=/opt/r20-quantum-trader
 EnvironmentFile=/opt/r20-quantum-trader/.env
 ExecStart=/usr/bin/env python3 -m r20_backend.scheduler
 Restart=always
 RestartSec=15
 NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

@@ -23,7 +23,7 @@ ROOT = Path(PROJECT_ROOT)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import fcntl_compat as fcntl
+from file_lock import single_cycle
 
 try:
     from r20_backend.config import settings as standalone_settings
@@ -71,20 +71,12 @@ def clamp(value, lower, upper, default):
 
 
 def single_evolution_cycle(func):
-    def wrapped(*args, **kwargs):
-        lock_handle = open(EVOLUTION_LOCK_FILE, "a+", encoding="utf-8")
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock_handle.close()
-            log_msg("Self-evolution skipped: another cycle is still running")
-            return None
-        try:
-            return func(*args, **kwargs)
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-            lock_handle.close()
-    return wrapped
+    return single_cycle(
+        EVOLUTION_LOCK_FILE,
+        on_skip=lambda: log_msg("Self-evolution skipped: another cycle is still running"),
+        ensure_dir=False,
+        write_pid=False,
+    )(func)
 
 
 def log_msg(msg: str):

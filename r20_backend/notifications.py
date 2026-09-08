@@ -3,37 +3,90 @@ from __future__ import annotations
 import base64
 import datetime
 import json
+import logging
 import os
+import threading
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 from r20_backend.net_security import validate_outbound_url
 
+logger = logging.getLogger(__name__)
+
 ROOT = Path(__file__).resolve().parents[1]
 SECRET_LOADER = None
 QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 QQ_API_BASE = "https://api.sgroup.qq.com"
+QQ_TOKEN_SAFETY_MARGIN_SECONDS = 60
+
+SECRET_KEY_FILE = ROOT / "data" / ".r20_secret_key"
+SECRET_STORE_FILE = ROOT / "data" / "r20_secrets.enc"
+
+# mtime+size signatures let the notification hot path skip re-parsing unchanged files.
+_env_cache_lock = threading.Lock()
+_dotenv_cache: dict[str, Any] = {"signature": None, "values": {}}
+_secrets_cache: dict[str, Any] = {"signature": None, "values": {}}
+_qq_token_lock = threading.Lock()
+_qq_token_cache: dict[str, Any] = {"key": "", "token": "", "expires_at": 0.0}
 
 
-def _env() -> dict[str, str]:
-    values: dict[str, str] = {}
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _dotenv_values() -> dict[str, str]:
     path = ROOT / ".env"
+    signature = _file_signature(path) if path.exists() else None
+    with _env_cache_lock:
+        if signature == _dotenv_cache["signature"]:
+            return dict(_dotenv_cache["values"])
+    values: dict[str, str] = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.strip()
-    # Dynamic encrypted secrets override both stale inherited values and legacy .env values.
+    with _env_cache_lock:
+        _dotenv_cache["signature"] = signature
+        _dotenv_cache["values"] = dict(values)
+    return values
+
+
+def _encrypted_secrets() -> dict[str, str]:
+    if SECRET_LOADER is not None:
+        try:
+            return SECRET_LOADER()
+        except Exception as exc:
+            logger.warning("notification secret loader failed: %s", exc)
+            return {}
+    if ROOT != Path(__file__).resolve().parents[1]:
+        return {}
+    signature = (_file_signature(SECRET_KEY_FILE), _file_signature(SECRET_STORE_FILE))
+    with _env_cache_lock:
+        if signature == _secrets_cache["signature"]:
+            return dict(_secrets_cache["values"])
     try:
-        if SECRET_LOADER is not None:
-            encrypted = SECRET_LOADER()
-        elif ROOT == Path(__file__).resolve().parents[1]:
-            from r20_gateway.secrets import load_secrets
-            encrypted = load_secrets()
-        else:
-            encrypted = {}
-    except Exception: encrypted = {}
+        from r20_gateway.secrets import load_secrets
+        encrypted = load_secrets()
+    except Exception as exc:
+        logger.warning("failed to decrypt secret store %s for notifications: %s", SECRET_STORE_FILE, exc)
+        encrypted = {}
+    with _env_cache_lock:
+        _secrets_cache["signature"] = signature
+        _secrets_cache["values"] = dict(encrypted)
+    return encrypted
+
+
+def _env() -> dict[str, str]:
+    values = _dotenv_values()
+    # Dynamic encrypted secrets override both stale inherited values and legacy .env values.
+    encrypted = _encrypted_secrets()
     return {**os.environ, **values, **encrypted}
 
 
@@ -53,16 +106,38 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None
         return False, str(exc), {}
 
 
+def _qq_access_token(app_id: str, secret: str) -> tuple[str, str]:
+    """Fetch (and cache) a QQ bot access token; only tokens with a known expiry are cached."""
+    cache_key = f"{app_id}:{secret}"
+    now = time.time()
+    with _qq_token_lock:
+        if _qq_token_cache["key"] == cache_key and now < _qq_token_cache["expires_at"]:
+            return _qq_token_cache["token"], ""
+    ok, detail, token_data = _post_json(QQ_TOKEN_URL, {"appId": app_id, "clientSecret": secret})
+    access_token = token_data.get("access_token") if ok else ""
+    if not access_token:
+        return "", f"QQ access token 获取失败：{detail} code={token_data.get('code','')} message={token_data.get('message','')}"
+    try:
+        expires_in = int(token_data.get("expires_in", 0) or 0)
+    except (TypeError, ValueError):
+        expires_in = 0
+    if expires_in > QQ_TOKEN_SAFETY_MARGIN_SECONDS:
+        with _qq_token_lock:
+            _qq_token_cache["key"] = cache_key
+            _qq_token_cache["token"] = access_token
+            _qq_token_cache["expires_at"] = now + expires_in - QQ_TOKEN_SAFETY_MARGIN_SECONDS
+    return access_token, ""
+
+
 def _send_qq(env: dict[str, str], message: str) -> tuple[bool, str]:
     app_id = env.get("R20_QQ_APP_ID", "").strip()
     secret = env.get("R20_QQ_CLIENT_SECRET", "").strip()
     openid = env.get("R20_QQ_OPENID", "").strip()
     if not app_id or not secret or not openid:
         return False, "QQ App ID / Client Secret / OpenID 未完整配置；可在后台点击「⚡ 自动获取 OpenID」完成绑定"
-    ok, detail, token_data = _post_json(QQ_TOKEN_URL, {"appId": app_id, "clientSecret": secret})
-    access_token = token_data.get("access_token") if ok else ""
+    access_token, token_error = _qq_access_token(app_id, secret)
     if not access_token:
-        return False, f"QQ access token 获取失败：{detail} code={token_data.get('code','')} message={token_data.get('message','')}"
+        return False, token_error
     sequence = int(datetime.datetime.now().timestamp() * 1000) % 1_000_000
 
     # Differentiate between Group OpenID and C2C User OpenID

@@ -45,9 +45,9 @@ def generate_daily_briefing_and_backup():
     try:
         sync_script = os.path.join(WORKSPACE_DIR, "scripts", "sync_full_ledger.py")
         if os.path.exists(sync_script):
-            subprocess.run(f"python3 {sync_script}", shell=True, capture_output=True, text=True, timeout=15)
-    except Exception:
-        pass
+            subprocess.run([sys.executable, sync_script], capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        print(f"[Daily Summary] Ledger sync warning: {e}", file=sys.stderr)
 
     trades = []
     if os.path.exists(LEDGER_JSON_FILE):

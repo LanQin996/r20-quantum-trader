@@ -11,6 +11,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const lastUpdated = ref<Date | null>(null)
   const isConnected = ref<boolean>(true)
   const pollingTimer = ref<any>(null)
+  const isFetching = ref<boolean>(false)
   const showAboutModal = ref<boolean>(false)
 
   // Getters
@@ -76,6 +77,8 @@ export const useDashboardStore = defineStore('dashboard', () => {
 
   // Actions
   async function fetchDashboard(silent = false) {
+    if (isFetching.value) return
+    isFetching.value = true
     if (!silent) {
       isRefreshing.value = true
     }
@@ -98,6 +101,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
       error.value = err.message || '获取数据失败'
       isConnected.value = false
     } finally {
+      isFetching.value = false
       loading.value = false
       if (!silent) {
         setTimeout(() => {
@@ -107,18 +111,48 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
+  let pollIntervalMs = 3000
+  let visibilityHandler: (() => void) | null = null
+
+  function schedulePollTimer() {
+    if (!pollingTimer.value) {
+      pollingTimer.value = setInterval(() => {
+        fetchDashboard(true)
+      }, pollIntervalMs)
+    }
+  }
+
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      if (pollingTimer.value) {
+        clearInterval(pollingTimer.value)
+        pollingTimer.value = null
+      }
+    } else {
+      fetchDashboard(true)
+      schedulePollTimer()
+    }
+  }
+
   function startPolling(intervalMs = 3000) {
     stopPolling()
+    pollIntervalMs = intervalMs
     fetchDashboard(false)
-    pollingTimer.value = setInterval(() => {
-      fetchDashboard(true)
-    }, intervalMs)
+    if (!document.hidden) {
+      schedulePollTimer()
+    }
+    visibilityHandler = handleVisibilityChange
+    document.addEventListener('visibilitychange', visibilityHandler)
   }
 
   function stopPolling() {
     if (pollingTimer.value) {
       clearInterval(pollingTimer.value)
       pollingTimer.value = null
+    }
+    if (visibilityHandler) {
+      document.removeEventListener('visibilitychange', visibilityHandler)
+      visibilityHandler = null
     }
   }
 

@@ -1,28 +1,83 @@
 """Environment-only configuration for the standalone R20 backend."""
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
+import threading
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
+SECRET_KEY_FILE = ROOT / "data" / ".r20_secret_key"
+SECRET_STORE_FILE = ROOT / "data" / "r20_secrets.enc"
+
+# mtime+size signatures let hot-path callers skip re-parsing unchanged files.
+_cache_lock = threading.Lock()
+_dotenv_signatures: dict[str, tuple[int, int] | None] = {}
+_injected_secrets_signature: tuple = None
+_secret_values_cache: dict[str, object] = {"signature": None, "values": {}}
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _secrets_signature() -> tuple:
+    return (_file_signature(SECRET_KEY_FILE), _file_signature(SECRET_STORE_FILE))
 
 
 def load_encrypted_secrets() -> None:
+    global _injected_secrets_signature
     try:
+        signature = _secrets_signature()
+        with _cache_lock:
+            if signature == _injected_secrets_signature:
+                return
         from r20_gateway.secrets import inject_into_environment
         inject_into_environment()
-    except Exception:
-        pass
+        with _cache_lock:
+            _injected_secrets_signature = signature
+    except Exception as exc:
+        logger.warning("failed to load encrypted secrets from %s: %s", SECRET_STORE_FILE, exc)
 
 
 def load_dotenv(path: Path) -> None:
     if not path.exists():
         return
+    signature = _file_signature(path)
+    cache_key = str(path)
+    with _cache_lock:
+        if _dotenv_signatures.get(cache_key, ...) == signature:
+            return
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         os.environ[key.strip()] = value.strip().strip('"').strip("'")
+    with _cache_lock:
+        _dotenv_signatures[cache_key] = signature
+
+
+def _secret_values() -> dict[str, str]:
+    signature = _secrets_signature()
+    with _cache_lock:
+        if signature == _secret_values_cache["signature"]:
+            return dict(_secret_values_cache["values"])
+    try:
+        from r20_gateway.secrets import load_secrets
+        values = load_secrets()
+    except Exception as exc:
+        logger.warning("failed to decrypt secret store %s: %s", SECRET_STORE_FILE, exc)
+        values = {}
+    with _cache_lock:
+        _secret_values_cache["signature"] = signature
+        _secret_values_cache["values"] = dict(values)
+    return values
 
 
 load_dotenv(ROOT / ".env")
@@ -66,8 +121,7 @@ def refresh_settings() -> Settings:
     settings.okx_secret_key = selected.secret_key
     settings.okx_passphrase = selected.passphrase
     try:
-        from r20_gateway.secrets import load_secrets
-        secret_values = load_secrets()
+        secret_values = _secret_values()
     except Exception: secret_values = {}
     effective = {**os.environ, **secret_values}
     settings.okx_live_configured = bool(effective.get("OKX_LIVE_API_KEY") and effective.get("OKX_LIVE_SECRET_KEY") and effective.get("OKX_LIVE_PASSPHRASE"))

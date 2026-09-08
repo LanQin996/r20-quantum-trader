@@ -34,6 +34,7 @@ JOBS = (
     JobSpec("news", "news_sentiment_harvester.py", 10 * 60, 300, offset_seconds=180),
     JobSpec("daily_briefing", "daily_summary_and_backup.py", None, 600, "briefing_times", ("08:00", "20:00")),
     JobSpec("self_improvement", "self_improvement_engine.py", None, 1200, "self_improvement_times", ("02:00", "08:00", "14:00", "20:00")),
+    JobSpec("disk_cleanup", "cleanup_disk.py", 3600, 300),
 )
 
 
@@ -51,7 +52,29 @@ def current_jobs() -> tuple[JobSpec, ...]:
     return (*JOBS, *backup_job_specs())
 
 
-def scheduler_snapshot(store: GatewayStore) -> dict[str, Any]:
+def _resolve_times(spec: JobSpec, schedule: dict[str, Any]) -> tuple[str, ...]:
+    if spec.schedule_key.startswith("backup_job:"):
+        return spec.default_times
+    value = schedule.get(spec.schedule_key)
+    # Also check fallback keys if list key not found
+    if value is None and spec.schedule_key == "self_improvement_times":
+        value = schedule.get("self_improvement_time")
+    if isinstance(value, list):
+        return tuple(str(item) for item in value)
+    if isinstance(value, str):
+        return (value,)
+    return spec.default_times
+
+
+def _schedule_text(spec: JobSpec, schedule: dict[str, Any]) -> str:
+    if spec.interval_seconds and spec.offset_seconds:
+        return f"每 {spec.interval_seconds // 60} 分钟 (错峰 +{spec.offset_seconds // 60}m)"
+    if spec.interval_seconds:
+        return f"每 {spec.interval_seconds // 60} 分钟"
+    return "、".join(_resolve_times(spec, schedule))
+
+
+def scheduler_snapshot(store: GatewayStore, running: dict[str, Future[None]] | None = None) -> dict[str, Any]:
     schedule = load_schedule()
     now = datetime.now(BJ_TZ)
     jobs = []
@@ -61,18 +84,18 @@ def scheduler_snapshot(store: GatewayStore) -> dict[str, Any]:
             last = datetime.fromisoformat(raw) if raw else None
         except ValueError:
             last = None
-        value = schedule.get(spec.schedule_key) if spec.schedule_key else None
-        times = tuple(str(item) for item in value) if isinstance(value, list) else ((str(value),) if isinstance(value, str) else spec.default_times)
-        schedule_text = f"每 {spec.interval_seconds // 60} 分钟 (错峰 +{spec.offset_seconds // 60}m)" if (spec.interval_seconds and spec.offset_seconds) else (f"每 {spec.interval_seconds // 60} 分钟" if spec.interval_seconds else "、".join(times))
-        jobs.append({
+        job: dict[str, Any] = {
             "name": spec.name,
             "script": spec.script,
             "last_scheduled_at": last.isoformat() if last else "",
-            "schedule": schedule_text,
+            "schedule": _schedule_text(spec, schedule),
             "timezone": "Asia/Shanghai",
             "overdue": bool(spec.interval_seconds and last and (now - last).total_seconds() > spec.interval_seconds * 2),
             "offset_seconds": spec.offset_seconds,
-        })
+        }
+        if running is not None:
+            job["running"] = spec.name in running and not running[spec.name].done()
+        jobs.append(job)
     return {"jobs": jobs, "recent_runs": store.job_runs(30)}
 
 
@@ -96,17 +119,7 @@ class GatewayScheduler:
                 self.store.set_state(f"job.last.{spec.name}", now.isoformat())
 
     def _scheduled_times(self, spec: JobSpec, schedule: dict[str, Any]) -> tuple[str, ...]:
-        if spec.schedule_key.startswith("backup_job:"):
-            return spec.default_times
-        value = schedule.get(spec.schedule_key)
-        # Also check fallback keys if list key not found
-        if value is None and spec.schedule_key == "self_improvement_times":
-            value = schedule.get("self_improvement_time")
-        if isinstance(value, list):
-            return tuple(str(item) for item in value)
-        if isinstance(value, str):
-            return (value,)
-        return spec.default_times
+        return _resolve_times(spec, schedule)
 
     def due(self, spec: JobSpec, now: datetime, schedule: dict[str, Any]) -> bool:
         last = self._last_at(spec.name)
@@ -114,7 +127,7 @@ class GatewayScheduler:
             if spec.name == "trader":
                 slot = int(now.timestamp()) // spec.interval_seconds
                 last_slot = int(last.timestamp()) // spec.interval_seconds if last else -1
-                return slot > last_slot and int(now.timestamp()) % spec.interval_seconds < 10
+                return slot > last_slot
             if spec.offset_seconds:
                 # Staggered execution aligned to clock with offset to prevent resource collisions
                 ts = int(now.timestamp())
@@ -158,29 +171,14 @@ class GatewayScheduler:
         for spec in current_jobs():
             if spec.name in self.running or not self.due(spec, now, schedule):
                 continue
+            future = self.executor.submit(self._execute, spec)
             self.store.set_state(f"job.last.{spec.name}", now.isoformat())
-            self.running[spec.name] = self.executor.submit(self._execute, spec)
+            self.running[spec.name] = future
             launched.append(spec.name)
         return launched
 
     def status(self) -> dict[str, Any]:
-        schedule = load_schedule()
-        result = []
-        now = datetime.now(BJ_TZ)
-        for spec in current_jobs():
-            last = self._last_at(spec.name)
-            schedule_text = f"每 {spec.interval_seconds // 60} 分钟 (错峰 +{spec.offset_seconds // 60}m)" if (spec.interval_seconds and spec.offset_seconds) else (f"每 {spec.interval_seconds // 60} 分钟" if spec.interval_seconds else "、".join(self._scheduled_times(spec, schedule)))
-            result.append({
-                "name": spec.name,
-                "script": spec.script,
-                "running": spec.name in self.running and not self.running[spec.name].done(),
-                "last_scheduled_at": last.isoformat() if last else "",
-                "schedule": schedule_text,
-                "timezone": "Asia/Shanghai",
-                "overdue": bool(spec.interval_seconds and last and (now - last).total_seconds() > spec.interval_seconds * 2),
-                "offset_seconds": spec.offset_seconds,
-            })
-        return {"jobs": result, "recent_runs": self.store.job_runs(30)}
+        return scheduler_snapshot(self.store, self.running)
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=False)

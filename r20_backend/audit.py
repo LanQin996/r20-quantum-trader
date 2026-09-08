@@ -1,6 +1,7 @@
 """Append-only audit log for all authenticated admin actions."""
 from __future__ import annotations
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,19 @@ def record(action: str, status: str, detail: dict[str, Any] | None = None,
 def recent(limit: int = 50) -> list[dict[str, Any]]:
     if not AUDIT_FILE.exists():
         return []
-    lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 200)):]
+    capped = max(1, min(limit, 200))
+    # Read backwards from EOF in blocks instead of loading the whole file.
+    block_size = 65536
+    data = b""
+    with AUDIT_FILE.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        while position > 0 and data.count(b"\n") <= capped:
+            read_size = min(block_size, position)
+            position -= read_size
+            handle.seek(position)
+            data = handle.read(read_size) + data
+    lines = data.decode("utf-8", errors="replace").splitlines()[-capped:]
     records: list[dict[str, Any]] = []
     for line in reversed(lines):
         try:

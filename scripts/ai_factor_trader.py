@@ -42,7 +42,7 @@ import time
 import datetime
 import subprocess
 import urllib.request
-import fcntl_compat as fcntl
+from file_lock import LockContended, cycle_lock, write_pid_to_lock
 from typing import Tuple, Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 from market_data_service import fetch_candles, fetch_ticker
@@ -1730,40 +1730,32 @@ def evaluate_asset_signal(f):
 def single_trader_cycle(func):
     """Prevent cron/manual overlap across the complete order-management cycle."""
     def wrapped(*args, **kwargs):
-        os.makedirs(DATA_DIR, exist_ok=True)
-        lock_handle = open(TRADER_LOCK_FILE, "a+", encoding="utf-8")
         try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock_handle.close()
+            with cycle_lock(TRADER_LOCK_FILE, write_pid=False) as lock_handle:
+                try:
+                    now_slot = int(time.time()) // 900
+                    if os.path.exists(TRADER_SLOT_FILE):
+                        try:
+                            with open(TRADER_SLOT_FILE, "r", encoding="utf-8") as f:
+                                slot_state = json.load(f)
+                            same_slot = int(slot_state.get("slot", -1)) == now_slot
+                            recently_started = int(time.time()) - int(slot_state.get("started_at", 0) or 0) < 120
+                            if same_slot and recently_started:
+                                print("[Trader] Skip: duplicate trigger detected in this 15-minute slot")
+                                return None
+                        except Exception:
+                            pass
+                    with open(TRADER_SLOT_FILE, "w", encoding="utf-8") as f:
+                        json.dump({"slot": now_slot, "started_at": int(time.time()), "pid": os.getpid()}, f)
+                    write_pid_to_lock(lock_handle)
+                    cycle_environment = freeze_okx_environment()
+                    print(f"[Trader] OKX environment frozen for cycle: {cycle_environment.mode.upper()} / {cycle_environment.identity}")
+                    return func(*args, **kwargs)
+                finally:
+                    unfreeze_okx_environment()
+        except LockContended:
             print("[Trader] Skip: another portfolio cycle is still running")
             return None
-        try:
-            now_slot = int(time.time()) // 900
-            if os.path.exists(TRADER_SLOT_FILE):
-                try:
-                    with open(TRADER_SLOT_FILE, "r", encoding="utf-8") as f:
-                        slot_state = json.load(f)
-                    same_slot = int(slot_state.get("slot", -1)) == now_slot
-                    recently_started = int(time.time()) - int(slot_state.get("started_at", 0) or 0) < 120
-                    if same_slot and recently_started:
-                        print("[Trader] Skip: duplicate trigger detected in this 15-minute slot")
-                        return None
-                except Exception:
-                    pass
-            with open(TRADER_SLOT_FILE, "w", encoding="utf-8") as f:
-                json.dump({"slot": now_slot, "started_at": int(time.time()), "pid": os.getpid()}, f)
-            lock_handle.seek(0)
-            lock_handle.truncate()
-            lock_handle.write(str(os.getpid()))
-            lock_handle.flush()
-            cycle_environment = freeze_okx_environment()
-            print(f"[Trader] OKX environment frozen for cycle: {cycle_environment.mode.upper()} / {cycle_environment.identity}")
-            return func(*args, **kwargs)
-        finally:
-            unfreeze_okx_environment()
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-            lock_handle.close()
     return wrapped
 
 
@@ -1784,7 +1776,7 @@ def execute_portfolio():
     try:
         harvester_script = os.path.join(WORKSPACE_DIR, "scripts", "news_sentiment_harvester.py")
         if os.path.exists(harvester_script):
-            subprocess.run(f"python3 {harvester_script}", shell=True, capture_output=True, text=True, timeout=25)
+            subprocess.run([sys.executable, harvester_script], capture_output=True, text=True, timeout=25)
     except Exception as e:
         print(f"News Harvester sync warning: {e}")
 
@@ -2236,10 +2228,10 @@ def execute_portfolio():
     try:
         sync_script = os.path.join(WORKSPACE_DIR, "scripts", "sync_full_ledger.py")
         if os.path.exists(sync_script):
-            subprocess.run(f"python3 {sync_script}", shell=True, capture_output=True, text=True, timeout=15)
+            subprocess.run([sys.executable, sync_script], capture_output=True, text=True, timeout=15)
         db_script = os.path.join(WORKSPACE_DIR, "scripts", "db_manager.py")
         if os.path.exists(db_script):
-            subprocess.run(f"python3 {db_script}", shell=True, capture_output=True, text=True, timeout=15)
+            subprocess.run([sys.executable, db_script], capture_output=True, text=True, timeout=15)
     except Exception as e:
         print(f"[Ledger Sync Warning] {e}")
 

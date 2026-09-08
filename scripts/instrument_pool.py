@@ -263,16 +263,17 @@ def sync_instruments_state() -> None:
 
     # 5. Run factor_library and news_sentiment in a non-blocking background thread
     import subprocess
+    import sys
     import threading
     def _run_bg() -> None:
         try:
             fl_script = ROOT / "scripts" / "factor_library.py"
             if fl_script.exists():
-                subprocess.run(f"python3 {fl_script}", shell=True, capture_output=True, timeout=45)
+                subprocess.run([sys.executable, str(fl_script)], capture_output=True, timeout=45)
             nh_script = ROOT / "scripts" / "news_sentiment_harvester.py"
             if nh_script.exists():
-                subprocess.run(f"python3 {nh_script}", shell=True, capture_output=True, timeout=45)
-        except Exception:
-            pass
+                subprocess.run([sys.executable, str(nh_script)], capture_output=True, timeout=45)
+        except Exception as e:
+            print(f"[Instrument Pool] Background factor/news refresh warning: {e}", file=sys.stderr)
     threading.Thread(target=_run_bg, daemon=True).start()
 

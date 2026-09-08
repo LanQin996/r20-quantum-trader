@@ -37,12 +37,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Node.js + official OKX CLI (required by the trading/gateway engine)
 COPY --from=node-runtime /usr/local/bin /usr/local/bin
 COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN npm install -g "@okx_ai/okx-trade-cli@^1.4.4" && okx --version
+RUN npm install -g "@okx_ai/okx-trade-cli@1.4.4" && okx --version
 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt httpx
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy Backend, Gateway, Scripts, Plugins and Assets
 COPY r20_backend/ ./r20_backend/
@@ -51,13 +51,17 @@ COPY scripts/ ./scripts/
 COPY plugins/ ./plugins/
 COPY dashboard/ ./dashboard/
 COPY docs/ ./docs/
-COPY tests/ ./tests/
 
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Ensure required runtime state folders exist
-RUN mkdir -p /app/data /app/logs /app/backups
+# Create non-root runtime user and ensure writable runtime state folders exist.
+# /app is chowned so the backend can atomically rewrite /app/.env when saving config.
+RUN useradd --create-home --shell /bin/bash r20 && \
+    mkdir -p /app/data /app/logs /app/backups && \
+    chown -R r20:r20 /app
+
+USER r20
 
 EXPOSE 8080
 

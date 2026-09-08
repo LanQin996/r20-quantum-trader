@@ -33,6 +33,10 @@ class GatewaySchedulerTests(unittest.TestCase):
         boundary = self.now.replace(minute=15, second=0)
         self.store.set_state("job.last.trader", boundary.replace(minute=0).isoformat())
         self.assertTrue(self.scheduler.due(trader, boundary, {}))
+        # A missed 10s window no longer skips the slot: it stays due mid-slot.
+        self.assertTrue(self.scheduler.due(trader, boundary.replace(second=11), {}))
+        # ...but once the slot is recorded as run, it is not due again in that slot.
+        self.store.set_state("job.last.trader", boundary.isoformat())
         self.assertFalse(self.scheduler.due(trader, boundary.replace(second=11), {}))
 
     def test_daily_job_runs_once_per_time_slot(self):

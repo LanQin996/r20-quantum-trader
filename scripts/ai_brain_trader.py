@@ -41,7 +41,7 @@ import datetime
 import urllib.request
 import subprocess
 import tempfile
-import fcntl_compat as fcntl
+from file_lock import single_cycle
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -99,25 +99,10 @@ def atomic_write_json(path: str, payload: Any) -> None:
 
 def single_brain_cycle(func):
     """Prevent overlapping cron runs from overwriting the shared decision cache."""
-    def wrapped(*args, **kwargs):
-        os.makedirs(DATA_DIR, exist_ok=True)
-        lock_handle = open(AI_BRAIN_LOCK_FILE, "a+", encoding="utf-8")
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock_handle.close()
-            print("[AI Brain Batch] Skip: another inference cycle is still running")
-            return None
-        try:
-            lock_handle.seek(0)
-            lock_handle.truncate()
-            lock_handle.write(str(os.getpid()))
-            lock_handle.flush()
-            return func(*args, **kwargs)
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-            lock_handle.close()
-    return wrapped
+    return single_cycle(
+        AI_BRAIN_LOCK_FILE,
+        on_skip=lambda: print("[AI Brain Batch] Skip: another inference cycle is still running"),
+    )(func)
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
