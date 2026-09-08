@@ -1,12 +1,20 @@
 services:
   r20-quantum-trader:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/lanqin996/r20-quantum-trader:latest
+    pull_policy: always
+    # 如需本地构建（不用远端镜像），取消下面两行注释，并把 image/pull_policy 注释掉：
+    # build:
+    #   context: .
     container_name: r20-quantum-trader
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # 从宿主机 .env 注入全部配置（LLM/OKX/风控参数等）。
+    # 首次使用前先执行: cp env.example .env 并填写密钥。
+    # 注意不要用 volumes 单文件挂载 .env —— 后台保存配置时会原子重写 /app/.env，
+    # 单文件挂载会导致写入失败。
+    env_file:
+      - .env
     environment:
       - PORT=8080
       - OKX_DEMO=1
