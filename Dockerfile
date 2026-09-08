@@ -16,6 +16,8 @@ RUN npm run build
 # ==========================================
 # Stage 2: Python Runtime & Backend Engine
 # ==========================================
+FROM node:20-bookworm-slim AS node-runtime
+
 FROM python:3.11-slim AS runner
 
 WORKDIR /app
@@ -31,6 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Node.js + official OKX CLI (required by the trading/gateway engine)
+COPY --from=node-runtime /usr/local/bin /usr/local/bin
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN npm install -g "@okx_ai/okx-trade-cli@^1.4.4" && okx --version
 
 # Install Python dependencies
 COPY requirements.txt .
