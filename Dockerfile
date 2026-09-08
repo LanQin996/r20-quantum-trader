@@ -7,6 +7,9 @@ WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci
 
+# The frontend keeps its legacy /images path as a symlink to the shared docs assets.
+# Copy the link target into the builder at the same relative location before Vite scans public/.
+COPY docs/ /app/docs/
 COPY frontend/ ./
 RUN npm run build
 
