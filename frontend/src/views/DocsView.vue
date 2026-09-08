@@ -73,7 +73,7 @@ onUnmounted(() => {
 <template>
   <div class="min-h-screen font-sans transition-colors selection:bg-blue-500/30" style="background-color: var(--bg-app); color: var(--text-main);">
     <!-- Top Header Navigation (Slim & Clean) -->
-    <header class="sticky top-0 z-40 backdrop-blur-md border-b px-3 sm:px-6 h-[48px] flex items-center justify-between transition-colors" style="background-color: var(--bg-header); border-color: var(--border-subtle);">
+    <header class="sticky top-0 z-40 border-b px-3 sm:px-6 h-[48px] flex items-center justify-between transition-colors" style="background-color: var(--bg-header); border-color: var(--border-subtle);">
       <div class="flex items-center space-x-2 sm:space-x-3 min-w-0">
         <button
           @click="router.push('/')"

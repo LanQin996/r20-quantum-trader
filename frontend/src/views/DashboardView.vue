@@ -95,9 +95,9 @@ function setLayout(mode: 'dual' | 'stacked') {
     <div class="h-[46px] sm:h-[50px] shrink-0"></div>
 
     <!-- Dynamic Main Content Based on Active Tab -->
-    <main class="flex-1 max-w-[2048px] w-full mx-auto px-3 sm:px-6 2xl:px-8 pt-3 pb-24 sm:pb-6 space-y-3.5 overflow-x-hidden">
+    <main class="flex-1 max-w-[2048px] w-full mx-auto px-3 sm:px-6 2xl:px-8 pt-3 lg:pt-5 pb-24 sm:pb-8 space-y-3.5 lg:space-y-5 overflow-x-hidden">
       <!-- TAB 1: 实盘矩阵 (TRADING) -->
-      <div v-show="store.activeTab === 'trading'" class="space-y-3.5">
+      <div v-show="store.activeTab === 'trading'" class="space-y-3.5 lg:space-y-5">
         <!-- Sub-Header Controls: Layout Switcher & Status Line -->
         <div class="flex items-center justify-between px-1">
           <div class="flex items-center space-x-2 text-xs font-mono">
@@ -138,9 +138,9 @@ function setLayout(mode: 'dual' | 'stacked') {
         </div>
 
         <!-- Layout Mode 1: Dual-Wing Institutional Workstation (Only when user explicitly chooses dual) -->
-        <div v-if="layoutMode === 'dual'" class="flex flex-col lg:flex-row gap-3.5 items-start">
+        <div v-if="layoutMode === 'dual'" class="flex flex-col lg:flex-row gap-3.5 lg:gap-5 items-start">
           <!-- Left Wing: Master Asset Cockpit + Tactical Desk (60% width on desktop, 62% on 2K wide displays) -->
-          <div class="w-full lg:w-[60%] 2xl:w-[62%] space-y-3.5">
+          <div class="w-full lg:w-[60%] 2xl:w-[62%] space-y-3.5 lg:space-y-5">
             <!-- 1. Master Bento HUD Cockpit -->
             <TopHudRibbon />
             <!-- 2. Integrated Interactive Tactical Desk (Positions + Orders) -->
@@ -154,7 +154,7 @@ function setLayout(mode: 'dual' | 'stacked') {
         </div>
 
         <!-- Layout Mode 2: Stacked Full View (Default: Natural Top-Down Flow) -->
-        <div v-else class="space-y-3.5">
+        <div v-else class="space-y-3.5 lg:space-y-5">
           <TopHudRibbon />
           <TacticalDesk />
           <InstrumentMatrix :layout-mode="layoutMode" />
@@ -212,7 +212,7 @@ function setLayout(mode: 'dual' | 'stacked') {
 
     <!-- Mobile Bottom Navigation Bar (md:hidden) -->
     <nav
-      class="md:hidden fixed inset-x-0 bottom-0 z-50 px-2 py-1.5 border-t backdrop-blur-xl"
+      class="md:hidden fixed inset-x-0 bottom-0 z-50 px-2 py-1.5 border-t"
       style="background-color: var(--bg-header); border-color: var(--border-subtle);"
     >
       <div class="max-w-md mx-auto flex items-center justify-around font-mono">

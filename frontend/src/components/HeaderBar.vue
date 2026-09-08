@@ -54,7 +54,7 @@ const tabs = computed(() => [
 <template>
   <header
     class="fixed top-0 left-0 right-0 z-40 h-[46px] sm:h-[50px] flex items-center border-b transition-colors"
-    style="background-color: var(--bg-header); border-color: var(--border-subtle); backdrop-filter: blur(12px);"
+    style="background-color: var(--bg-header); border-color: var(--border-subtle);"
   >
     <div class="max-w-[2048px] w-full mx-auto px-2.5 sm:px-6 2xl:px-8 flex items-center justify-between gap-1.5 sm:gap-4 overflow-hidden">
       <!-- Left: Minimal Institutional Identity with Bitcoin Logo -->

@@ -116,7 +116,7 @@ const ocoProtectedRatio = computed(() => {
         <div class="text-xl sm:text-2xl lg:text-3xl 2xl:text-4xl font-black font-mono tracking-tight num-tabular" style="color: var(--text-main);">
           ${{ totalEq }}
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono pt-1" style="color: var(--text-muted);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono pt-1" style="color: var(--text-muted);">
           <span>{{ t('hud.availMargin') }}: <strong class="font-bold" style="color: var(--text-main);">${{ availEq }}</strong></span>
           <span>{{ t('hud.initialCapital') }}: <strong class="font-bold" style="color: var(--text-muted);">${{ initialCap }}</strong></span>
         </div>
@@ -132,7 +132,7 @@ const ocoProtectedRatio = computed(() => {
             }"
           ></div>
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono" style="color: var(--text-faint);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono" style="color: var(--text-muted);">
           <span>{{ t('hud.marginUsagePct') }}</span>
           <span class="font-bold text-emerald-400">{{ marginUsage }}%</span>
         </div>
@@ -168,7 +168,7 @@ const ocoProtectedRatio = computed(() => {
         >
           {{ Number(benchmarkNetPnl) >= 0 ? '+' : '' }}{{ benchmarkNetPnl }}
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono pt-1" style="color: var(--text-muted);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono pt-1" style="color: var(--text-muted);">
           <span>{{ t('hud.netRoi') }}: <strong class="text-emerald-400">+{{ benchmarkRoi }}%</strong></span>
           <span>{{ t('hud.sharpeAnchor') }}: <strong class="text-emerald-400">2.1+</strong></span>
         </div>
@@ -184,7 +184,7 @@ const ocoProtectedRatio = computed(() => {
             }"
           ></div>
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono" style="color: var(--text-faint);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono" style="color: var(--text-muted);">
           <span>{{ t('hud.strategyBaseline') }}</span>
           <span class="text-emerald-400 font-bold">{{ t('hud.liveVerified') }}</span>
         </div>
@@ -220,7 +220,7 @@ const ocoProtectedRatio = computed(() => {
         >
           {{ Number(todayNet) >= 0 ? '+' : '' }}{{ todayNet }}
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono pt-1" style="color: var(--text-muted);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono pt-1" style="color: var(--text-muted);">
           <span>{{ t('hud.fundingFee') }}: <strong :class="Number(todayFunding) < 0 ? 'text-rose-400' : 'text-emerald-400'">{{ todayFunding }} U</strong></span>
           <span>{{ t('hud.tradingFee') }}: <strong class="text-rose-400">{{ todayFees }} U</strong></span>
         </div>
@@ -239,7 +239,7 @@ const ocoProtectedRatio = computed(() => {
             :style="{ width: `${100 - winRatePct}%` }"
           ></div>
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono" style="color: var(--text-faint);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono" style="color: var(--text-muted);">
           <span>{{ t('hud.trades') }}: <strong style="color: var(--text-main);">{{ todayTrades }}</strong> {{ t('hud.tradesCount') }} ({{ winTrades }}{{ t('hud.win') }}/{{ lossTrades }}{{ t('hud.loss') }})</span>
           <span>{{ t('hud.rrRatio') }}: <strong class="text-emerald-400">2.0+</strong></span>
         </div>
@@ -276,7 +276,7 @@ const ocoProtectedRatio = computed(() => {
         >
           {{ posUplNum >= 0 ? '+' : '' }}{{ posUplStr }}
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono pt-1" style="color: var(--text-muted);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono pt-1" style="color: var(--text-muted);">
           <span>{{ t('hud.holdingCapital') }}: <strong class="font-bold" style="color: var(--text-main);">${{ totalPosMarginStr }}</strong></span>
           <span>{{ t('hud.notionalExposure') }}: <strong class="font-bold" style="color: var(--text-main);">${{ totalPosNotionalStr }}</strong></span>
         </div>
@@ -300,7 +300,7 @@ const ocoProtectedRatio = computed(() => {
             class="h-full bg-slate-600/30 w-full"
           ></div>
         </div>
-        <div class="flex items-center justify-between text-[10px] sm:text-[11px] font-mono" style="color: var(--text-faint);">
+        <div class="hud-info-row flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono" style="color: var(--text-muted);">
           <span>{{ t('hud.long') }}: <strong class="text-emerald-400">{{ longCount }}</strong> {{ t('hud.short') }}: <strong class="text-rose-400">{{ shortCount }}</strong> ({{ t('hud.totalPos') }}{{ totalPosCount }}{{ t('hud.tradesCount') }})</span>
           <span class="text-emerald-400 font-bold">{{ t('hud.ocoLabel') }}: {{ ocoProtectedRatio }}</span>
         </div>

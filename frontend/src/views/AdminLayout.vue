@@ -362,7 +362,7 @@ const showAboutModal = ref(false)
       <!-- Top Title Header Bar (Clean, Unified) -->
       <header
         class="h-13 sm:h-14 2xl:h-16 border-b px-3 sm:px-6 2xl:px-8 flex items-center justify-between z-20 transition-colors shrink-0"
-        style="background-color: var(--bg-header); border-color: var(--border-subtle); backdrop-filter: blur(12px);"
+        style="background-color: var(--bg-header); border-color: var(--border-subtle);"
       >
         <!-- Mobile Drawer Hamburger + Breadcrumbs -->
         <div class="flex items-center space-x-2 text-xs font-mono min-w-0">

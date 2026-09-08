@@ -8,21 +8,21 @@
 :root.dark,
 :root[data-theme="dark"] {
   --bg-app: #0A0B0E;
-  --bg-header: rgba(14, 15, 18, 0.96);
-  --bg-card: #121317;
-  --bg-card-subtle: #17181E;
-  --bg-card-hover: #1E2028;
-  --bg-input: #0E0F13;
-  --bg-badge: #1C1E26;
+  --bg-header: #0C0D11;
+  --bg-card: #14161C;
+  --bg-card-subtle: #1A1C23;
+  --bg-card-hover: #22242E;
+  --bg-input: #101116;
+  --bg-badge: #1E2029;
 
-  --border-subtle: #242630;
-  --border-medium: #343746;
-  --border-strong: #4F5468;
+  --border-subtle: #272A35;
+  --border-medium: #3A3E4E;
+  --border-strong: #565B70;
 
   --text-main: #F3F4F6;
-  --text-muted: #9CA3AF;
-  /* 原 #6B7280 在卡片底仅 3.84:1，小字号下不达 WCAG AA(4.5:1)，PC 端反馈"看不清"的主因之一 */
-  --text-faint: #8B93A5;
+  /* 双档位次级文本整体提亮一档：深色底中小字号不再"糊"在卡片里 */
+  --text-muted: #A8B0C0;
+  --text-faint: #98A0B4;
 
   /* Dark Titanium / Silver sheen */
   --color-brand: #F3F4F6;
@@ -47,7 +47,7 @@
 
 :root[data-theme="light"] {
   --bg-app: #F8FAFC;
-  --bg-header: rgba(255, 255, 255, 0.92);
+  --bg-header: #FBFCFE;
   --bg-card: #FFFFFF;
   --bg-card-subtle: #F1F5F9;
   --bg-card-hover: #E2E8F0;
@@ -95,9 +95,15 @@ body {
   margin: 0;
   padding: 0;
   min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* 不强制 antialiased：Windows 上次像素渲染让中小字号笔画更实，是全站"发虚/模糊"的主因 */
+  -webkit-font-smoothing: subpixel-antialiased;
+  text-rendering: optimizeLegibility;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* 等宽场景补充中文回退：mono 字体不含中文字形，随机回退会导致中文发虚错位 */
+.font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", monospace;
 }
 
 /* Financial Monospace Numbers */
@@ -726,4 +732,9 @@ code,
 pre {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
+}
+
+/* HUD 卡片信息行：窄屏折行时按整段折行，不在"策略基线 2026-03"这类短语中间断开 */
+.hud-info-row > span {
+  white-space: nowrap;
 }
