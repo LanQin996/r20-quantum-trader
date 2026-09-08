@@ -44,7 +44,8 @@ class ThreeTierRatchetAndCloudSyncTests(unittest.TestCase):
             self.assertTrue(res)
             self.assertEqual(mock_cmd.call_count, 2)
 
-    def test_long_three_tier_ratchet_progression(self):
+    @patch("scripts.ai_factor_trader.ensure_cloud_position_protection", return_value=(True, "verified"))
+    def test_long_three_tier_ratchet_progression(self, _mock_protection):
         f = {
             "instId": "ETH-USDT-SWAP",
             "name": "ETH",
@@ -104,7 +105,8 @@ class ThreeTierRatchetAndCloudSyncTests(unittest.TestCase):
             self.assertEqual(reason, "已移动止盈")
             mock_close.assert_called_once_with("ETH-USDT-SWAP", "long", 2.0)
 
-    def test_short_three_tier_ratchet_progression(self):
+    @patch("scripts.ai_factor_trader.ensure_cloud_position_protection", return_value=(True, "verified"))
+    def test_short_three_tier_ratchet_progression(self, _mock_protection):
         f = {
             "instId": "ETH-USDT-SWAP",
             "name": "ETH",
