@@ -23,6 +23,8 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./backups:/app/backups
+      # 仅当使用 OKX CLI OAuth 登录（而非 API Key 模式）时取消注释，持久化 OAuth 会话：
+      # - ./okx:/root/.okx
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
       interval: 30s
