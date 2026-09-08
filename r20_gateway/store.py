@@ -162,6 +162,15 @@ class GatewayStore:
         with self.connect() as connection:
             connection.execute("UPDATE deliveries SET status='retry' WHERE status='processing'")
 
+    def recover_jobs(self) -> None:
+        """Close job runs orphaned by a worker crash or forced restart."""
+        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE job_runs SET status='failed', finished_at=?, return_code=1, detail=? WHERE status='running'",
+                (now, "worker restarted before job completion"),
+            )
+
     def replay_dead(self, delivery_id: int) -> bool:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:

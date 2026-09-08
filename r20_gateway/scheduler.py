@@ -138,6 +138,8 @@ class GatewayScheduler:
                 command,
                 cwd=ROOT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 timeout=spec.timeout_seconds,
             )

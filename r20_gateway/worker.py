@@ -52,6 +52,7 @@ def run() -> None:
     signal.signal(signal.SIGINT, stop)
     store = GatewayStore(DB_PATH)
     store.recover_processing()
+    store.recover_jobs()
     scheduler = GatewayScheduler(store)
     scheduler.initialize_migration_baseline()
     log("gateway worker started with scheduler ownership")
