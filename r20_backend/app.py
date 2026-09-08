@@ -1232,7 +1232,7 @@ def update_admin_config(payload: AdminConfigUpdate, x_r20_admin_token: str | Non
         raise HTTPException(status_code=400, detail="Webhook 必须以 http:// 或 https:// 开头")
     selected_mode = data.get("okx_environment") or ("demo" if data.get("okx_simulated") else "live" if "okx_simulated" in data else None)
     if selected_mode and selected_mode != settings.okx_environment:
-        import fcntl
+        import fcntl_compat as fcntl
         lock_path = DATA_DIR / ".ai_factor_trader.lock"; lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as lock_handle:
             try: fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1825,7 +1825,7 @@ def manual_close_position(payload: ManualCloseRequest) -> dict[str, Any]:
     refresh_settings()
     if not settings.manual_close_enabled:
         raise HTTPException(status_code=403, detail="后台手动平仓功能未启用")
-    import fcntl
+    import fcntl_compat as fcntl
     lock_path = DATA_DIR / ".ai_factor_trader.lock"; lock_path.parent.mkdir(parents=True, exist_ok=True)
     if actor.get("role") == "legacy" or not admin_auth.verify_password(int(actor["id"]), payload.admin_password):
         raise HTTPException(status_code=403, detail="管理员密码验证失败")

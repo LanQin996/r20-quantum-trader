@@ -42,7 +42,7 @@ import time
 import datetime
 import subprocess
 import urllib.request
-import fcntl
+import fcntl_compat as fcntl
 from typing import Tuple, Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 from market_data_service import fetch_candles, fetch_ticker

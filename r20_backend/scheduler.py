@@ -4,7 +4,7 @@ It owns scheduling but deliberately invokes existing scripts as isolated process
 which preserves each script's file lock and fail-closed behavior.
 """
 from __future__ import annotations
-import fcntl
+import fcntl_compat as fcntl
 import logging
 import subprocess
 import sys

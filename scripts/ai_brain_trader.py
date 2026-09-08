@@ -40,7 +40,7 @@ import datetime
 import urllib.request
 import subprocess
 import tempfile
-import fcntl
+import fcntl_compat as fcntl
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 

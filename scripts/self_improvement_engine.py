@@ -13,7 +13,7 @@ import time
 import datetime
 import urllib.request
 import tempfile
-import fcntl
+import fcntl_compat as fcntl
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 

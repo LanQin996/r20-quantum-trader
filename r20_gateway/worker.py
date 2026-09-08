@@ -1,6 +1,6 @@
 """Single-owner R20 Gateway delivery worker."""
 from __future__ import annotations
-import fcntl
+import fcntl_compat as fcntl
 import signal
 import time
 from datetime import datetime, timedelta, timezone

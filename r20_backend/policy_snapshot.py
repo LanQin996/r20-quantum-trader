@@ -22,10 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None  # type: ignore
+import fcntl_compat as fcntl
 
 from r20_backend.version import __version__
 

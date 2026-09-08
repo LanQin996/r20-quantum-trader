@@ -23,7 +23,7 @@ import json
 import math
 import re
 import copy
-import fcntl
+import fcntl_compat as fcntl
 import hashlib
 import os
 import tempfile
