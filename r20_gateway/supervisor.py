@@ -24,6 +24,26 @@ def _alive(pid: int) -> bool:
 
 def _is_gateway_worker(pid: int) -> bool:
     if not _alive(pid): return False
+    # ``/proc`` is unavailable on Windows.  Query only the target PID via
+    # CIM instead of scanning process names, so unrelated Python processes
+    # cannot be mistaken for the gateway worker.
+    if os.name == "nt":
+        try:
+            query = (
+                "$p=Get-CimInstance Win32_Process -Filter 'ProcessId=%d';"
+                "if ($p) { $p.CommandLine }"
+            ) % pid
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            cmdline = (result.stdout or "").strip().lower()
+            return "r20_gateway.worker" in cmdline
+        except (OSError, subprocess.SubprocessError):
+            return False
     try:
         cmdline=(Path("/proc")/str(pid)/"cmdline").read_bytes().replace(b"\0",b" ").decode(errors="replace")
         cwd=(Path("/proc")/str(pid)/"cwd").resolve()

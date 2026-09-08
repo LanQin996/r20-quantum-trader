@@ -13,7 +13,6 @@ import time
 import datetime
 import urllib.request
 import tempfile
-import fcntl_compat as fcntl
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -23,6 +22,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = Path(PROJECT_ROOT)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+import fcntl_compat as fcntl
 
 try:
     from r20_backend.config import settings as standalone_settings
