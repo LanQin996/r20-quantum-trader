@@ -14,6 +14,7 @@ import SelfEvolutionLab from '../components/SelfEvolutionLab.vue'
 import TradesLedger from '../components/TradesLedger.vue'
 import AiBrainHistory from '../components/AiBrainHistory.vue'
 import FloatingActions from '../components/FloatingActions.vue'
+import CommandPalette from '../components/CommandPalette.vue'
 import {
   LayoutGrid,
   Cpu,
@@ -107,32 +108,13 @@ function setLayout(mode: 'dual' | 'stacked') {
             <span style="color: var(--text-muted);">{{ t('nav.autoCycle') }}</span>
           </div>
 
-          <!-- Layout Mode Switcher (Desktop) -->
-          <div
-            class="hidden md:flex items-center p-0.5 rounded-lg border text-xs font-mono"
-            style="background-color: var(--bg-card); border-color: var(--border-subtle);"
-          >
-            <button
-              @click="setLayout('stacked')"
-              class="flex items-center space-x-1.5 px-2.5 py-1 rounded-md transition-all cursor-pointer"
-              :style="layoutMode === 'stacked'
-                ? { backgroundColor: 'var(--color-brand-bg)', color: 'var(--color-brand)', fontWeight: 'bold' }
-                : { color: 'var(--text-muted)' }"
-              :title="t('nav.allViews')"
-            >
+          <!-- Layout Mode Switcher: icon-only segmented (P4) -->
+          <div class="seg hidden md:inline-flex" :title="t('nav.layoutMode')">
+            <button :class="layoutMode === 'stacked' ? 'seg-on' : ''" @click="setLayout('stacked')" :title="t('nav.allViews')">
               <Rows class="w-3.5 h-3.5" />
-              <span>{{ t('nav.allViews') }}</span>
             </button>
-            <button
-              @click="setLayout('dual')"
-              class="flex items-center space-x-1.5 px-2.5 py-1 rounded-md transition-all cursor-pointer"
-              :style="layoutMode === 'dual'
-                ? { backgroundColor: 'var(--color-brand-bg)', color: 'var(--color-brand)', fontWeight: 'bold' }
-                : { color: 'var(--text-muted)' }"
-              :title="t('nav.dualViews')"
-            >
+            <button :class="layoutMode === 'dual' ? 'seg-on' : ''" @click="setLayout('dual')" :title="t('nav.dualViews')">
               <Columns class="w-3.5 h-3.5" />
-              <span>{{ t('nav.dualViews') }}</span>
             </button>
           </div>
         </div>
@@ -188,17 +170,17 @@ function setLayout(mode: 'dual' | 'stacked') {
       class="border-t py-3 text-center text-xs font-mono transition-colors"
       style="background-color: var(--bg-card); border-color: var(--border-subtle); color: var(--text-muted);"
     >
-      <div class="flex items-center justify-center space-x-2">
+      <div class="flex items-center justify-center space-x-2.5">
         <button
           @click="store.showAboutModal = true"
           class="hover:text-[var(--color-brand)] transition-colors cursor-pointer"
-          title="点击查看开源仓库与项目信息"
+          :title="t('nav.aboutHint')"
         >
-          {{ APP_NAME }} {{ APP_VERSION }}
+          {{ APP_NAME }} v{{ APP_VERSION }}
         </button>
-        <span>•</span>
-        <span>VUE 3 + VITE + TAILWIND CSS</span>
-        <span>•</span>
+        <span style="color: var(--text-faint);">·</span>
+        <span style="color: var(--text-faint);">MIT License</span>
+        <span style="color: var(--text-faint);">·</span>
         <a
           href="https://github.com/555cute/r20-quantum-trader"
           target="_blank"
@@ -208,7 +190,7 @@ function setLayout(mode: 'dual' | 'stacked') {
           GitHub
         </a>
       </div>
-    </footer>
+  </footer>
 
     <!-- Mobile Bottom Navigation Bar (md:hidden) -->
     <nav
@@ -222,7 +204,7 @@ function setLayout(mode: 'dual' | 'stacked') {
           :style="{ color: store.activeTab === 'trading' ? 'var(--color-brand)' : 'var(--text-muted)' }"
         >
           <Terminal class="w-4 h-4 mb-0.5" />
-          <span class="text-[10px] font-bold">综合操盘</span>
+          <span class="text-[11px] font-bold">{{ t('nav.tabMatrix') }}</span>
         </button>
         <button
           @click="store.activeTab = 'factors'"
@@ -230,7 +212,7 @@ function setLayout(mode: 'dual' | 'stacked') {
           :style="{ color: store.activeTab === 'factors' ? 'var(--color-brand)' : 'var(--text-muted)' }"
         >
           <Cpu class="w-4 h-4 mb-0.5" />
-          <span class="text-[10px] font-bold">决策中枢</span>
+          <span class="text-[11px] font-bold">{{ t('nav.tabRadar') }}</span>
         </button>
         <button
           @click="store.activeTab = 'news'"
@@ -238,7 +220,7 @@ function setLayout(mode: 'dual' | 'stacked') {
           :style="{ color: store.activeTab === 'news' ? 'var(--color-brand)' : 'var(--text-muted)' }"
         >
           <Newspaper class="w-4 h-4 mb-0.5" />
-          <span class="text-[10px] font-bold">市场全息</span>
+          <span class="text-[11px] font-bold">{{ t('nav.tabNews') }}</span>
         </button>
         <button
           @click="store.activeTab = 'lab'"
@@ -246,7 +228,7 @@ function setLayout(mode: 'dual' | 'stacked') {
           :style="{ color: store.activeTab === 'lab' ? 'var(--color-brand)' : 'var(--text-muted)' }"
         >
           <Sparkles class="w-4 h-4 mb-0.5" />
-          <span class="text-[10px] font-bold">量子实验室</span>
+          <span class="text-[11px] font-bold">{{ t('nav.tabLab') }}</span>
         </button>
         <button
           @click="store.activeTab = 'history'"
@@ -254,12 +236,13 @@ function setLayout(mode: 'dual' | 'stacked') {
           :style="{ color: store.activeTab === 'history' ? 'var(--color-brand)' : 'var(--text-muted)' }"
         >
           <Receipt class="w-4 h-4 mb-0.5" />
-          <span class="text-[10px] font-bold">审计台账</span>
+          <span class="text-[11px] font-bold">{{ t('nav.tabLedger') }}</span>
         </button>
       </div>
     </nav>
 
     <!-- Global Floating Actions -->
     <FloatingActions />
+    <CommandPalette />
   </div>
 </template>

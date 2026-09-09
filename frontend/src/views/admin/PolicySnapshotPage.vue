@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted , watch} from 'vue'
+import { useI18n } from '../../composables/useI18n'
+const { t } = useI18n()
+import SaveBar from '../../components/admin/SaveBar.vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import {
@@ -37,6 +40,8 @@ const snapshotData = ref<any>(null)
 const archives = ref<any[]>([])
 const errorMsg = ref<string | null>(null)
 const bannerMsg = ref<{ text: string; type: 'ok' | 'err' | 'warn' } | null>(null)
+const bannerSeq = ref(0)
+watch(bannerMsg, () => { bannerSeq.value++ })
 
 // Archive Dialog State
 const showArchiveModal = ref(false)
@@ -154,14 +159,12 @@ onMounted(() => {
 <template>
   <div class="space-y-4">
     <!-- Notice Banner -->
-    <div
-      v-if="bannerMsg"
-      class="p-3 rounded-xl text-xs font-mono border transition-all"
-      :class="bannerMsg.type === 'ok' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : bannerMsg.type === 'warn' ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-rose-500/10 border-rose-500/20 text-rose-400'"
-    >
-      {{ bannerMsg.text }}
-    </div>
-
+    <SaveBar
+          :type="bannerMsg?.type || 'ok'"
+          :text="bannerMsg?.text || ''"
+          :nonce="bannerSeq"
+          @dismiss="bannerMsg = null"
+        />
     <!-- Header Control Station -->
     <div
       class="rounded-2xl border p-4 sm:p-5 2xl:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4"
@@ -177,19 +180,17 @@ onMounted(() => {
         <div>
           <div class="flex items-center space-x-2">
             <h2 class="text-sm 2xl:text-base font-bold font-mono" style="color: var(--text-main);">
-              策略大一统版本快照 (Policy Snapshot Workbench)
+              {{ t('admin.nPolicy') }}
             </h2>
             <span
               v-if="snapshotData?.policy_version"
-              class="text-[10px] 2xl:text-xs font-mono font-bold px-2 py-0.5 rounded border"
+              class="text-[11px] 2xl:text-xs font-mono font-bold px-2 py-0.5 rounded border"
               style="background-color: var(--color-brand-bg); color: var(--color-brand); border-color: var(--color-brand-border);"
             >
               {{ snapshotData.policy_version }}
             </span>
           </div>
-          <p class="text-xs 2xl:text-sm font-mono mt-0.5" style="color: var(--text-muted);">
-            四大策略单元（提示词、自进化、物理拦截、模型委员会）的不可变指纹聚合与具名归档/一键回滚。
-          </p>
+          <p class="text-xs 2xl:text-sm font-mono mt-0.5" style="color: var(--text-muted);"> 策略大一统版本快照 (Policy Snapshot Workbench) —— 四大策略单元（提示词、自进化、物理拦截、模型委员会）的不可变指纹聚合与具名归档/一键回滚。 </p>
         </div>
       </div>
 
@@ -240,7 +241,7 @@ onMounted(() => {
         <div class="flex items-center space-x-2">
           <Hash class="w-4 h-4 2xl:w-5 2xl:h-5 text-purple-400 shrink-0" />
           <div>
-            <div class="text-[10px] 2xl:text-xs text-[#8A99AD]">当前活跃策略版本 (Active Version)</div>
+            <div class="text-[11px] 2xl:text-xs text-[var(--text-muted)]">当前活跃策略版本 (Active Version)</div>
             <div class="font-bold text-sm 2xl:text-base mt-0.5" style="color: var(--text-main);">
               {{ snapshotData.snapshot.policy_version }}
             </div>
@@ -249,7 +250,7 @@ onMounted(() => {
         <div class="flex items-center space-x-2">
           <Activity class="w-4 h-4 2xl:w-5 2xl:h-5 text-cyan-400 shrink-0" />
           <div>
-            <div class="text-[10px] 2xl:text-xs text-[#8A99AD]">不可变指纹哈希 (Fingerprint Hash)</div>
+            <div class="text-[11px] 2xl:text-xs text-[var(--text-muted)]">不可变指纹哈希 (Fingerprint Hash)</div>
             <div class="font-bold text-sm 2xl:text-base mt-0.5 text-cyan-400">
               #{{ snapshotData.snapshot.policy_hash }}
             </div>
@@ -258,7 +259,7 @@ onMounted(() => {
         <div class="flex items-center space-x-2">
           <Clock class="w-4 h-4 2xl:w-5 2xl:h-5 text-emerald-400 shrink-0" />
           <div>
-            <div class="text-[10px] 2xl:text-xs text-[#8A99AD]">快照生成时间 (Snapshot Time)</div>
+            <div class="text-[11px] 2xl:text-xs text-[var(--text-muted)]">快照生成时间 (Snapshot Time)</div>
             <div class="font-bold text-sm 2xl:text-base mt-0.5 text-emerald-400">
               {{ formatTimestamp(snapshotData.snapshot.timestamp) }}
             </div>
@@ -283,7 +284,7 @@ onMounted(() => {
               </div>
               <router-link
                 to="/admin/promptlib"
-                class="text-[10px] font-mono text-blue-400 flex items-center hover:underline"
+                class="text-[11px] font-mono text-blue-400 flex items-center hover:underline"
               >
                 <span>进入配置</span>
                 <ArrowUpRight class="w-3 h-3 ml-0.5" />
@@ -292,21 +293,21 @@ onMounted(() => {
 
             <div class="space-y-1 text-xs font-mono">
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">当前方案名称:</span>
+                <span class="text-[var(--text-muted)]">当前方案名称:</span>
                 <span class="font-bold" style="color: var(--text-main);">
                   {{ snapshotData.snapshot.units?.prompt_profile?.active_profile_name || snapshotData.snapshot.units?.prompt_profile?.active_profile_id }}
                 </span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">模块布局指纹 Layout Hash:</span>
+                <span class="text-[var(--text-muted)]">模块布局指纹 Layout Hash:</span>
                 <span class="text-blue-400 font-bold">#{{ snapshotData.snapshot.units?.prompt_profile?.layout_hash }}</span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">编辑模式 Mode:</span>
+                <span class="text-[var(--text-muted)]">编辑模式 Mode:</span>
                 <span style="color: var(--text-main);">{{ snapshotData.snapshot.units?.prompt_profile?.editor_mode }}</span>
               </div>
               <div class="flex justify-between py-1">
-                <span class="text-[#8A99AD]">插槽延迟渲染保护:</span>
+                <span class="text-[var(--text-muted)]">插槽延迟渲染保护:</span>
                 <span class="text-emerald-400 font-bold">单次延迟渲染 · 未提供数据显式标识</span>
               </div>
             </div>
@@ -332,7 +333,7 @@ onMounted(() => {
               </div>
               <router-link
                 to="/admin/evolution"
-                class="text-[10px] font-mono text-emerald-400 flex items-center hover:underline"
+                class="text-[11px] font-mono text-emerald-400 flex items-center hover:underline"
               >
                 <span>进入配置</span>
                 <ArrowUpRight class="w-3 h-3 ml-0.5" />
@@ -341,23 +342,23 @@ onMounted(() => {
 
             <div class="space-y-1 text-xs font-mono">
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">已发布心法指纹 Version:</span>
+                <span class="text-[var(--text-muted)]">已发布心法指纹 Version:</span>
                 <span class="text-emerald-400 font-bold truncate max-w-[180px]" :title="snapshotData.snapshot.units?.evolution_mind?.version">
                   {{ snapshotData.snapshot.units?.evolution_mind?.version }}
                 </span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">启用心法 / 总收录心法:</span>
+                <span class="text-[var(--text-muted)]">启用心法 / 总收录心法:</span>
                 <span class="font-bold" style="color: var(--text-main);">
                   {{ snapshotData.snapshot.units?.evolution_mind?.enabled_count }} / {{ snapshotData.snapshot.units?.evolution_mind?.total_count }}
                 </span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">白盒审核机制:</span>
+                <span class="text-[var(--text-muted)]">白盒审核机制:</span>
                 <span class="text-emerald-400 font-bold">红线防御 · 审核拒绝硬阻断</span>
               </div>
               <div class="flex justify-between py-1">
-                <span class="text-[#8A99AD]">并发版本安全保护:</span>
+                <span class="text-[var(--text-muted)]">并发版本安全保护:</span>
                 <span class="text-emerald-400 font-bold">CAS 乐观锁 · 428/409 拒绝过期覆盖</span>
               </div>
             </div>
@@ -383,7 +384,7 @@ onMounted(() => {
               </div>
               <router-link
                 to="/admin/interceptors"
-                class="text-[10px] font-mono text-amber-400 flex items-center hover:underline"
+                class="text-[11px] font-mono text-amber-400 flex items-center hover:underline"
               >
                 <span>进入配置</span>
                 <ArrowUpRight class="w-3 h-3 ml-0.5" />
@@ -392,21 +393,21 @@ onMounted(() => {
 
             <div class="space-y-1 text-xs font-mono">
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">核心不可禁用底座:</span>
+                <span class="text-[var(--text-muted)]">核心不可禁用底座:</span>
                 <span class="text-amber-400 font-bold">几何/有限性/75%置信/2.0R</span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">插件管线指纹 Plugins Hash:</span>
+                <span class="text-[var(--text-muted)]">插件管线指纹 Plugins Hash:</span>
                 <span class="text-amber-400 font-bold">#{{ snapshotData.snapshot.units?.physical_interceptors?.plugins_hash }}</span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">启用可选插件:</span>
+                <span class="text-[var(--text-muted)]">启用可选插件:</span>
                 <span class="font-bold" style="color: var(--text-main);">
                   {{ snapshotData.snapshot.units?.physical_interceptors?.enabled_count }} / {{ snapshotData.snapshot.units?.physical_interceptors?.total_count }} 个插件
                 </span>
               </div>
               <div class="flex justify-between py-1">
-                <span class="text-[#8A99AD]">最终发单二次复验:</span>
+                <span class="text-[var(--text-muted)]">最终发单二次复验:</span>
                 <span class="text-emerald-400 font-bold">生效报价缩放/舍入后复验</span>
               </div>
             </div>
@@ -432,7 +433,7 @@ onMounted(() => {
               </div>
               <router-link
                 to="/admin/council"
-                class="text-[10px] font-mono text-purple-400 flex items-center hover:underline"
+                class="text-[11px] font-mono text-purple-400 flex items-center hover:underline"
               >
                 <span>进入配置</span>
                 <ArrowUpRight class="w-3 h-3 ml-0.5" />
@@ -441,7 +442,7 @@ onMounted(() => {
 
             <div class="space-y-1 text-xs font-mono">
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">机制启停状态:</span>
+                <span class="text-[var(--text-muted)]">机制启停状态:</span>
                 <span
                   class="font-bold"
                   :style="snapshotData.snapshot.units?.model_council?.enabled ? { color: 'var(--color-up)' } : { color: 'var(--text-faint)' }"
@@ -450,19 +451,19 @@ onMounted(() => {
                 </span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">真实共识模式 Mode:</span>
+                <span class="text-[var(--text-muted)]">真实共识模式 Mode:</span>
                 <span class="text-purple-400 font-bold">
                   {{ snapshotData.snapshot.units?.model_council?.consensus_mode === 'cross_examination' ? '双轮真实质询 (Cross-Exam)' : '标准提案裁决 (Standard)' }}
                 </span>
               </div>
               <div class="flex justify-between py-1 border-b border-dashed" style="border-color: var(--border-subtle);">
-                <span class="text-[#8A99AD]">活跃交易员席位:</span>
+                <span class="text-[var(--text-muted)]">活跃交易员席位:</span>
                 <span class="font-bold" style="color: var(--text-main);">
                   {{ snapshotData.snapshot.units?.model_council?.active_roles?.length || 0 }} 位一线交易员 + CIO
                 </span>
               </div>
               <div class="flex justify-between py-1">
-                <span class="text-[#8A99AD]">决策采纳追踪 Adopted Role:</span>
+                <span class="text-[var(--text-muted)]">决策采纳追踪 Adopted Role:</span>
                 <span class="text-emerald-400 font-bold">机器可追溯 · 动态截止时间保护</span>
               </div>
             </div>
@@ -485,11 +486,11 @@ onMounted(() => {
             <h3 class="text-sm font-bold font-mono" style="color: var(--text-main);">
               历史策略版本库 (Policy Archive Vault)
             </h3>
-            <span class="text-[10px] font-mono px-2 py-0.5 rounded border" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle); color: var(--text-muted);">
+            <span class="text-[11px] font-mono px-2 py-0.5 rounded border" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle); color: var(--text-muted);">
               {{ archives.length }} 个已归档策略包
             </span>
           </div>
-          <span class="text-[11px] font-mono text-[#8A99AD]">
+          <span class="text-[11px] font-mono text-[var(--text-muted)]">
             可一键将提示词、心法、拦截器及委员会完整还原至指定瞬间
           </span>
         </div>
@@ -507,12 +508,12 @@ onMounted(() => {
             <div class="space-y-1 flex-1 min-w-0">
               <div class="flex items-center space-x-2">
                 <span class="font-bold text-sm" style="color: var(--text-main);">{{ arc.name }}</span>
-                <span class="text-[10px] px-2 py-0.5 rounded border text-cyan-400 border-cyan-500/30 bg-cyan-500/10">
+                <span class="text-[11px] px-2 py-0.5 rounded border text-cyan-400 border-cyan-500/30 bg-cyan-500/10">
                   #{{ arc.policy_hash }}
                 </span>
                 <span
                   v-if="arc.policy_hash === snapshotData.snapshot.policy_hash"
-                  class="text-[9px] font-bold px-2 py-0.2 rounded border text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                  class="text-[11px] font-bold px-2 py-0.2 rounded border text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
                 >
                   ● 当前正在运行
                 </span>
@@ -520,7 +521,7 @@ onMounted(() => {
               <p v-if="arc.description" class="text-[11px]" style="color: var(--text-muted);">
                 {{ arc.description }}
               </p>
-              <div class="flex flex-wrap items-center gap-3 text-[10px] text-[#8A99AD]">
+              <div class="flex flex-wrap items-center gap-3 text-[11px] text-[var(--text-muted)]">
                 <span>归档时间: {{ arc.archived_at }}</span>
                 <span>创建者: {{ arc.author }}</span>
                 <span class="truncate max-w-md">{{ arc.summary }}</span>

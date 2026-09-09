@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted , watch} from 'vue'
+import { useI18n } from '../../composables/useI18n'
+import SaveBar from '../../components/admin/SaveBar.vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import {
@@ -10,10 +12,13 @@ import {
 
 const { api } = useApi()
 const auth = useAuthStore()
+const { t } = useI18n()
 
 const plugins = ref<any[]>([])
 const loading = ref(true)
 const bannerMsg = ref<{ text: string; type: 'ok' | 'err' | 'warn' } | null>(null)
+const bannerSeq = ref(0)
+watch(bannerMsg, () => { bannerSeq.value++ })
 
 // Code Editor Modal State
 const editorVisible = ref(false)
@@ -220,11 +225,9 @@ onMounted(loadPlugins)
         </div>
         <div>
           <h1 class="text-xs sm:text-[13px] font-black font-mono uppercase tracking-wide" style="color: var(--text-main);">
-            物理拦截插件配置中心
+            {{ t('admin.nInterceptors') }}
           </h1>
-          <p class="text-[11px] font-mono mt-0.5" style="color: var(--text-muted);">
-            交易决策发出前必须通过 Python 物理拦截插件管线 (Fail-Closed)
-          </p>
+          <p class="text-[11px] font-mono mt-0.5" style="color: var(--text-muted);"> 物理拦截插件配置中心 —— 交易决策发出前必须通过 Python 物理拦截插件管线 (Fail-Closed) </p>
         </div>
       </div>
       <div class="flex items-center space-x-2">
@@ -251,18 +254,12 @@ onMounted(loadPlugins)
     </div>
 
     <!-- Alert / Banner Message -->
-    <div
-      v-if="bannerMsg"
-      class="p-3 rounded-lg text-xs font-mono border transition-all"
-      :style="bannerMsg.type === 'ok'
-        ? { backgroundColor: 'var(--color-up-bg)', borderColor: 'var(--color-up-border)', color: 'var(--color-up)' }
-        : bannerMsg.type === 'warn'
-        ? { backgroundColor: 'var(--color-warn-bg)', borderColor: 'var(--color-warn-border)', color: 'var(--color-warn)' }
-        : { backgroundColor: 'var(--color-down-bg)', borderColor: 'var(--color-down-border)', color: 'var(--color-down)' }"
-    >
-      {{ bannerMsg.text }}
-    </div>
-
+    <SaveBar
+          :type="bannerMsg?.type || 'ok'"
+          :text="bannerMsg?.text || ''"
+          :nonce="bannerSeq"
+          @dismiss="bannerMsg = null"
+        />
     <!-- Loading State -->
     <div v-if="loading" class="py-12 text-center text-xs font-mono" style="color: var(--text-muted);">正在扫描加载物理拦截插件...</div>
 
@@ -311,13 +308,13 @@ onMounted(loadPlugins)
               <h3 class="text-sm font-bold tracking-wide truncate" style="color: var(--text-main);">
                 {{ p.name || p.filename }}
               </h3>
-              <span class="px-2 py-0.5 rounded text-[10px] font-mono border" style="background-color: var(--bg-badge); border-color: var(--border-subtle); color: var(--text-muted);">
+              <span class="px-2 py-0.5 rounded text-[11px] font-mono border" style="background-color: var(--bg-badge); border-color: var(--border-subtle); color: var(--text-muted);">
                 {{ p.filename }}
               </span>
-              <span v-if="p.version" class="px-1.5 py-0.2 rounded text-[10px] font-bold border" style="background-color: var(--color-brand-bg); color: var(--color-brand); border-color: var(--color-brand-border);">
+              <span v-if="p.version" class="px-1.5 py-0.2 rounded text-[11px] font-bold border" style="background-color: var(--color-brand-bg); color: var(--color-brand); border-color: var(--color-brand-border);">
                 v{{ p.version }}
               </span>
-              <span v-if="p.author" class="text-[10px]" style="color: var(--text-faint);">
+              <span v-if="p.author" class="text-[11px]" style="color: var(--text-faint);">
                 by {{ p.author }}
               </span>
             </div>
@@ -331,7 +328,7 @@ onMounted(loadPlugins)
               <span
                 v-for="t in p.tags"
                 :key="t"
-                class="px-2 py-0.5 rounded text-[10px] border font-mono"
+                class="px-2 py-0.5 rounded text-[11px] border font-mono"
                 style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle); color: var(--text-muted);"
               >
                 {{ t }}
@@ -395,9 +392,9 @@ onMounted(loadPlugins)
             <div class="min-w-0 flex-1">
               <h3 class="text-xs sm:text-sm font-bold flex flex-wrap items-center gap-1.5" style="color: var(--text-main);">
                 <span class="truncate max-w-[180px] sm:max-w-[320px]">{{ editingName }}</span>
-                <span class="text-[10px] sm:text-xs font-normal font-mono truncate max-w-[140px] sm:max-w-[200px]" style="color: var(--text-faint);">({{ editingFilename }})</span>
+                <span class="text-[11px] sm:text-xs font-normal font-mono truncate max-w-[140px] sm:max-w-[200px]" style="color: var(--text-faint);">({{ editingFilename }})</span>
               </h3>
-              <p class="text-[10px] hidden sm:block truncate mt-0.5" style="color: var(--text-muted);">Python 源码热更新，保存后下一轮决策实时执行</p>
+              <p class="text-[11px] hidden sm:block truncate mt-0.5" style="color: var(--text-muted);">Python 源码热更新，保存后下一轮决策实时执行</p>
             </div>
           </div>
           <div class="flex items-center space-x-1.5 shrink-0">
@@ -436,7 +433,7 @@ onMounted(loadPlugins)
 
         <!-- Modal Footer -->
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-3 border-t" style="border-color: var(--border-subtle);">
-          <div class="text-[10px] sm:text-[11px] font-mono truncate" style="color: var(--text-faint);" title="def check_risk(package, decision, context) -> tuple[bool, str]">
+          <div class="text-[11px] sm:text-[11px] font-mono truncate" style="color: var(--text-faint);" title="def check_risk(package, decision, context) -> tuple[bool, str]">
             <span class="font-bold">接口契约:</span> <code class="opacity-80">check_risk(package, decision, ctx)</code>
           </div>
           <div class="flex items-center justify-end space-x-2 shrink-0">
@@ -475,7 +472,7 @@ onMounted(loadPlugins)
             </div>
             <div>
               <h3 class="text-xs sm:text-sm font-bold" style="color: var(--text-main);">新建物理拦截插件</h3>
-              <p class="text-[10px] hidden sm:block" style="color: var(--text-muted);">编写自定义 Python 拦截规则，适配策略广场规范</p>
+              <p class="text-[11px] hidden sm:block" style="color: var(--text-muted);">编写自定义 Python 拦截规则，适配策略广场规范</p>
             </div>
           </div>
           <button @click="createModalVisible = false" class="cursor-pointer p-1" style="color: var(--text-muted);">
@@ -541,7 +538,7 @@ onMounted(loadPlugins)
             </div>
             <div>
               <h3 class="text-xs sm:text-sm font-bold" style="color: var(--text-main);">沙箱拦截回归测试报告</h3>
-              <p class="text-[10px]" style="color: var(--text-muted);">
+              <p class="text-[11px]" style="color: var(--text-muted);">
                 已激活 {{ testResults.enabled_plugins_count }}/{{ testResults.total_plugins_count }} 个拦截插件 · 总执行耗时 {{ testResults.duration_total_ms }}ms
               </p>
             </div>
@@ -563,9 +560,9 @@ onMounted(loadPlugins)
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mb-1.5">
               <span class="text-xs font-bold" style="color: var(--text-main);">{{ r.scenario }}</span>
               <div class="flex items-center space-x-2">
-                <span class="text-[10px] font-mono" style="color: var(--text-faint);">{{ r.duration_ms }}ms</span>
+                <span class="text-[11px] font-mono" style="color: var(--text-faint);">{{ r.duration_ms }}ms</span>
                 <span
-                  class="px-2 py-0.5 rounded text-[10px] font-bold border"
+                  class="px-2 py-0.5 rounded text-[11px] font-bold border"
                   :style="r.intercepted
                     ? { backgroundColor: 'var(--bg-card)', borderColor: 'var(--color-warn-border)', color: 'var(--color-warn)' }
                     : { backgroundColor: 'var(--bg-card)', borderColor: 'var(--color-up-border)', color: 'var(--color-up)' }"

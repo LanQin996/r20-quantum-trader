@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useI18n } from '../../composables/useI18n'
+const { t } = useI18n()
 import { useApi } from '../../composables/useApi'
+import PageHeader from '../../components/admin/PageHeader.vue'
+import SaveBar from '../../components/admin/SaveBar.vue'
+import DangerZone from '../../components/admin/DangerZone.vue'
 import {
   ShieldAlert,
   Save,
@@ -20,6 +25,8 @@ const { api } = useApi()
 const loading = ref(true)
 const busy = ref<'save' | 'reset' | ''>('')
 const bannerMsg = ref<{ text: string; type: 'ok' | 'err' | 'warn' } | null>(null)
+const bannerSeq = ref(0)
+watch(bannerMsg, () => { bannerSeq.value++ })
 
 const schema = ref<{ groups: any[]; params: any[] } | null>(null)
 const suites = ref<any[]>([])
@@ -122,7 +129,6 @@ function revertOne(p: any) {
   disp[p.key] = toDisplay(p, p.default)
 }
 
-const resetConfirm = ref('')
 
 async function saveChanges() {
   if (!dirtyKeys.value.length) return
@@ -141,7 +147,6 @@ async function saveChanges() {
     for (const k of dirtyKeys.value) values[k] = draft[k]
     const res = await api('/api/v1/admin/risk', { method: 'POST', body: JSON.stringify({ values }) })
     syncFromServer(res.values)
-    resetConfirm.value = ''
     bannerMsg.value = { text: `已保存 ${res.updated.length} 项修改 ✓ ${res.effect}`, type: 'ok' }
   } catch (e: any) {
     bannerMsg.value = { text: `保存失败: ${e.message}`, type: 'err' }
@@ -151,16 +156,11 @@ async function saveChanges() {
 }
 
 async function resetAll() {
-  if (resetConfirm.value.trim().toUpperCase() !== 'RESET RISK') {
-    bannerMsg.value = { text: '确认短语必须精确为：RESET RISK', type: 'err' }
-    return
-  }
   busy.value = 'reset'
   bannerMsg.value = null
   try {
-    const res = await api('/api/v1/admin/risk/reset', { method: 'POST', body: JSON.stringify({ confirmation: resetConfirm.value }) })
+    const res = await api('/api/v1/admin/risk/reset', { method: 'POST', body: JSON.stringify({ confirmation: 'RESET RISK' }) })
     syncFromServer(res.values)
-    resetConfirm.value = ''
     bannerMsg.value = { text: `已恢复代码默认基线 ✓ ${res.effect}`, type: 'ok' }
   } catch (e: any) {
     bannerMsg.value = { text: `重置失败: ${e.message}`, type: 'err' }
@@ -174,47 +174,32 @@ onMounted(loadData)
 
 <template>
   <div class="space-y-4 max-w-[1400px] mx-auto pb-24">
-    <!-- Header -->
-    <div class="panel-banner-compact">
-      <div class="flex items-center space-x-2.5">
-        <div class="panel-banner-icon">
-          <ShieldAlert class="w-3.5 h-3.5" />
-        </div>
-        <div>
-          <h1 class="text-xs sm:text-[13px] font-black font-mono uppercase tracking-wide" style="color: var(--text-main);">
-            执行层风控管理 (Fail-Closed Hard Risk Gates)
-          </h1>
-          <p class="text-[11px] font-mono mt-0.5" style="color: var(--text-muted);">
-            仓位敞口 · 单笔风险 · 止损熔断 · 金字塔加仓 —— 全部硬门禁集中配置
-          </p>
-        </div>
-      </div>
-      <span class="badge-lever">
-        {{ dirtyKeys.length ? `${dirtyKeys.length} 项待保存` : '与线上口径一致' }}
-      </span>
-    </div>
+    <PageHeader
+      :title="t('admin.nRisk')"
+      description="执行层风控管理 (Fail-Closed Hard Risk Gates) —— 仓位敞口 · 单笔风险 · 止损熔断 · 金字塔加仓，全部硬门禁集中配置"
+    >
+      <template #actions>
+        <span class="badge-lever">
+          {{ dirtyKeys.length ? `${dirtyKeys.length} 项待保存` : '与线上口径一致' }}
+        </span>
+      </template>
+    </PageHeader>
 
     <!-- Effect banner -->
     <div class="p-3 rounded-lg text-[11px] font-mono border flex items-start gap-2" style="background-color: var(--bg-card); border-color: var(--border-subtle); color: var(--text-muted);">
-      <Info class="w-3.5 h-3.5 shrink-0 mt-0.5" style="color: var(--accent, #3875F6);" />
+      <Info class="w-3.5 h-3.5 shrink-0 mt-0.5" style="color: var(--accent, var(--color-info));" />
       <div class="space-y-1">
         <p>{{ effectText || '保存后下一巡检周期自动生效，无需重启。' }}</p>
         <p class="opacity-80">注：本页为执行层代码硬拦截；「物理拦截插件」与「提示词工坊」中的 AI 侧门禁（如置信度、顺势铁律）在各自页面独立配置，双层防线互为兜底。</p>
       </div>
     </div>
 
-    <!-- Banner -->
-    <div
-      v-if="bannerMsg"
-      class="p-3 rounded-lg text-xs font-mono border"
-      :class="bannerMsg.type === 'ok' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : bannerMsg.type === 'warn' ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-rose-500/10 border-rose-500/20 text-rose-400'"
-    >
-      <div class="flex items-center gap-2">
-        <CheckCircle2 v-if="bannerMsg.type === 'ok'" class="w-4 h-4 shrink-0" />
-        <AlertCircle v-else class="w-4 h-4 shrink-0" />
-        <span>{{ bannerMsg.text }}</span>
-      </div>
-    </div>
+    <SaveBar
+      :type="bannerMsg?.type || 'ok'"
+      :text="bannerMsg?.text || ''"
+      :nonce="bannerSeq"
+      @dismiss="bannerMsg = null"
+    />
 
     <div v-if="loading" class="flex items-center justify-center py-24">
       <Loader2 class="w-6 h-6 animate-spin" style="color: var(--text-muted);" />
@@ -233,10 +218,10 @@ onMounted(loadData)
         >
           <div class="flex items-center justify-between gap-2">
             <h3 class="text-xs font-black font-mono" style="color: var(--text-main);">{{ s.name }}</h3>
-            <span v-if="activeSuiteId === s.id" class="text-[9px] font-mono px-1.5 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">当前生效</span>
-            <span v-else class="text-[9px] font-mono opacity-60" style="color: var(--text-muted);">{{ s.tagline }}</span>
+            <span v-if="activeSuiteId === s.id" class="text-[11px] font-mono px-1.5 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">当前生效</span>
+            <span v-else class="text-[11px] font-mono opacity-60" style="color: var(--text-muted);">{{ s.tagline }}</span>
           </div>
-          <p class="text-[10px] font-mono leading-relaxed flex-1" style="color: var(--text-muted);">{{ s.desc }}</p>
+          <p class="text-[11px] font-mono leading-relaxed flex-1" style="color: var(--text-muted);">{{ s.desc }}</p>
           <button
             @click="applySuite(s)"
             :disabled="busy !== '' || activeSuiteId === s.id"
@@ -259,7 +244,7 @@ onMounted(loadData)
           <component :is="groupIcons[group.id] || ShieldAlert" class="w-4 h-4" style="color: var(--text-main);" />
           <div>
             <h2 class="text-xs font-black font-mono uppercase tracking-wide" style="color: var(--text-main);">{{ group.label }}</h2>
-            <p class="text-[10px] font-mono mt-0.5" style="color: var(--text-muted);">{{ group.desc }}</p>
+            <p class="text-[11px] font-mono mt-0.5" style="color: var(--text-muted);">{{ group.desc }}</p>
           </div>
         </div>
 
@@ -273,10 +258,10 @@ onMounted(loadData)
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="text-xs font-mono font-bold" style="color: var(--text-main);">{{ p.label }}</span>
-                <span v-if="isCustomized(p)" class="text-[9px] font-mono px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400">已自定义</span>
+                <span v-if="isCustomized(p)" class="text-[11px] font-mono px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400">已自定义</span>
               </div>
-              <p class="text-[10px] font-mono mt-1 leading-relaxed" style="color: var(--text-muted);">{{ p.desc }}</p>
-              <p class="text-[9px] font-mono mt-0.5 opacity-60" style="color: var(--text-muted);">
+              <p class="text-[11px] font-mono mt-1 leading-relaxed" style="color: var(--text-muted);">{{ p.desc }}</p>
+              <p class="text-[11px] font-mono mt-0.5 opacity-60" style="color: var(--text-muted);">
                 默认 {{ toDisplay(p, p.default) }} {{ p.unit }} · 范围 {{ toDisplay(p, p.min) }} ~ {{ toDisplay(p, p.max) }} {{ p.unit }} · <span class="opacity-70">{{ p.key }}</span>
               </p>
             </div>
@@ -293,7 +278,7 @@ onMounted(loadData)
                   style="background: transparent; color: var(--text-main);"
                   :class="draft[p.key] < p.min || draft[p.key] > p.max ? 'ring-1 ring-rose-500' : ''"
                 />
-                <span class="px-2 text-[10px] font-mono whitespace-nowrap select-none" style="color: var(--text-muted);">{{ p.unit }}</span>
+                <span class="px-2 text-[11px] font-mono whitespace-nowrap select-none" style="color: var(--text-muted);">{{ p.unit }}</span>
               </div>
               <button
                 v-if="Math.abs((draft[p.key] ?? 0) - p.default) > 1e-9"
@@ -309,27 +294,14 @@ onMounted(loadData)
         </div>
       </div>
 
-      <!-- Danger zone: reset -->
-      <div class="rounded-xl border p-4" style="background-color: var(--bg-card); border-color: var(--border-subtle);">
-        <h2 class="text-xs font-black font-mono uppercase tracking-wide mb-1" style="color: var(--text-main);">恢复出厂基线</h2>
-        <p class="text-[10px] font-mono mb-3" style="color: var(--text-muted);">清除全部自定义覆盖值，执行层回退到代码默认基线。需输入确认短语。</p>
-        <div class="flex flex-col sm:flex-row gap-2 sm:items-center">
-          <input
-            v-model="resetConfirm"
-            placeholder="输入 RESET RISK"
-            class="flex-1 rounded-lg px-3 py-2 text-xs font-mono outline-none border"
-            style="background-color: var(--bg-input); border-color: var(--border-subtle); color: var(--text-main);"
-          />
-          <button
-            @click="resetAll"
-            :disabled="busy !== '' || !resetConfirm"
-            class="px-4 py-2 rounded-lg text-xs font-mono font-bold border border-rose-500/30 text-rose-400 hover:bg-rose-500/10 disabled:opacity-40 transition-colors flex items-center gap-1.5"
-          >
-            <RotateCcw class="w-3.5 h-3.5" />
-            {{ busy === 'reset' ? '重置中…' : '全部恢复默认' }}
-          </button>
-        </div>
-      </div>
+      <!-- Danger zone: reset (P2 shared component) -->
+      <DangerZone
+        title="恢复出厂基线"
+        description="清除全部自定义覆盖值，执行层回退到代码默认基线；覆盖值本身不可恢复。"
+        confirm-phrase="RESET RISK"
+        :action-label="busy === 'reset' ? '重置中…' : '全部恢复默认'"
+        @confirm="resetAll"
+      />
     </template>
 
     <!-- Sticky save bar -->

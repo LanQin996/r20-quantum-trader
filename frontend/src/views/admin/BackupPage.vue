@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted , watch} from 'vue'
+import { useI18n } from '../../composables/useI18n'
+const { t } = useI18n()
+import SaveBar from '../../components/admin/SaveBar.vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { HardDrive, RefreshCw, PlugZap, Save, PlayCircle, Archive, AlertCircle, Download, Upload, RotateCcw } from 'lucide-vue-next'
@@ -10,6 +13,8 @@ const auth = useAuthStore()
 const loading = ref(true)
 const busy = ref<'test' | 'save' | 'run' | 'restore' | 'upload' | ''>('')
 const bannerMsg = ref<{ text: string; type: 'ok' | 'warn' | 'err' } | null>(null)
+const bannerSeq = ref(0)
+watch(bannerMsg, () => { bannerSeq.value++ })
 const downloadingArchive = ref<string>('')
 
 const simple = ref<any>(null)
@@ -247,14 +252,16 @@ onMounted(load)
 <template>
   <div class="space-y-4">
     <div class="flex items-center justify-between">
-      <p class="text-xs text-[#707E94] font-mono">支持本地/云端全量数据灾备、备份打包直接下载、本地备份上传与一键全量恢复。</p>
-      <span class="text-[10px] font-mono text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20">集成与保障 · 2/3</span>
+      <p class="text-xs text-[var(--text-faint)] font-mono">支持本地/云端全量数据灾备、备份打包直接下载、本地备份上传与一键全量恢复。</p>
+      <span class="text-[11px] font-mono text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20">集成与保障 · 2/3</span>
     </div>
 
-    <div v-if="bannerMsg" class="p-3 rounded-lg text-xs font-mono border" :class="bannerMsg.type === 'ok' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : bannerMsg.type === 'warn' ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-rose-500/10 border-rose-500/20 text-rose-400'">
-      <div class="flex items-start gap-2"><AlertCircle v-if="bannerMsg.type !== 'ok'" class="w-4 h-4 shrink-0 mt-0.5" /><span>{{ bannerMsg.text }}</span></div>
-    </div>
-
+    <SaveBar
+          :type="bannerMsg?.type || 'ok'"
+          :text="bannerMsg?.text || ''"
+          :nonce="bannerSeq"
+          @dismiss="bannerMsg = null"
+        />
     <div v-if="loading" class="py-12 text-center text-xs font-mono" style="color: var(--text-muted);"><RefreshCw class="w-5 h-5 animate-spin inline mr-1.5" style="color: var(--color-brand);" />正在加载灾备配置...</div>
 
     <template v-else-if="simple">
@@ -263,7 +270,8 @@ onMounted(load)
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center space-x-2">
             <HardDrive class="w-4 h-4" style="color: var(--color-brand);" />
-            <h2 class="text-sm font-bold font-mono" style="color: var(--text-main);">自动灾备</h2>
+            <h2 class="text-sm font-bold font-mono" style="color: var(--text-main);">{{ t('admin.nBackup') }}</h2>
+        <p class="text-[11px] font-mono mt-0.5" style="color: var(--text-muted);"> 自动灾备 </p>
           </div>
           <label class="flex items-center space-x-2 text-xs font-mono cursor-pointer">
             <input v-model="enabled" type="checkbox" class="accent-blue-500 w-4 h-4" :disabled="!auth.isSuperadmin" />
@@ -329,8 +337,8 @@ onMounted(load)
             <input ref="uploadFileInput" type="file" accept=".tar.gz,.tgz" class="hidden" @change="onFileSelected" />
             <button @click="triggerUpload" :disabled="busy !== ''" class="flex items-center space-x-1 px-3 py-2 rounded-lg border text-xs font-mono font-bold cursor-pointer disabled:opacity-40 transition-all shadow-xs" style="background-color: var(--bg-card-subtle); border-color: var(--border-medium); color: var(--color-brand);"><Upload class="w-3.5 h-3.5" /><span>{{ busy === 'upload' ? '正在上传...' : '上传备份包' }}</span></button>
           </template>
-          <span v-else class="text-[10px] font-mono" style="color: var(--text-faint);">只读视图 · 修改需超级管理员登录</span>
-          <span class="ml-auto text-[10px] font-mono font-bold" :class="simple.configured ? 'text-emerald-500' : 'text-amber-500'">{{ simple.configured ? '● 目标已配置' : '● 目标未配置' }}</span>
+          <span v-else class="text-[11px] font-mono" style="color: var(--text-faint);">只读视图 · 修改需超级管理员登录</span>
+          <span class="ml-auto text-[11px] font-mono font-bold" :class="simple.configured ? 'text-emerald-500' : 'text-amber-500'">{{ simple.configured ? '● 目标已配置' : '● 目标未配置' }}</span>
         </div>
       </div>
 
@@ -343,7 +351,7 @@ onMounted(load)
             <div class="flex justify-between border rounded-lg px-3 py-2" style="background-color: var(--bg-card-subtle); border-color: var(--border-subtle);"><span style="color: var(--text-muted);">状态</span><span class="text-emerald-500 font-bold">{{ simple.latest.status || 'success' }}</span></div>
           </div>
           <div v-else class="py-6 text-center text-xs font-mono" style="color: var(--text-faint);">尚无匹配的灾备清单记录</div>
-          <div class="text-[10px] font-mono mt-3 leading-relaxed" style="color: var(--text-faint);">{{ status?.schedule }}</div>
+          <div class="text-[11px] font-mono mt-3 leading-relaxed" style="color: var(--text-faint);">{{ status?.schedule }}</div>
         </div>
 
         <!-- Local archives -->
@@ -353,7 +361,7 @@ onMounted(load)
               <Archive class="w-4 h-4 text-cyan-400" />
               <h2 class="text-xs font-black font-mono uppercase tracking-wide" style="color: var(--text-main);">备份归档清单 ({{ status?.local_archives?.length ?? 0 }})</h2>
             </div>
-            <span class="text-[10px] font-mono" style="color: var(--text-faint);">支持直接下载与一键恢复</span>
+            <span class="text-[11px] font-mono" style="color: var(--text-faint);">支持直接下载与一键恢复</span>
           </div>
           <div class="table-scroll-container">
             <table v-if="status?.local_archives?.length" class="w-full text-left text-xs font-mono whitespace-nowrap">

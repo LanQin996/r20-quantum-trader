@@ -49,17 +49,16 @@ onMounted(() => {
   }
 })
 
+/* P4 deep: single unified symbol selector — full factor pool first, then any extras with positions/orders.
+   Click = filter table + focus chart (chart's own chip row removed). */
 const availableSymbols = computed(() => {
-  const set = new Set<string>()
-  store.positions.forEach((p) => {
-    const s = p.name || p.instId.split('-')[0]
-    if (s) set.add(s)
-  })
-  store.pendingOrders.forEach((o) => {
-    const s = o.name || o.instId.split('-')[0]
-    if (s) set.add(s)
-  })
-  return ['ALL', ...Array.from(set)]
+  const list: string[] = []
+  const seen = new Set<string>()
+  const push = (s?: string) => { if (s && !seen.has(s)) { seen.add(s); list.push(s) } }
+  store.factors.forEach((f: any) => push(f.name || String(f.instId || '').split('-')[0]))
+  store.positions.forEach((p) => push(p.name || p.instId.split('-')[0]))
+  store.pendingOrders.forEach((o) => push(o.name || o.instId.split('-')[0]))
+  return ['ALL', ...list]
 })
 
 const filteredPositions = computed(() => {
@@ -130,7 +129,7 @@ const allProtected = computed(() =>
           <Activity class="w-3.5 h-3.5 2xl:w-4 2xl:h-4" />
           <span>{{ t('desk.activePositions') }}</span>
           <span
-            class="px-1.5 py-0.2 2xl:px-2 rounded-full text-[10px] 2xl:text-xs font-mono font-bold"
+            class="px-1.5 py-0.2 2xl:px-2 rounded-full text-[11px] 2xl:text-xs font-mono font-bold"
             :style="activeTab === 'positions'
               ? { backgroundColor: 'var(--text-main)', color: 'var(--bg-card)' }
               : { backgroundColor: 'var(--bg-badge)', color: 'var(--text-muted)' }"
@@ -150,7 +149,7 @@ const allProtected = computed(() =>
           <Clock class="w-3.5 h-3.5 2xl:w-4 2xl:h-4" />
           <span>{{ t('desk.pendingOrders') }}</span>
           <span
-            class="px-1.5 py-0.2 2xl:px-2 rounded-full text-[10px] 2xl:text-xs font-mono font-bold"
+            class="px-1.5 py-0.2 2xl:px-2 rounded-full text-[11px] 2xl:text-xs font-mono font-bold"
             :style="activeTab === 'orders'
               ? { backgroundColor: 'var(--text-main)', color: 'var(--bg-card)' }
               : { backgroundColor: 'var(--bg-badge)', color: 'var(--text-muted)' }"
@@ -177,32 +176,16 @@ const allProtected = computed(() =>
           </button>
         </div>
 
-        <!-- Cloud OCO Status Badge -->
-        <div
-          class="h-7.5 2xl:h-8.5 flex items-center space-x-1.5 text-xs 2xl:text-sm font-mono px-2.5 2xl:px-3.5 rounded-lg border font-medium"
-          :style="{
-            backgroundColor: allProtected ? 'var(--color-up-bg)' : 'var(--color-warn-bg)',
-            borderColor: allProtected ? 'var(--color-up-border)' : 'var(--color-warn-border)',
-            color: allProtected ? 'var(--color-up)' : 'var(--color-warn)'
-          }"
-        >
-          <ShieldCheck v-if="allProtected" class="w-3.5 h-3.5 2xl:w-4 2xl:h-4" />
-          <ShieldAlert v-else class="w-3.5 h-3.5 2xl:w-4 2xl:h-4" />
-          <span class="hidden md:inline">{{ allProtected ? t('desk.ocoProtected', '100% 交易所云端 OCO 止损') : '部分仓位未设止损' }}</span>
-          <span class="md:hidden">{{ allProtected ? '100% OCO' : '未全覆盖' }}</span>
-        </div>
-
-        <!-- Toggle Chart Deck Button -->
+        <!-- Toggle Chart Deck Button (icon-only, P1) -->
         <button
           @click="showChart = !showChart"
-          class="h-7.5 2xl:h-8.5 px-2.5 2xl:px-3 rounded-lg border text-xs 2xl:text-sm font-mono flex items-center space-x-1.5 transition-all cursor-pointer font-bold shrink-0"
+          class="h-7.5 2xl:h-8.5 w-7.5 2xl:w-8.5 flex items-center justify-center rounded-lg border transition-all cursor-pointer shrink-0"
           :style="showChart
             ? { backgroundColor: 'var(--color-brand-bg)', borderColor: 'var(--color-brand-border)', color: 'var(--color-brand)' }
             : { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }"
-          title="展开/收起 K线与四维交易线可视化操盘画板"
+          :title="showChart ? t('desk.collapseChart') : t('desk.openChart')"
         >
           <LineChart class="w-3.5 h-3.5 2xl:w-4 2xl:h-4" />
-          <span>{{ showChart ? '收起图表' : 'K线操盘台' }}</span>
         </button>
       </div>
     </div>
@@ -285,7 +268,7 @@ const allProtected = computed(() =>
 
               <!-- 持仓量 -->
               <td class="py-3 px-4 2xl:px-6 2xl:py-3.5 font-bold num-tabular" style="color: var(--text-main);">
-                {{ pos.pos }} <span class="text-[10px] 2xl:text-xs font-normal" style="color: var(--text-faint);">张</span>
+                {{ pos.pos }} <span class="text-[11px] 2xl:text-xs font-normal" style="color: var(--text-faint);">张</span>
               </td>
 
               <!-- 开仓均价 -->
@@ -300,7 +283,7 @@ const allProtected = computed(() =>
 
               <!-- 实际保证金 -->
               <td class="py-3 px-4 2xl:px-6 2xl:py-3.5 font-mono num-tabular" style="color: var(--text-main);">
-                ${{ fmt2(pos.margin_usdt ?? pos.margin) }} <span class="text-[10px] 2xl:text-xs" style="color: var(--text-faint);">U</span>
+                ${{ fmt2(pos.margin_usdt ?? pos.margin) }} <span class="text-[11px] 2xl:text-xs" style="color: var(--text-faint);">U</span>
               </td>
 
               <!-- 云端止损防线 -->
@@ -325,7 +308,7 @@ const allProtected = computed(() =>
                   {{ Number(pos.upl) >= 0 ? '+' : '' }}{{ fmt2(pos.upl) }} U
                 </div>
                 <div
-                  class="text-[10px] 2xl:text-xs font-bold font-mono num-tabular"
+                  class="text-[11px] 2xl:text-xs font-bold font-mono num-tabular"
                   :style="{ color: Number(pos.uplRatio ?? pos.roi) >= 0 ? 'var(--color-up)' : 'var(--color-down)' }"
                 >
                   {{ Number(pos.uplRatio ?? pos.roi) >= 0 ? '+' : '' }}{{ fmt2(pos.uplRatio ?? pos.roi) }}%

@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted , watch} from 'vue'
+import { useI18n } from '../../composables/useI18n'
+const { t } = useI18n()
+import SaveBar from '../../components/admin/SaveBar.vue'
 import { useApi } from '../../composables/useApi'
 import { MessageCircle, Zap, CheckCircle2, AlertCircle } from 'lucide-vue-next'
 
@@ -17,6 +20,8 @@ const enabledChannelsCount = computed(() => {
 })
 
 const bannerMsg = ref<{ type: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+const bannerSeq = ref(0)
+watch(bannerMsg, () => { bannerSeq.value++ })
 let bannerTimer: any = null
 
 function showNotificationBanner(type: 'ok' | 'warn' | 'error', text: string) {
@@ -223,19 +228,14 @@ async function saveSchedule() {
 onMounted(() => {
   loadConfig()
 })
-
-onUnmounted(() => {
-  if (captureTimer) { clearInterval(captureTimer); captureTimer = null }
-  stopBindPolling()
-})
 </script>
 
 <template>
   <div class="space-y-4 max-w-[2048px] mx-auto">
     <div class="flex items-center justify-between">
-      <p class="text-xs font-mono" style="color: var(--text-muted);">逐通道配置、仅诊断、发送测试；最后统一保存投递时间。</p>
+      <p class="text-xs font-mono" style="color: var(--text-muted);"> QQ 官方应用 Bot —— 逐通道配置、仅诊断、发送测试；最后统一保存投递时间。 </p>
       <span
-        class="text-[10px] font-mono px-2 py-1 rounded border font-bold"
+        class="text-[11px] font-mono px-2 py-1 rounded border font-bold"
         style="background-color: var(--color-brand-bg); color: var(--color-brand); border-color: var(--color-brand-border);"
       >
         集成通道 · {{ enabledChannelsCount }}/4
@@ -243,18 +243,12 @@ onUnmounted(() => {
     </div>
 
     <!-- Alert / Banner Message -->
-    <div
-      v-if="bannerMsg"
-      class="p-3 rounded-lg text-xs font-mono border transition-all"
-      :style="bannerMsg.type === 'ok'
-        ? { backgroundColor: 'var(--color-up-bg)', borderColor: 'var(--color-up-border)', color: 'var(--color-up)' }
-        : bannerMsg.type === 'warn'
-        ? { backgroundColor: 'var(--color-warn-bg)', borderColor: 'var(--color-warn-border)', color: 'var(--color-warn)' }
-        : { backgroundColor: 'var(--color-down-bg)', borderColor: 'var(--color-down-border)', color: 'var(--color-down)' }"
-    >
-      {{ bannerMsg.text }}
-    </div>
-
+    <SaveBar
+          :type="bannerMsg?.type || 'ok'"
+          :text="bannerMsg?.text || ''"
+          :nonce="bannerSeq"
+          @dismiss="bannerMsg = null"
+        />
     <div v-if="loading" class="py-12 text-center text-xs font-mono" style="color: var(--text-muted);">正在加载通知配置...</div>
 
     <template v-else-if="config">
@@ -263,7 +257,7 @@ onUnmounted(() => {
         <div class="flex items-center justify-between mb-4">
           <div class="flex items-center space-x-2">
             <span class="inline-block w-2 h-2 rounded-full" :class="config.qq.enabled ? 'bg-emerald-500' : 'bg-zinc-500'"></span>
-            <h2 class="text-sm font-bold font-mono" style="color: var(--text-main);">QQ 官方应用 Bot</h2>
+            <h2 class="text-sm font-bold font-mono" style="color: var(--text-main);">{{ t('admin.nNotify') }}</h2>
           </div>
           <div class="flex items-center space-x-3">
             <button @click="startQqBind" class="px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--text-main); color: var(--bg-card);">扫码绑定</button>
@@ -280,7 +274,7 @@ onUnmounted(() => {
               >
                 <div
                   class="w-10 h-5 rounded-full transition-colors relative"
-                  :style="{ backgroundColor: config.qq.enabled ? '#10B981' : 'var(--border-medium)' }"
+                  :style="{ backgroundColor: config.qq.enabled ? 'var(--color-up)' : 'var(--border-medium)' }"
                 >
                   <div
                     class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
@@ -291,7 +285,7 @@ onUnmounted(() => {
               <span
                 class="text-xs font-mono font-bold select-none cursor-pointer"
                 @click="toggleChannel('qq', !config.qq.enabled)"
-                :style="{ color: config.qq.enabled ? '#10B981' : 'var(--text-muted)' }"
+                :style="{ color: config.qq.enabled ? 'var(--color-up)' : 'var(--text-muted)' }"
               >
                 {{ config.qq.enabled ? '已开启' : '已关闭' }}
               </span>
@@ -326,7 +320,7 @@ onUnmounted(() => {
             >
               <div
                 class="w-10 h-5 rounded-full transition-colors relative"
-                :style="{ backgroundColor: config.telegram.enabled ? '#10B981' : 'var(--border-medium)' }"
+                :style="{ backgroundColor: config.telegram.enabled ? 'var(--color-up)' : 'var(--border-medium)' }"
               >
                 <div
                   class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
@@ -337,7 +331,7 @@ onUnmounted(() => {
             <span
               class="text-xs font-mono font-bold select-none cursor-pointer"
               @click="toggleChannel('telegram', !config.telegram.enabled)"
-              :style="{ color: config.telegram.enabled ? '#10B981' : 'var(--text-muted)' }"
+              :style="{ color: config.telegram.enabled ? 'var(--color-up)' : 'var(--text-muted)' }"
             >
               {{ config.telegram.enabled ? '已开启' : '已关闭' }}
             </span>
@@ -369,7 +363,7 @@ onUnmounted(() => {
               >
                 <div
                   class="w-10 h-5 rounded-full transition-colors relative"
-                  :style="{ backgroundColor: config.wechat.enabled ? '#10B981' : 'var(--border-medium)' }"
+                  :style="{ backgroundColor: config.wechat.enabled ? 'var(--color-up)' : 'var(--border-medium)' }"
                 >
                   <div
                     class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
@@ -380,7 +374,7 @@ onUnmounted(() => {
               <span
                 class="text-xs font-mono font-bold select-none cursor-pointer"
                 @click="toggleChannel('wechat', !config.wechat.enabled)"
-                :style="{ color: config.wechat.enabled ? '#10B981' : 'var(--text-muted)' }"
+                :style="{ color: config.wechat.enabled ? 'var(--color-up)' : 'var(--text-muted)' }"
               >
                 {{ config.wechat.enabled ? '已开启' : '已关闭' }}
               </span>
@@ -404,7 +398,7 @@ onUnmounted(() => {
               >
                 <div
                   class="w-10 h-5 rounded-full transition-colors relative"
-                  :style="{ backgroundColor: config.webhook.enabled ? '#10B981' : 'var(--border-medium)' }"
+                  :style="{ backgroundColor: config.webhook.enabled ? 'var(--color-up)' : 'var(--border-medium)' }"
                 >
                   <div
                     class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
@@ -415,7 +409,7 @@ onUnmounted(() => {
               <span
                 class="text-xs font-mono font-bold select-none cursor-pointer"
                 @click="toggleChannel('webhook', !config.webhook.enabled)"
-                :style="{ color: config.webhook.enabled ? '#10B981' : 'var(--text-muted)' }"
+                :style="{ color: config.webhook.enabled ? 'var(--color-up)' : 'var(--text-muted)' }"
               >
                 {{ config.webhook.enabled ? '已开启' : '已关闭' }}
               </span>
@@ -514,7 +508,7 @@ onUnmounted(() => {
           <div class="font-bold text-sm" :class="captureStatus?.status === 'captured' ? 'text-emerald-500' : 'text-blue-500'">
             {{ captureStatus?.status === 'captured' ? '捕获成功！' : '正在监听...' }}
           </div>
-          <div v-if="captureStatus?.expires_in" class="text-[10px] font-mono mt-1" style="color: var(--text-faint);">剩余时间：{{ captureStatus.expires_in }} 秒</div>
+          <div v-if="captureStatus?.expires_in" class="text-[11px] font-mono mt-1" style="color: var(--text-faint);">剩余时间：{{ captureStatus.expires_in }} 秒</div>
           <div v-if="captureStatus?.openid" class="text-xs font-mono mt-2" style="color: var(--color-brand);">OpenID: {{ captureStatus.openid }}</div>
         </div>
         <button @click="captureModal = false" class="px-4 py-2 rounded-lg border text-xs font-mono cursor-pointer transition-all shadow-xs" style="background-color: var(--bg-card-subtle); border-color: var(--border-medium); color: var(--text-main);">关闭</button>
@@ -527,7 +521,7 @@ onUnmounted(() => {
         <h3 class="text-sm font-bold mb-2 font-mono" style="color: var(--text-main);">绑定 QQ 机器人</h3>
         <p class="text-[11px] font-mono mb-3" style="color: var(--text-muted);">使用手机 QQ 扫一扫，或长按复制链接在 QQ 内打开。确认授权后本页自动完成绑定。</p>
         <img v-if="bindStatus?.qr" :src="bindStatus.qr" alt="QQ 绑定二维码" class="w-[220px] h-[220px] rounded-lg bg-white p-2.5 mx-auto mb-3 shadow-xs border" style="border-color: var(--border-subtle);" />
-        <p v-if="bindStatus?.link" class="text-[10px] font-mono break-all mb-3" style="color: var(--color-brand);">{{ bindStatus.link }}</p>
+        <p v-if="bindStatus?.link" class="text-[11px] font-mono break-all mb-3" style="color: var(--color-brand);">{{ bindStatus.link }}</p>
         <p class="text-xs font-mono mb-4" :class="{ 'text-blue-500': bindStatus?.tone === 'blue', 'text-emerald-500': bindStatus?.tone === 'green', 'text-amber-500': bindStatus?.tone === 'amber', 'text-rose-500': bindStatus?.tone === 'red' }">{{ bindStatus?.text }}</p>
         <div class="flex justify-center space-x-2">
           <button @click="startQqBind" class="px-3 py-1.5 rounded-lg border text-xs font-mono cursor-pointer transition-all shadow-xs" style="background-color: var(--bg-card-subtle); border-color: var(--border-medium); color: var(--text-main);">刷新二维码</button>

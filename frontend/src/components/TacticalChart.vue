@@ -75,8 +75,13 @@ const emit = defineEmits<{
 }>()
 
 const store = useDashboardStore()
-const { theme } = useTheme()
+const { theme, cvd } = useTheme()
 const isDark = computed(() => theme.value === 'dark')
+
+/* P1: resolve design-token value at render time — chart follows theme & CVD switches */
+function tok(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888888'
+}
 const { t, isEn } = useI18n()
 
 // ==========================================
@@ -425,35 +430,35 @@ function getChartStyles(): DeepPartial<Styles> {
     candle: {
       type: 'candle_solid',
       bar: {
-        upColor: '#10B981',
-        downColor: '#F43F5E',
-        noChangeColor: '#888888',
-        upBorderColor: '#10B981',
-        downBorderColor: '#F43F5E',
-        noChangeBorderColor: '#888888',
-        upWickColor: '#10B981',
-        downWickColor: '#F43F5E',
-        noChangeWickColor: '#888888',
+        upColor: tok('--color-up'),
+        downColor: tok('--color-down'),
+        noChangeColor: tok('--text-faint'),
+        upBorderColor: tok('--color-up'),
+        downBorderColor: tok('--color-down'),
+        noChangeBorderColor: tok('--text-faint'),
+        upWickColor: tok('--color-up'),
+        downWickColor: tok('--color-down'),
+        noChangeWickColor: tok('--text-faint'),
       },
       priceMark: {
         show: true,
         high: {
-          show: true,
-          color: dark ? '#CBD5E1' : '#475569',
+          show: false,
+          color: tok('--text-muted'),
           textOffset: 4,
           textSize: 10,
         },
         low: {
-          show: true,
-          color: dark ? '#CBD5E1' : '#475569',
+          show: false,
+          color: tok('--text-muted'),
           textOffset: 4,
           textSize: 10,
         },
         last: {
           show: true,
-          upColor: '#10B981',
-          downColor: '#F43F5E',
-          noChangeColor: '#888888',
+          upColor: tok('--color-up'),
+          downColor: tok('--color-down'),
+          noChangeColor: tok('--text-faint'),
           line: {
             show: true,
             style: 'dashed',
@@ -467,32 +472,36 @@ function getChartStyles(): DeepPartial<Styles> {
             paddingTop: 2,
             paddingRight: 4,
             paddingBottom: 2,
-            color: '#FFFFFF',
+            color: tok('--text-main'),
           },
         },
       },
       tooltip: {
-        showRule: 'always',
+        showRule: 'follow_cross',
         showType: 'standard',
         text: {
           size: 11,
           family: 'JetBrains Mono, monospace',
-          color: dark ? '#94A3B8' : '#64748B',
+          color: tok('--text-muted'),
         },
       },
     },
     indicator: {
+      tooltip: {
+        showRule: 'follow_cross',
+        showType: 'standard',
+      },
       ohlc: {
-        upColor: '#10B981',
-        downColor: '#F43F5E',
-        noChangeColor: '#888888',
+        upColor: tok('--color-up'),
+        downColor: tok('--color-down'),
+        noChangeColor: tok('--text-faint'),
       },
       lines: [
         { style: 'solid', smooth: false, size: 1.5, color: '#F59E0B' }, // MA5 / 黄
         { style: 'solid', smooth: false, size: 1.5, color: '#38BDF8' }, // MA10 / 蓝
         { style: 'solid', smooth: false, size: 1.5, color: '#A855F7' }, // MA20 / 紫
-        { style: 'solid', smooth: false, size: 1.5, color: '#F43F5E' },
-        { style: 'solid', smooth: false, size: 1.5, color: '#10B981' },
+        { style: 'solid', smooth: false, size: 1.5, color: tok('--color-down') },
+        { style: 'solid', smooth: false, size: 1.5, color: tok('--color-up') },
       ],
       lastValueMark: {
         show: true,
@@ -503,7 +512,7 @@ function getChartStyles(): DeepPartial<Styles> {
           paddingTop: 1,
           paddingRight: 3,
           paddingBottom: 1,
-          color: '#FFFFFF',
+          color: tok('--text-main'),
         },
       },
     },
@@ -512,12 +521,12 @@ function getChartStyles(): DeepPartial<Styles> {
       size: 'auto',
       axisLine: {
         show: true,
-        color: dark ? '#1E293B' : '#E2E8F0',
+        color: tok('--bg-elevated'),
         size: 1,
       },
       tickText: {
         show: true,
-        color: dark ? '#64748B' : '#94A3B8',
+        color: tok('--text-faint'),
         family: 'JetBrains Mono, monospace',
         size: 10,
       },
@@ -525,7 +534,7 @@ function getChartStyles(): DeepPartial<Styles> {
         show: true,
         size: 1,
         length: 3,
-        color: dark ? '#1E293B' : '#E2E8F0',
+        color: tok('--bg-elevated'),
       },
     },
     yAxis: {
@@ -536,12 +545,12 @@ function getChartStyles(): DeepPartial<Styles> {
       inside: false,
       axisLine: {
         show: true,
-        color: dark ? '#1E293B' : '#E2E8F0',
+        color: tok('--bg-elevated'),
         size: 1,
       },
       tickText: {
         show: true,
-        color: dark ? '#94A3B8' : '#64748B',
+        color: tok('--text-muted'),
         family: 'JetBrains Mono, monospace',
         size: 11,
       },
@@ -551,7 +560,7 @@ function getChartStyles(): DeepPartial<Styles> {
     },
     separator: {
       size: 1,
-      color: dark ? '#1E293B' : '#E2E8F0',
+      color: tok('--bg-elevated'),
       fill: true,
       activeBackgroundColor: dark ? '#334155' : '#CBD5E1',
     },
@@ -563,11 +572,11 @@ function getChartStyles(): DeepPartial<Styles> {
           style: 'dashed',
           dashedValue: [4, 4],
           size: 1,
-          color: dark ? '#64748B' : '#94A3B8',
+          color: tok('--text-faint'),
         },
         text: {
           show: true,
-          color: '#FFFFFF',
+          color: tok('--text-main'),
           size: 11,
           family: 'JetBrains Mono, monospace',
           backgroundColor: '#3B82F6',
@@ -579,11 +588,11 @@ function getChartStyles(): DeepPartial<Styles> {
           style: 'dashed',
           dashedValue: [4, 4],
           size: 1,
-          color: dark ? '#64748B' : '#94A3B8',
+          color: tok('--text-faint'),
         },
         text: {
           show: true,
-          color: '#FFFFFF',
+          color: tok('--text-main'),
           size: 10,
           family: 'JetBrains Mono, monospace',
           backgroundColor: '#475569',
@@ -778,7 +787,7 @@ function updatePriceLines() {
         },
         text: {
           size: 11,
-          color: '#FFFFFF',
+          color: tok('--text-main'),
           backgroundColor: isLong ? '#10B981' : '#F43F5E',
         },
       },
@@ -801,7 +810,7 @@ function updatePriceLines() {
         },
         text: {
           size: 11,
-          color: '#FFFFFF',
+          color: tok('--text-main'),
           backgroundColor: '#F43F5E',
         },
       },
@@ -824,7 +833,7 @@ function updatePriceLines() {
         },
         text: {
           size: 11,
-          color: '#FFFFFF',
+          color: tok('--text-main'),
           backgroundColor: '#10B981',
         },
       },
@@ -965,7 +974,7 @@ function copySimulationSummary() {
 }
 
 // 监听主题与外部持仓变化
-watch(isDark, () => {
+watch([isDark, cvd], () => {
   klineChart?.setStyles(getChartStyles())
 })
 
@@ -1023,30 +1032,27 @@ onUnmounted(() => {
     class="flex flex-col border rounded-xl overflow-hidden shadow-xs transition-all select-none"
     style="background-color: var(--bg-card); border-color: var(--border-subtle);"
   >
-    <!-- Top Bar: 标的切换、周期选择与指标下拉工作台 -->
+    <!-- Ticker Info Bar: 实时价格、涨跌、ATR 与倒计时 -->
     <div
-      class="p-2 sm:p-3 border-b flex flex-wrap items-center justify-between gap-2"
-      style="border-color: var(--border-subtle);"
+      class="px-3 py-2 sm:px-4 sm:py-2.5 border-b flex flex-wrap items-center justify-between text-[11px] font-mono gap-x-3 gap-y-2"
+      style="border-color: var(--border-subtle); background-color: var(--bg-app);"
     >
-      <!-- 标的按钮组 -->
-      <div class="flex items-center space-x-1.5 overflow-x-auto max-w-full pb-0.5 sm:pb-0 scrollbar-none">
-        <button
-          v-for="sym in availableSymbols"
-          :key="sym"
-          @click="selectSymbol(sym)"
-          class="h-7 px-2.5 rounded-lg text-xs font-mono font-bold transition-all shrink-0 cursor-pointer flex items-center space-x-1"
-          :style="currentSymbol === sym
-            ? { backgroundColor: 'var(--color-brand-bg)', color: 'var(--color-brand)', border: '1px solid var(--color-brand-border)' }
-            : { backgroundColor: 'var(--bg-badge)', color: 'var(--text-muted)', border: '1px solid transparent' }"
-        >
-          <span
-            v-if="store.positions.some(p => p.instId?.startsWith(sym) || p.name === sym)"
-            class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-0.5"
-          ></span>
-          <span>{{ sym }}</span>
-        </button>
+      <div class="flex items-center space-x-2.5">
+        <span class="font-black text-xs sm:text-sm" style="color: var(--text-main);">{{ currentSymbol }}USDT {{ t('chart.swapPerp', '永续') }}</span>
+        <span class="font-black text-xs sm:text-sm num-tabular" style="color: var(--text-main);">
+          ${{ currentPrice >= 100 ? currentPrice.toFixed(1) : currentPrice.toFixed(4) }}
+        </span>
+        <span :class="liveChangePct >= 0 ? 'text-emerald-400' : 'text-rose-400'" class="text-[11px] font-bold">
+          {{ liveChangePct >= 0 ? '+' : '' }}{{ liveChangePct.toFixed(2) }}%
+        </span>
+        <span class="flex items-center space-x-1 pl-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span class="text-[11px] text-emerald-400 font-bold">{{ t('chart.liveStatus', '实时') }} 3s</span>
+        </span>
+        <span class="text-[11px]" style="color: var(--text-faint);">1H ATR: ${{ currentAtr.toFixed(1) }}</span>
       </div>
 
+      <div class="flex items-center flex-wrap gap-x-3 gap-y-1.5">
       <!-- 周期、指标下拉与试算工具 -->
       <div class="flex items-center space-x-1.5 sm:space-x-2 shrink-0 font-mono">
         <!-- 周期切换 -->
@@ -1077,7 +1083,7 @@ onUnmounted(() => {
             <span>{{ isEn ? 'Indicators' : '指标' }}</span>
             <span
               v-if="activeIndicatorCount > 0"
-              class="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] flex items-center justify-center font-bold"
+              class="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] flex items-center justify-center font-bold"
             >
               {{ activeIndicatorCount }}
             </span>
@@ -1096,7 +1102,7 @@ onUnmounted(() => {
                 <span class="text-[11px] font-bold uppercase tracking-wider text-amber-400 flex items-center space-x-1">
                   <span>{{ isEn ? 'Main Chart Overlays' : '主图叠加指标' }}</span>
                 </span>
-                <span class="text-[9px]" style="color: var(--text-faint);">{{ isEn ? 'On Candlestick' : '主蜡烛同屏' }}</span>
+                <span class="text-[11px]" style="color: var(--text-faint);">{{ isEn ? 'On Candlestick' : '主蜡烛同屏' }}</span>
               </div>
               <div class="grid grid-cols-2 gap-1.5">
                 <button
@@ -1123,7 +1129,7 @@ onUnmounted(() => {
                 <span class="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center space-x-1">
                   <span>{{ isEn ? 'Sub-Window Panes' : '副图震荡指标' }}</span>
                 </span>
-                <span class="text-[9px]" style="color: var(--text-faint);">{{ isEn ? 'Independent Panes' : '独立高宽窗口' }}</span>
+                <span class="text-[11px]" style="color: var(--text-faint);">{{ isEn ? 'Independent Panes' : '独立高宽窗口' }}</span>
               </div>
               <div class="grid grid-cols-2 gap-1.5">
                 <button
@@ -1168,31 +1174,10 @@ onUnmounted(() => {
           <RefreshCw class="w-3 h-3" :class="isLoading ? 'animate-spin' : ''" />
         </button>
       </div>
-    </div>
-
-    <!-- Ticker Info Bar: 实时价格、涨跌、ATR 与倒计时 -->
-    <div
-      class="px-3 py-1.5 sm:px-4 sm:py-2 border-b flex flex-wrap items-center justify-between text-[11px] font-mono gap-2"
-      style="border-color: var(--border-subtle); background-color: var(--bg-app);"
-    >
-      <div class="flex items-center space-x-2.5">
-        <span class="font-black text-xs sm:text-sm" style="color: var(--text-main);">{{ currentSymbol }}USDT {{ t('chart.swapPerp', '永续') }}</span>
-        <span class="font-black text-xs sm:text-sm num-tabular" style="color: var(--text-main);">
-          ${{ currentPrice >= 100 ? currentPrice.toFixed(1) : currentPrice.toFixed(4) }}
-        </span>
-        <span :class="liveChangePct >= 0 ? 'text-emerald-400' : 'text-rose-400'" class="text-[10px] font-bold">
-          {{ liveChangePct >= 0 ? '+' : '' }}{{ liveChangePct.toFixed(2) }}%
-        </span>
-        <span class="flex items-center space-x-1 pl-1">
-          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span class="text-[9px] text-emerald-400 font-bold">{{ t('chart.liveStatus', '实时') }} 3s</span>
-        </span>
-        <span class="text-[10px]" style="color: var(--text-faint);">1H ATR: ${{ currentAtr.toFixed(1) }}</span>
-      </div>
-
-      <div class="flex items-center space-x-2 text-[10px] font-mono" style="color: var(--text-muted);">
-        <span>{{ t('chart.countdownLabel', 'K线结线倒计时') }}:</span>
-        <span class="font-bold text-amber-400 num-tabular">{{ candleCountdown }}</span>
+        <div class="flex items-center space-x-2 text-[11px] font-mono" style="color: var(--text-muted);">
+          <span>{{ t('chart.countdownLabel', 'K线结线倒计时') }}:</span>
+          <span class="font-bold text-amber-400 num-tabular">{{ candleCountdown }}</span>
+        </div>
       </div>
     </div>
 
@@ -1216,7 +1201,7 @@ onUnmounted(() => {
             {{ t('chart.simulateTitle', '科学预期盈亏比测算控制台') }}
           </span>
           <span
-            class="text-[10px] px-2 py-0.5 rounded border font-bold"
+            class="text-[11px] px-2 py-0.5 rounded border font-bold"
             :class="riskRewardMetrics.hasRealPosition ? 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30' : 'text-slate-400 bg-slate-500/10 border-slate-500/30'"
           >
             {{ riskRewardMetrics.hasRealPosition ? t('chart.holdingModeNotice', '实盘持仓联动模式') : t('chart.speculativeNotice', '标准观望测算模式') }}
@@ -1233,14 +1218,14 @@ onUnmounted(() => {
             borderColor: riskRewardMetrics.isRrCompliant ? 'var(--color-up-border)' : 'var(--color-warn-border)',
           }"
         >
-          <span class="text-[10px] uppercase font-bold" :style="{ color: riskRewardMetrics.isRrCompliant ? 'var(--color-up)' : 'var(--color-warn)' }">
+          <span class="text-[11px] uppercase font-bold" :style="{ color: riskRewardMetrics.isRrCompliant ? 'var(--color-up)' : 'var(--color-warn)' }">
             {{ riskRewardMetrics.isRrCompliant ? (isEn ? '✅ Expected R:R' : '✅ 期望盈亏比 (R:R)') : (isEn ? '⚠️ Low R:R (<2.0)' : '⚠️ 盈亏比不足 2.0') }}
           </span>
           <div class="flex items-baseline space-x-1 mt-0.5">
             <span class="text-base sm:text-lg font-black num-tabular" :style="{ color: riskRewardMetrics.isRrCompliant ? 'var(--color-up)' : 'var(--color-warn)' }">
               {{ riskRewardMetrics.rrRatio.toFixed(2) }} : 1
             </span>
-            <span class="text-[9px] opacity-70" :style="{ color: riskRewardMetrics.isRrCompliant ? 'var(--color-up)' : 'var(--color-warn)' }">
+            <span class="text-[11px] opacity-70" :style="{ color: riskRewardMetrics.isRrCompliant ? 'var(--color-up)' : 'var(--color-warn)' }">
               {{ isEn ? 'Min 2.0' : '底线 2.0' }}
             </span>
           </div>
@@ -1250,7 +1235,7 @@ onUnmounted(() => {
           class="p-2.5 rounded-lg border font-mono flex flex-col justify-between"
           style="background-color: var(--bg-card); border-color: var(--border-subtle);"
         >
-          <span class="text-[10px] uppercase font-bold" style="color: var(--text-muted);">
+          <span class="text-[11px] uppercase font-bold" style="color: var(--text-muted);">
             {{ isEn ? 'SL Buffer (ATR)' : '止损呼吸空间 (ATR)' }}
           </span>
           <div class="flex items-baseline space-x-1 mt-0.5">
@@ -1260,7 +1245,7 @@ onUnmounted(() => {
             >
               {{ riskRewardMetrics.atrMultiple.toFixed(2) }}x
             </span>
-            <span class="text-[9px] font-bold" :style="{ color: riskRewardMetrics.isAtrOptimal ? 'var(--color-brand)' : 'var(--color-warn)' }">
+            <span class="text-[11px] font-bold" :style="{ color: riskRewardMetrics.isAtrOptimal ? 'var(--color-brand)' : 'var(--color-warn)' }">
               {{ riskRewardMetrics.isAtrOptimal ? (isEn ? 'Noise Buffer' : '防插针区间') : (isEn ? 'Deviates 1.8~2.2' : '偏离1.8~2.2') }}
             </span>
           </div>
@@ -1270,14 +1255,14 @@ onUnmounted(() => {
           class="p-2.5 rounded-lg border font-mono flex flex-col justify-between"
           style="background-color: var(--bg-card); border-color: var(--border-subtle);"
         >
-          <span class="text-[10px] uppercase font-bold text-emerald-500">
+          <span class="text-[11px] uppercase font-bold text-emerald-500">
             {{ isEn ? 'Target Profit (TP)' : '预期收益目标 (TP)' }}
           </span>
           <div class="flex items-baseline space-x-1 mt-0.5">
             <span class="text-base sm:text-lg font-black text-emerald-400 num-tabular">
               +${{ riskRewardMetrics.estProfitUsd.toFixed(2) }}
             </span>
-            <span class="text-[9px] text-emerald-400 font-bold">
+            <span class="text-[11px] text-emerald-400 font-bold">
               ({{ riskRewardMetrics.rewardPct.toFixed(1) }}%)
             </span>
           </div>
@@ -1287,14 +1272,14 @@ onUnmounted(() => {
           class="p-2.5 rounded-lg border font-mono flex flex-col justify-between"
           style="background-color: var(--bg-card); border-color: var(--border-subtle);"
         >
-          <span class="text-[10px] uppercase font-bold text-rose-500">
+          <span class="text-[11px] uppercase font-bold text-rose-500">
             {{ isEn ? 'Max Risk (SL)' : '最大硬风控风险 (SL)' }}
           </span>
           <div class="flex items-baseline space-x-1 mt-0.5">
             <span class="text-base sm:text-lg font-black text-rose-400 num-tabular">
               -${{ riskRewardMetrics.estRiskUsd.toFixed(2) }}
             </span>
-            <span class="text-[9px] text-rose-400 font-bold">
+            <span class="text-[11px] text-rose-400 font-bold">
               ({{ riskRewardMetrics.riskPct.toFixed(1) }}%)
             </span>
           </div>
