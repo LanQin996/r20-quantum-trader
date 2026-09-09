@@ -153,12 +153,20 @@ def _stable_python() -> str:
     """spawn 长驻 daemon 必须用不会被回收的解释器路径。
     uv run 下 sys.executable 指向 /root/.cache/uv/builds-v0/.tmpXXXX/，
     目录被清理后进程变成"可执行文件已消失"的孤儿，无法按路径识别与治理。"""
+    def is_file(path: str) -> bool:
+        try:
+            return bool(path) and Path(path).is_file()
+        except OSError:
+            # uv's temporary build path may exist but be inaccessible after cleanup;
+            # treat it as an invalid candidate and continue to a stable interpreter.
+            return False
+
     exe = sys.executable or "python3"
-    resolved = Path(exe).resolve().as_posix() if Path(exe).exists() else ""
+    resolved = Path(exe).resolve().as_posix() if is_file(exe) else ""
     if resolved and "/.cache/uv/" not in resolved and "/tmp/" not in resolved and ".venv" not in resolved:
         return exe
     for cand in ("/app/venv/bin/python3", "/usr/bin/python3", getattr(sys, "_base_executable", "")):
-        if not cand or not Path(cand).is_file():
+        if not is_file(cand):
             continue
         resolved = Path(cand).resolve().as_posix()
         if "/.cache/uv/" not in resolved and "/tmp/" not in resolved and ".venv" not in resolved:
