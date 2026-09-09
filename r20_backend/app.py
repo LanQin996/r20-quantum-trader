@@ -75,6 +75,7 @@ from r20_backend.llm_manager import (
     fetch_remote_models,
     init_llm_providers,
     save_llm_config,
+    recent_failover_events,
 )
 from scripts.prompt_library import (
     PRESETS, TEMPLATE_KEYS, active_profile, activate_profile, all_profiles, apply_module_layout,
@@ -191,9 +192,11 @@ class LLMActivateRequest(BaseModel):
 
 
 class LLMSettingsUpdateRequest(BaseModel):
-    thinking_timeout: float = Field(default=120.0, ge=5.0, le=1800.0)
+    thinking_timeout: float | None = Field(default=None, ge=5.0, le=1800.0)
     active_model_id: str | None = None
     reasoning_effort: str | None = None
+    request_attempts: int | None = Field(default=None, ge=1, le=10)
+    fallback_model_ids: list[str] | None = None
 
 
 class LLMTestRequest(BaseModel):
@@ -1353,18 +1356,34 @@ def admin_update_llm_settings(
     x_r20_session: str | None = Header(default=None, alias="X-R20-Session"),
 ) -> dict[str, Any]:
     actor = require_superadmin(x_r20_session)
-    result = update_llm_settings(
-        active_model_id=payload.active_model_id,
-        reasoning_effort=payload.reasoning_effort,
-        thinking_timeout=payload.thinking_timeout,
-    )
+    try:
+        result = update_llm_settings(
+            active_model_id=payload.active_model_id,
+            reasoning_effort=payload.reasoning_effort,
+            thinking_timeout=payload.thinking_timeout,
+            request_attempts=payload.request_attempts,
+            fallback_model_ids=payload.fallback_model_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_record("llm.settings.update", "success", {
         "actor": actor["username"],
         "thinking_timeout": payload.thinking_timeout,
         "active_model_id": payload.active_model_id,
         "reasoning_effort": payload.reasoning_effort,
+        "request_attempts": payload.request_attempts,
+        "fallback_model_ids": payload.fallback_model_ids,
     })
     return result
+
+
+@app.get("/api/v1/admin/llm/failover-events")
+def admin_llm_failover_events(
+    limit: int = 30,
+    x_r20_session: str | None = Header(default=None, alias="X-R20-Session"),
+) -> dict[str, Any]:
+    require_admin_header(x_r20_session=x_r20_session)
+    return {"events": recent_failover_events(limit)}
 
 
 @app.post("/api/v1/admin/llm/test")
@@ -1593,9 +1612,7 @@ def admin_test_council_debate(payload: CouncilTestRequest, x_r20_session: str | 
     else:
         # Pull live factor snapshot or default to all 6 active instruments
         active_insts = load_instruments()
-        symbols = [x.get("instId", "") for x in active_insts] if active_insts else [
-            "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "DOGE-USDT-SWAP", "SUI-USDT-SWAP", "ASTER-USDT-SWAP"
-        ]
+        symbols = [x.get("instId", "") for x in active_insts]
         
         factor_snap_file = ROOT / "data" / "factor_library_snapshot.json"
         factor_data = {}
@@ -1619,7 +1636,8 @@ def admin_test_council_debate(payload: CouncilTestRequest, x_r20_session: str | 
         ]
         for sym in symbols:
             f = factor_data.get(sym, {})
-            c_px = f.get("close", 78000.0 if "BTC" in sym else (2400.0 if "ETH" in sym else (100.0 if "SOL" in sym else 1.0)))
+            # 价格取真实快照（close/price），缺失即 0 标注无数据——不再按币种写死假价
+            c_px = float(f.get("close") or f.get("price") or 0.0)
             v_val = f.get("v_1h", 0.05)
             a_val = f.get("a_1h", 0.12)
             adx_val = f.get("adx_1h", 22.5)
@@ -3311,7 +3329,13 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
         response.headers["Expires"] = "0"
     if not inst_id.endswith("-SWAP"):
         raise HTTPException(status_code=400, detail="only SWAP instrument ids are accepted")
-    valid_bars = {"1m", "5m", "15m", "1H", "4H", "1D"}
+    # bar 大小写容错归一（1h→1H、4h→4H），归一后仍非法才回落 1H
+    try:
+        from scripts.market_data_service import normalize_bar as _nb
+        bar = _nb(bar)
+    except Exception:
+        pass
+    valid_bars = {"1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D"}
     if bar not in valid_bars:
         bar = "1H"
     limit = max(10, min(limit, 300))
@@ -3321,30 +3345,27 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
     if cached and (now_ts - cached[0] < 1.0):
         return {"instId": inst_id, "bar": bar, "candles": cached[1], "source": "cache"}
     try:
-        url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw = data.get("data") or []
-            candles = []
-            for item in reversed(raw):
-                try:
-                    candles.append({
-                        "ts": int(item[0]),
-                        "open": float(item[1]),
-                        "high": float(item[2]),
-                        "low": float(item[3]),
-                        "close": float(item[4]),
-                        "vol": float(item[5]),
-                    })
-                except (ValueError, IndexError):
-                    continue
-            if candles:
-                _candles_cache_store(cache_key, now_ts, candles)
-                return {"instId": inst_id, "bar": bar, "candles": candles, "source": "OKX REST"}
+        # 三级容灾直连（www.okx.com → aws.okx.com → okx CLI），修复部署环境
+        # 单点 www 不可达 / 区域限频时 1H/4H K 线时有时无的问题
+        from scripts.market_data_service import fetch_candles as _fetch_candles
+        raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0, closed_only=False)
+        candles = []
+        for item in reversed(raw or []):
+            try:
+                candles.append({
+                    "ts": int(item[0]),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "vol": float(item[5]),
+                })
+            except (ValueError, IndexError):
+                continue
+        if candles:
+            _candles_cache_store(cache_key, now_ts, candles)
+            return {"instId": inst_id, "bar": bar, "candles": candles, "source": "OKX REST"}
+        raise RuntimeError("upstream returned no candles (all fallback levels exhausted)")
     except Exception as exc:
         if cached:
             return {"instId": inst_id, "bar": bar, "candles": cached[1], "source": "stale_cache", "warn": str(exc)}

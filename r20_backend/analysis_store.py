@@ -301,7 +301,7 @@ def normalize_position(row: dict, live: bool = False) -> dict:
         "close_ms":updated if status=="closed" else None,"open_time":time_text(opened),
         "close_time":time_text(updated) if status=="closed" else "",
         "open_px":row.get("avgPx") if live else row.get("openAvgPx"),"close_px":row.get("closeAvgPx"),
-        "sz":row.get("pos") if live else row.get("closeTotalPos"),"lever":row.get("lever"),
+        "sz":row.get("pos") if live else (row.get("closeTotalPos") or row.get("openMaxPos")),"lever":row.get("lever"),
         "margin":row.get("margin") or row.get("imr"),"unrealized_pnl":row.get("upl") if live else None,
         "mark_px":row.get("markPx") if live else None,
         "gross_pnl":val(gross),"fee":val(fee),"funding_fee":val(funding),

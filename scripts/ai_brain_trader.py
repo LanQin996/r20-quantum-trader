@@ -64,7 +64,7 @@ def _get_system_version_tag() -> str:
 
 WORKSPACE_DIR = PROJECT_ROOT
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
-from market_data_service import fetch_single_indicator, fetch_ticker
+from market_data_service import fetch_single_indicator, fetch_ticker, fetch_candles
 from candle_data import closed_okx_candles
 AI_DECISION_CACHE_FILE = os.path.join(DATA_DIR, "ai_brain_decisions.json")
 AI_DECISION_HISTORY_FILE = os.path.join(DATA_DIR, "ai_brain_history.json")
@@ -188,6 +188,7 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
         "askPx": 0.0,
         "fundingRate": 0.0,
         "oiUsd": "N/A",
+        "vol24h": 0.0,
         "lsRatio": "N/A",
         "takerNetUsd": "N/A",
         "atr": 0.0,
@@ -222,13 +223,14 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
             pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
             op = float(t.get("open24h", 0) or 0)
             pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
+            pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
     except Exception as exc:
         logger.warning("ticker parse failed for %s: %s", inst_id, exc)
 
     # 2. 15M Candles (recent 24, about 6 hours) & Technical Indicators Calculation
     try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=15m&limit=25", headers, tag=f"{inst_id} 15m candles")
-        if d and d.get("code") == "0" and d.get("data"):
+        d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
+        if d["data"]:
             raw_candles = closed_okx_candles(d["data"])[:24]
             pkg["recent_15m"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_candles[:12]]
 
@@ -280,13 +282,15 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
                     elif closes[i] < closes[i-1]:
                         obv -= vols[i]
                 pkg["obv_flow"] = "BULL_FLOW" if obv > 0 else ("BEAR_FLOW" if obv < 0 else "NEUTRAL")
+        else:
+            print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（www/aws/CLI 三级容灾均未取回），本包 15M 微观指标降级缺省")
     except Exception as exc:
-        logger.warning("15m candles parse failed for %s: %s", inst_id, exc)
+        print(f"[AI Brain] ⚠️ {inst_id} 15m K线处理异常: {exc}")
 
     # 3. 1H Candles (recent 24, about 24 hours) & 1H ATR / 1H RSI
     try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=25", headers, tag=f"{inst_id} 1H candles")
-        if d and d.get("code") == "0" and d.get("data"):
+        d = {"data": fetch_candles(inst_id, bar="1H", limit=24)}
+        if d["data"]:
             raw_1h = closed_okx_candles(d["data"])[:24]
             pkg["recent_1h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_1h[:12]]
             if len(raw_1h) >= 15:
@@ -321,13 +325,15 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
                         pkg["structure_1h"] = "1H_SWING_BEAR"
                     else:
                         pkg["structure_1h"] = "1H_SWING_CHOP"
+        else:
+            print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（www/aws/CLI 三级容灾均未取回），1H ATR/RSI/结构字段降级缺省")
     except Exception as exc:
-        logger.warning("1H candles parse failed for %s: %s", inst_id, exc)
+        print(f"[AI Brain] ⚠️ {inst_id} 1H K线处理异常: {exc}")
 
     # 4. 4H Candles (recent 16, about 64 hours) & 4H Macro Structure
     try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=4H&limit=17", headers, tag=f"{inst_id} 4H candles")
-        if d and d.get("code") == "0" and d.get("data"):
+        d = {"data": fetch_candles(inst_id, bar="4H", limit=16)}
+        if d["data"]:
             raw_4h = closed_okx_candles(d["data"])[:16]
             pkg["recent_4h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_4h[:8]]
             if len(raw_4h) >= 8:
@@ -340,8 +346,10 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
                     pkg["macro_4h"] = "4H_MACRO_BEAR (大级别空头承压)"
                 else:
                     pkg["macro_4h"] = "4H_MACRO_RANGE (大级别区间震荡)"
+        else:
+            print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（www/aws/CLI 三级容灾均未取回），4H 宏观结构字段降级缺省")
     except Exception as exc:
-        logger.warning("4H candles parse failed for %s: %s", inst_id, exc)
+        print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
 
     # 5. Funding Rate & OI
     if item["type"] == "crypto":
@@ -974,7 +982,8 @@ def assemble_decision_cache(
                 "last": p.get("price"),
                 "bidPx": p.get("bidPx"),
                 "askPx": p.get("askPx"),
-                "chg24h": p.get("chg24h")
+                "chg24h": p.get("chg24h"),
+                "vol24h": p.get("vol24h", 0.0)
             },
             "raw_funding_rate": f"{p['fundingRate']}%" if p.get('fundingRate') else "--",
             "raw_oi": p.get('oiUsd') or "--",

@@ -58,6 +58,56 @@ class CaptureReplayTests(unittest.TestCase):
         self.assertEqual(recorded["body"]["request_id"],requests[-1]["body"]["request_id"])
         self.assertEqual(usage["total_tokens"],25)
 
+    def test_model_retry_and_failover_keep_request_response_correlation(self):
+        from r20_backend import llm_manager
+        response = {"choices": [{"message": {"content": '{"action":"WAIT"}'}}],
+                    "usage": {"total_tokens": 32}}
+        primary = {"model": "primary-test", "base_url": "https://example.test/v1",
+                   "api_key": "private-test-key", "api_format": "openai_chat",
+                   "reasoning_type": "none", "thinking_timeout": 10,
+                   "request_attempts": 2, "fallback_model_ids": ["backup-test"]}
+        backup = {**primary, "model": "backup-test"}
+        calls = []
+        def transport(req, timeout):
+            payload = json.loads(req.data.decode("utf-8"))
+            calls.append(payload)
+            if payload["model"] == "primary-test":
+                raise urllib.error.HTTPError(req.full_url, 503, "busy", {}, io.BytesIO(b"busy"))
+            return io.BytesIO(json.dumps(response).encode("utf-8"))
+        with patch.object(llm_manager, "get_active_llm_runtime", return_value=primary), \
+                patch.object(llm_manager, "resolve_model_runtime", return_value=backup), \
+                patch.object(llm_manager, "record_failover_event"), \
+                patch.object(llm_manager.time, "sleep"), \
+                patch.object(llm_manager.urllib.request, "urlopen", side_effect=transport):
+            _, _, usage, _ = llm_manager.execute_llm_request(
+                [{"role": "user", "content": "fixture"}], reasoning_effort="none")
+        requests = self.events("llm.request")
+        self.assertEqual([r["body"]["request"]["model"] for r in requests],
+                         ["primary-test", "primary-test", "backup-test"])
+        self.assertEqual([r["body"]["attempt"] for r in requests], [0, 1, 0])
+        self.assertEqual([r["body"]["candidate_index"] for r in requests], [0, 0, 1])
+        self.assertEqual(len({r["body"]["request_id"] for r in requests}), 3)
+        self.assertEqual([r["body"]["http_status"] for r in self.events("llm.error")], [503, 503])
+        recorded = self.events("llm.response")
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["body"]["response"], response)
+        self.assertEqual(recorded[0]["body"]["request_id"], requests[-1]["body"]["request_id"])
+        self.assertEqual(usage["total_tokens"], 32)
+
+    def test_configured_confidence_floor_remains_in_risk_archive(self):
+        from r20_backend import interceptor_manager as manager
+        with patch("scripts.instrument_pool.load_instruments", return_value=[
+                {"instId": "BTC-USDT-SWAP", "conf_floor": 93}]), \
+                patch.object(manager, "list_plugins", return_value=[]):
+            action, _, _ = manager.run_interceptor_pipeline(
+                {"instId": "BTC-USDT-SWAP", "data_quality": "valid"},
+                {"action": "BUY_LONG", "entry_price": 100, "take_profit_price": 130,
+                 "stop_loss_price": 90, "confidence": 90}, {})
+        self.assertEqual(action, "WAIT")
+        events = [e for e in self.events("risk.rule") if e["body"]["rule"] == "confidence"]
+        self.assertEqual(events[0]["status"], "rejected")
+        self.assertEqual(events[0]["body"]["inputs"]["minimum"], 93)
+
     def test_parallel_seats_keep_cycle_but_separate_spans(self):
         @capture.observed("council.test")
         def seat(name):

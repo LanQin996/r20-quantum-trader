@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useDashboardStore } from '../../stores/dashboard'
+import { symOf, instIdOf } from '../../utils/instId'
 import { useTheme } from '../../composables/useTheme'
 import { useI18n } from '../../composables/useI18n'
 import {
@@ -106,7 +107,7 @@ const availableSymbols = computed(() => {
   // 1. 优先提取当前持仓标的 (去重)
   if (Array.isArray(store.positions)) {
     store.positions.forEach((p: any) => {
-      const sym = (p.name || p.instId?.replace('-USDT-SWAP', '').replace('-USDT', '') || '').toUpperCase()
+      const sym = (p.name || symOf(p.instId))
       if (sym) holdingSet.add(sym)
     })
   }
@@ -114,7 +115,7 @@ const availableSymbols = computed(() => {
   // 2. 优先提取挂单标的 (去重)
   if (Array.isArray(store.pendingOrders)) {
     store.pendingOrders.forEach((o: any) => {
-      const sym = (o.name || o.instId?.replace('-USDT-SWAP', '').replace('-USDT', '') || '').toUpperCase()
+      const sym = (o.name || symOf(o.instId))
       if (sym) holdingSet.add(sym)
     })
   }
@@ -123,7 +124,7 @@ const availableSymbols = computed(() => {
   //    此前误写为 store.factorLibrary，恒为 undefined 导致动态标的整段被跳过，标签页永远只剩硬编码兜底）
   if (Array.isArray(store.factors)) {
     store.factors.forEach((f: any) => {
-      const sym = (f.name || f.instId?.replace('-USDT-SWAP', '').replace('-USDT', '') || '').toUpperCase()
+      const sym = (f.name || symOf(f.instId))
       if (sym && !holdingSet.has(sym)) {
         otherSet.add(sym)
       }
@@ -213,7 +214,7 @@ const activeIndicators = ref<Record<string, boolean>>({
 // 记录已挂载的指标 Pane ID，以便精准开关
 
 // 当前标的计算
-const currentInstId = computed(() => `${currentSymbol.value}-USDT-SWAP`)
+const currentInstId = computed(() => instIdOf(currentSymbol.value))
 const factorItem = computed(() => {
   if (!Array.isArray(store.factors)) return undefined
   return store.factors.find(
@@ -250,7 +251,7 @@ const activePosition = computed(() => {
   if (!Array.isArray(store.positions)) return undefined
   const target = currentSymbol.value.toUpperCase()
   return store.positions.find((p) => {
-    const sym = (p.name || p.instId?.replace('-USDT-SWAP', '').replace('-USDT', '') || '').toUpperCase()
+    const sym = (p.name || symOf(p.instId))
     return sym === target || p.instId === currentInstId.value
   })
 })
@@ -258,7 +259,7 @@ const activeOrder = computed(() => {
   if (!Array.isArray(store.pendingOrders)) return undefined
   const target = currentSymbol.value.toUpperCase()
   return store.pendingOrders.find((o) => {
-    const sym = (o.name || o.inst || o.instId?.replace('-USDT-SWAP', '').replace('-USDT', '') || '').toUpperCase()
+    const sym = (o.name || symOf(o.inst || o.instId))
     return sym === target || o.instId === currentInstId.value
   })
 })
@@ -408,10 +409,8 @@ const riskRewardMetrics = computed(() => {
 })
 
 // 价格精度自适应
-function getSymbolPrecision(sym: string, price: number): number {
-  const upper = sym.toUpperCase()
-  if (upper.includes('BTC')) return 1
-  if (upper.includes('ETH') || upper.includes('SOL')) return 2
+function getSymbolPrecision(price: number): number {
+  if (price >= 10000) return 1
   if (price >= 100) return 2
   if (price >= 10) return 3
   if (price >= 1) return 3
@@ -912,7 +911,7 @@ async function loadCandles(silent = false, resetTime = false) {
       }))
 
       // 配置标的价格精度
-      const prec = getSymbolPrecision(currentSymbol.value, currentPrice.value)
+      const prec = getSymbolPrecision(currentPrice.value)
       klineChart.setSymbol({
         ticker: `${currentSymbol.value}/USDT`,
         pricePrecision: prec,

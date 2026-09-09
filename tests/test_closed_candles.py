@@ -112,6 +112,19 @@ class ClosedCandleServiceTests(OfflineTest):
                 patch.object(market_data_service.subprocess, 'run', return_value=result):
             self.assertEqual(market_data_service.fetch_candles(ITEM['instId']), [])
 
+    def test_chart_can_opt_into_forming_bars_on_rest_and_cli(self):
+        rows = [forming_bar(), *candle_rows(3)]
+        with patch.object(market_data_service, '_public_get', return_value={'data': rows}) as get:
+            actual = market_data_service.fetch_candles(ITEM['instId'], limit=3, closed_only=False)
+        self.assertEqual(actual, rows[:3])
+        self.assertEqual(get.call_args.kwargs['params']['limit'], 3)
+        result = types.SimpleNamespace(returncode=0, stdout=json.dumps(rows))
+        with patch.object(market_data_service, '_public_get', return_value=None), \
+                patch.object(market_data_service.subprocess, 'run', return_value=result) as cli:
+            actual = market_data_service.fetch_candles(ITEM['instId'], limit=3, closed_only=False)
+        self.assertEqual(actual, rows[:3])
+        self.assertIn('--limit 3', cli.call_args.args[0])
+
     def test_request_limit_never_exceeds_exchange_cap(self):
         with patch.object(market_data_service, '_public_get', return_value={'data': candle_rows(300)}) as get:
             self.assertEqual(len(market_data_service.fetch_candles(ITEM['instId'], limit=300)), 300)
@@ -119,13 +132,12 @@ class ClosedCandleServiceTests(OfflineTest):
 
     def test_backtest_uses_only_closed_bars_in_chronological_order(self):
         closed = candle_rows(4)
-        response = io.BytesIO(json.dumps({'code': '0', 'data': [forming_bar(), *closed]}).encode('utf-8'))
-        with patch.object(backtest_engine.urllib.request, 'urlopen', return_value=response) as get:
+        with patch.object(market_data_service, '_public_get', return_value={'data': [forming_bar(), *closed]}) as get:
             candles = backtest_engine.fetch_okx_candles(ITEM['instId'], limit=3)
         expected = list(reversed(closed[:3]))
         self.assertEqual([c['ts_ms'] for c in candles], [int(c[0]) for c in expected])
         self.assertEqual([c['close'] for c in candles], [float(c[4]) for c in expected])
-        self.assertIn('limit=4', get.call_args.args[0].full_url)
+        self.assertEqual(get.call_args.kwargs['params']['limit'], 4)
         self.assertEqual(set(candles[0]), {'symbol', 'timestamp', 'ts_ms', 'open', 'high', 'low', 'close', 'volume'})
 
 
@@ -149,6 +161,7 @@ class CandlePipelineTests(OfflineTest):
             'sys': types.SimpleNamespace(path=[]), 'WORKSPACE_DIR': str(ROOT),
             'NEWS_SENTIMENT_FILE': 'unused-news.json',
             'closed_okx_candles': closed_okx_candles,
+            'fetch_candles': market_data_service.fetch_candles,
             'logger': logging.getLogger('test_closed_candles'),
         }
 

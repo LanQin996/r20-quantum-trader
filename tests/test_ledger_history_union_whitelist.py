@@ -70,5 +70,50 @@ class RetiredCoinContractSpecTests(unittest.TestCase):
         sfl._CTVAL_CACHE.clear()
 
 
+class ClosedTradeSizeTests(unittest.TestCase):
+    """生命周期抽屉数量恒为 0 的回归钉扎：closed 行必须写入真实张数。"""
+
+    def setUp(self):
+        self._pool = sfl.TARGET_INSTRUMENTS
+        sfl.TARGET_INSTRUMENTS = [{"instId": "BTC-USDT-SWAP", "name": "BTC", "ctVal": 0.01}]
+
+    def tearDown(self):
+        sfl.TARGET_INSTRUMENTS = self._pool
+
+    def test_closed_size_uses_open_max_pos_when_close_total_missing(self):
+        from r20_backend.analysis_store import normalize_position
+        row = normalize_position({"type": "2", "openMaxPos": "3"})
+        self.assertEqual(float(row["sz"]), 3.0)
+
+    def test_closed_row_sz_from_close_total_pos(self):
+        from r20_backend.analysis_store import normalize_position
+        from types import SimpleNamespace
+        hist = [{
+            "instId": "BTC-USDT-SWAP", "direction": "long", "type": "2",
+            "openAvgPx": "50000", "closeAvgPx": "51000", "pnl": "10", "fee": "-1",
+            "lever": "3", "closeTotalPos": "2", "openMaxPos": "2", "pnlRatio": "3.0",
+            "cTime": "1700000000000", "uTime": "1700003600000",
+        }]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = os.path.join(tmp, "trading_ledger.json")
+            with patch('r20_backend.analysis_capture.enabled', return_value=True), \
+                 patch('r20_backend.analysis_capture.recover_legacy'), \
+                 patch('r20_backend.okx_trade_service._request', return_value=[]), \
+                 patch('scripts.okx_runtime.selected_environment', return_value=SimpleNamespace()), \
+                 patch('r20_backend.analysis_sync.sync_archive', return_value=[normalize_position(row) for row in hist]), \
+                 patch.object(sfl, "DATA_DIR", tmp), \
+                 patch.object(sfl, "LEDGER_JSON_FILE", ledger_path), \
+                 patch.object(sfl, "INITIAL_STATE_FILE", os.path.join(tmp, "no_such_state.json")):
+                trades = sfl.build_lifecycle_ledger()
+            written = json.loads(Path(ledger_path).read_text(encoding="utf-8"))
+
+        closed = [t for t in trades if t.get("status") == "closed"]
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(float(closed[0]["sz"]), 2.0)                       # 不再恒为 0
+        self.assertEqual(float(written[0]["sz"]), 2.0)                      # 落盘同样真实
+        self.assertAlmostEqual(closed[0]["margin"], 333.33, places=2)                # 2 * 0.01 * 50000 / 3
+
+
 if __name__ == "__main__":
     unittest.main()
