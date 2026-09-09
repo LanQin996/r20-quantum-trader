@@ -18,6 +18,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from .candle_data import closed_okx_candles
+except ImportError:  # Executed from the scripts directory.
+    from candle_data import closed_okx_candles
+
 logger = logging.getLogger("market_data_service")
 
 OKX_PUBLIC_HOSTS = [
@@ -262,19 +267,21 @@ def fetch_candles(
     limit: int = 45,
     timeout: float = 4.0,
 ) -> List[List[str]]:
-    """Fetch candles directly from OKX Official Market REST API with Keep-Alive."""
+    """Fetch up to limit confirmed candles, newest first, retaining OKX columns."""
+    limit = max(1, min(int(limit), 300))
+    request_limit = min(limit + 1, 300)  # Allow for the currently forming bar.
     data = _public_get(
         "/api/v5/market/candles",
-        params={"instId": inst_id, "bar": bar, "limit": limit},
+        params={"instId": inst_id, "bar": bar, "limit": request_limit},
         timeout=timeout,
     )
     if data and data.get("data"):
-        return data["data"]
+        return closed_okx_candles(data["data"])[:limit]
     
     # Emergency CLI fallback
     try:
         res = subprocess.run(
-            f"okx market candles {inst_id} --bar {bar} --limit {limit} --json 2>/dev/null",
+            f"okx market candles {inst_id} --bar {bar} --limit {request_limit} --json 2>/dev/null",
             shell=True,
             capture_output=True,
             text=True,
@@ -283,7 +290,7 @@ def fetch_candles(
         if res.returncode == 0 and res.stdout.strip():
             parsed = json.loads(res.stdout.strip())
             if isinstance(parsed, list):
-                return parsed
+                return closed_okx_candles(parsed)[:limit]
     except Exception:
         pass
     return []

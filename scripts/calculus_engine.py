@@ -3,8 +3,9 @@
 This module provides the core mathematical, continuous physical state, definite integration,
 and stochastic probabilistic foundation for R20 Quantum Trader.
 
-All functions are strictly causal: chronological sequences with newest observation last.
-No lookahead bias. Closed candle data is enforced.
+Single-series functions require chronological sequences, newest observation last.
+Callers must filter exchange confirmation flags before passing OHLCV/price arrays;
+these numeric arrays no longer contain the metadata needed to verify closure.
 """
 from __future__ import annotations
 
@@ -380,7 +381,7 @@ def calculate_calculus(
 
 
 def calculate_multi_timeframe(candles_by_tf: Dict[str, Sequence[Sequence[float]]]) -> Dict[str, Any]:
-    """Calculate multi-timeframe unified calculus, definite integral and probability metrics."""
+    """Calculate metrics from confirmed [O,H,L,C,V] rows, newest first per timeframe."""
     result: Dict[str, Any] = {}
     valid = []
     for timeframe, candles in candles_by_tf.items():

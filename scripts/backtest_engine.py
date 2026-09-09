@@ -26,6 +26,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from .candle_data import closed_okx_candles
+except ImportError:  # Direct script execution.
+    from candle_data import closed_okx_candles
+
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = WORKSPACE_DIR / "data"
 
@@ -76,14 +81,16 @@ class BacktestSummary:
 
 
 def fetch_okx_candles(inst_id: str, bar: str = "1H", limit: int = 100) -> List[Dict[str, Any]]:
-    """Fetch live historical K-line candles directly from OKX public market endpoint."""
-    url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
+    """Fetch confirmed historical candles in chronological order for backtests."""
+    limit = max(1, min(int(limit), 300))
+    request_limit = min(limit + 1, 300)
+    url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={request_limit}"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             if data.get("code") == "0" and data.get("data"):
-                raw = list(reversed(data["data"]))
+                raw = list(reversed(closed_okx_candles(data["data"])[:limit]))
                 candles = []
                 for c in raw:
                     ts_ms = int(c[0])

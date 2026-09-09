@@ -33,6 +33,7 @@ FACTOR_LIB_CACHE_FILE = os.path.join(DATA_DIR, "factor_library_snapshot.json")
 
 from instrument_pool import load_instruments
 from market_data_service import fetch_orderbook_depth, fetch_indicators_batch, fetch_ticker, fetch_funding_rate
+from candle_data import closed_okx_candles
 
 TARGET_INSTRUMENTS = load_instruments()
 
@@ -180,12 +181,13 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         pass
 
     # 3. 15M Candles -> ATR, RSI, VWAP Bias, Vol Ratio, OBV
+    raw_candles = []
     try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=15m&limit=24", headers=headers)
+        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=15m&limit=25", headers=headers)
         with urllib.request.urlopen(req, timeout=3) as resp:
             d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data") and len(d["data"]) >= 15:
-                raw_candles = d["data"]
+            raw_candles = closed_okx_candles(d.get("data"))[:24] if d.get("code") == "0" else []
+            if len(raw_candles) >= 15:
                 closes = [safe_float(c[4]) for c in reversed(raw_candles)]
                 highs = [safe_float(c[2]) for c in reversed(raw_candles)]
                 lows = [safe_float(c[3]) for c in reversed(raw_candles)]
@@ -273,12 +275,13 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         pass
 
     # 3.5. 1H Candles -> 1H ATR & 1H RSI
+    raw_1h = []
     try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=24", headers=headers)
+        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=25", headers=headers)
         with urllib.request.urlopen(req, timeout=3) as resp:
             d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data") and len(d["data"]) >= 15:
-                raw_1h = d["data"]
+            raw_1h = closed_okx_candles(d.get("data"))[:24] if d.get("code") == "0" else []
+            if len(raw_1h) >= 15:
                 closes_1h = [safe_float(c[4]) for c in reversed(raw_1h)]
                 highs_1h = [safe_float(c[2]) for c in reversed(raw_1h)]
                 lows_1h = [safe_float(c[3]) for c in reversed(raw_1h)]
@@ -465,7 +468,14 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     factors["composite_alpha_score"] = round(score, 1)
 
     # Decision Recommendation
-    if score >= 45.0 and adx >= 20.0 and c_j < 1.8:
+    candles_ready = (
+        len(raw_candles) >= 15
+        and len(raw_1h) >= 15
+        and factors["calculus_dynamics"]["quality"] > 0
+    )
+    if not candles_ready:
+        factors["signal_recommendation"] = "WAIT"
+    elif score >= 45.0 and adx >= 20.0 and c_j < 1.8:
         factors["signal_recommendation"] = "BUY_LONG"
     elif score <= -45.0 and adx >= 20.0 and c_j < 1.8:
         factors["signal_recommendation"] = "SELL_SHORT"

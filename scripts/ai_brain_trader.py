@@ -65,6 +65,7 @@ def _get_system_version_tag() -> str:
 WORKSPACE_DIR = PROJECT_ROOT
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
 from market_data_service import fetch_single_indicator, fetch_ticker
+from candle_data import closed_okx_candles
 AI_DECISION_CACHE_FILE = os.path.join(DATA_DIR, "ai_brain_decisions.json")
 AI_DECISION_HISTORY_FILE = os.path.join(DATA_DIR, "ai_brain_history.json")
 AI_POSITION_MANAGEMENT_FILE = os.path.join(DATA_DIR, "ai_position_management.json")
@@ -226,9 +227,9 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
 
     # 2. 15M Candles (recent 24, about 6 hours) & Technical Indicators Calculation
     try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=15m&limit=24", headers, tag=f"{inst_id} 15m candles")
+        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=15m&limit=25", headers, tag=f"{inst_id} 15m candles")
         if d and d.get("code") == "0" and d.get("data"):
-            raw_candles = d["data"]
+            raw_candles = closed_okx_candles(d["data"])[:24]
             pkg["recent_15m"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_candles[:12]]
 
             # Calculate 15M indicators
@@ -284,9 +285,9 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3. 1H Candles (recent 24, about 24 hours) & 1H ATR / 1H RSI
     try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=24", headers, tag=f"{inst_id} 1H candles")
+        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=25", headers, tag=f"{inst_id} 1H candles")
         if d and d.get("code") == "0" and d.get("data"):
-            raw_1h = d["data"]
+            raw_1h = closed_okx_candles(d["data"])[:24]
             pkg["recent_1h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_1h[:12]]
             if len(raw_1h) >= 15:
                 closes_1h = [float(c[4]) for c in reversed(raw_1h)]
@@ -325,9 +326,9 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
 
     # 4. 4H Candles (recent 16, about 64 hours) & 4H Macro Structure
     try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=4H&limit=16", headers, tag=f"{inst_id} 4H candles")
+        d = _okx_get_json(f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=4H&limit=17", headers, tag=f"{inst_id} 4H candles")
         if d and d.get("code") == "0" and d.get("data"):
-            raw_4h = d["data"]
+            raw_4h = closed_okx_candles(d["data"])[:16]
             pkg["recent_4h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_4h[:8]]
             if len(raw_4h) >= 8:
                 closes_4h = [float(c[4]) for c in reversed(raw_4h)]
@@ -391,7 +392,11 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
         and pkg["askPx"] >= pkg["bidPx"]
         and len(pkg["recent_15m"]) >= 12
         and len(pkg["recent_1h"]) >= 8
-        and len(pkg["recent_4h"]) >= 6
+        and len(pkg["recent_4h"]) >= 8
+        and pkg.get("atr_15m", 0) > 0
+        and pkg.get("atr_1h", 0) > 0
+        and "structure_1h" in pkg
+        and "macro_4h" in pkg
     )
     try:
         from calculus_engine import calculate_multi_timeframe
@@ -596,9 +601,9 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
 - ⚅ 概率论与统计风险: {prob_line}
 - ∂ 分周期速度/加速度/冲量: {calc_tf_line or 'UNKNOWN'}
 - 衍生品博弈: 资金费率: {p['fundingRate']}% | OI未平仓: {p['oiUsd']} | 多空比: {p['lsRatio']} | 5M主动吃单净差: {p['takerNetUsd']}
-- 15M K线(倒序12根 [O,H,L,C,V]): {k15}
-- 1H K线(倒序12根 [O,H,L,C,V]): {k1h}
-- 4H K线(倒序8根 [O,H,L,C,V]): {k4h}"""
+- 15M K线(已收盘，倒序12根 [O,H,L,C,V]): {k15}
+- 1H K线(已收盘，倒序12根 [O,H,L,C,V]): {k1h}
+- 4H K线(已收盘，倒序8根 [O,H,L,C,V]): {k4h}"""
         market_lines.append(info)
 
     all_market_str = "\n".join(market_lines)

@@ -261,7 +261,7 @@ def run_json_cmd(cmd, timeout=15):
         return None
 
 def fetch_candles_direct(inst_id: str, bar: str = "15m", limit: int = 45):
-    """Direct fetch from OKX Official Market REST API with Keep-Alive connection pooling."""
+    """Fetch exchange-confirmed raw OKX candles, newest first."""
     return fetch_candles(inst_id, bar=bar, limit=limit)
 
 def load_trackers():
@@ -893,14 +893,27 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
                 }
                 break
 
+    # Live execution prices must remain independent of closed-candle history.
+    # A confirmed 15M close is not a substitute for the current ticker/BBO.
+    try:
+        req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req_t, timeout=3) as response_t:
+            d_t = json.loads(response_t.read().decode("utf-8"))
+            if d_t.get("code") == "0" and d_t.get("data"):
+                t_item = d_t["data"][0]
+                f["price"] = float(t_item.get("last", 0) or 0)
+                f["bidPx"] = float(t_item.get("bidPx", 0) or 0)
+                f["askPx"] = float(t_item.get("askPx", 0) or 0)
+    except Exception:
+        pass
+
     # 1. Fetch 15M Candles
     raw_15m = fetch_candles_direct(inst_id, "15m", 45)
-    if raw_15m:
+    if len(raw_15m) >= 30:
         candles_15m = list(reversed(raw_15m))
         closes = [float(c[4]) for c in candles_15m]
         vols = [float(c[5]) if len(c) > 5 else 1.0 for c in candles_15m]
         
-        f["price"] = closes[-1]
         f["rsi"] = calc_rsi(closes, 14)
         f["rsi_7"] = calc_rsi(closes, 7)
         f["ema9"] = calc_ema(closes, 9)
@@ -940,24 +953,10 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
         # Latest 15M Candle Geometry
         last_c = candles_15m[-1]
         c_open, c_high, c_low, c_close = float(last_c[1]), float(last_c[2]), float(last_c[3]), float(last_c[4])
-        f["bidPx"] = f["price"]
-        f["askPx"] = f["price"]
-        # Fetch Real-time Orderbook Ticker BBO (Best Bid & Ask) for Precision Limit Placement
-        try:
-            req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_t, timeout=3) as response_t:
-                d_t = json.loads(response_t.read().decode("utf-8"))
-                if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
-                    t_item = d_t["data"][0]
-                    f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
-                    f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
-        except Exception:
-            pass
-
         f["is_bull_candle_15m"] = (c_close > c_open)
         f["is_bear_candle_15m"] = (c_close < c_open)
         
-        total_len = max(c_high - c_low, f["price"] * 0.0001)
+        total_len = max(c_high - c_low, c_close * 0.0001)
         lower_wick = min(c_open, c_close) - c_low
         upper_wick = c_high - max(c_open, c_close)
         f["lower_wick_ratio"] = lower_wick / total_len
@@ -969,7 +968,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
 
     # 2. Fetch 1H & 4H Trend Confluence
     raw_1h = fetch_candles_direct(inst_id, "1H", 35)
-    if raw_1h:
+    if len(raw_1h) >= 20:
         c_1h = list(reversed(raw_1h))
         closes_1h = [float(c[4]) for c in c_1h]
         highs_1h = [float(c[2]) for c in c_1h]
@@ -979,7 +978,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
         f["atr_1h"] = calc_atr(c_1h, 14)
         f["atr_15m"] = f["atr"]
         f["atr"] = max(f["atr_1h"], f["atr_15m"] * 1.5, f["price"] * 0.012)
-        f["atr_pct"] = (f["atr"] / f["price"]) * 100.0
+        f["atr_pct"] = (f["atr"] / f["price"]) * 100.0 if f["price"] > 0 else 0.0
         
         e9_1h = calc_ema(closes_1h, 9)
         e21_1h = calc_ema(closes_1h, 21)
@@ -1001,7 +1000,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
             f["structure_1h"] = "CHOP"
     
     raw_4h = fetch_candles_direct(inst_id, "4H", 25)
-    if raw_4h:
+    if len(raw_4h) >= 20:
         c_4h = list(reversed(raw_4h))
         closes_4h = [float(c[4]) for c in c_4h]
         e9_4h = calc_ema(closes_4h, 9)
@@ -1037,10 +1036,12 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
     f["calculus"] = {"valid": False, "regime": "RANGE_LOW_VELOCITY", "velocity": 0.0, "acceleration": 0.0, "impulse": 0.0, "max_abs_jerk": 0.0, "quality": 0.0}
     try:
         from calculus_engine import calculate_multi_timeframe
+        # Strip OKX metadata only after fetch_candles has checked confirm=1.
+        # The calculus engine takes [O,H,L,C,V], not [ts,O,H,L,C,V,...].
         f["calculus"] = calculate_multi_timeframe({
-            "15M": raw_15m,
-            "1H": raw_1h,
-            "4H": raw_4h
+            "15M": [row[1:6] for row in raw_15m],
+            "1H": [row[1:6] for row in raw_1h],
+            "4H": [row[1:6] for row in raw_4h]
         })
     except Exception:
         pass
