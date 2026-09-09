@@ -1870,6 +1870,7 @@ def execute_portfolio():
     ASSET_MARGIN_CAP = effective_single_asset_margin(usdt_available)
 
     brain_cache = {}
+    cycle_ok = True
     # One LLM call covers the full six-instrument universe and all active positions.
     if not cb_active and execute_batch_ai_brain_cycle:
         try:
@@ -1902,8 +1903,13 @@ def execute_portfolio():
                     save_trackers(trackers)
             else:
                 executed_actions.append("本轮AI推理失败或并发跳过，禁止复用旧持仓指令")
+                cycle_ok = False
         except Exception as e:
             print(f"[AI Brain Batch Scan Warning] {e}")
+            cycle_ok = False
+    elif not cb_active:
+        executed_actions.append("本轮AI推理模块不可用，禁止执行开仓")
+        cycle_ok = False
 
     if not cb_active:
         for f in all_factors:
@@ -2244,6 +2250,7 @@ def execute_portfolio():
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(log_entry)
     print(log_entry.strip())
+    return cycle_ok
 
 if __name__ == "__main__":
-    execute_portfolio()
+    raise SystemExit(0 if execute_portfolio() else 1)
