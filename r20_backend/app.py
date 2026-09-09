@@ -981,9 +981,13 @@ def run_gateway_job(
 
     cmd = [sys.executable, str(script_path), *job_cfg["args"]]
     try:
+        child_env = os.environ.copy()
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
             cmd,
             cwd=ROOT,
+            env=child_env,
             text=True,
             capture_output=True,
             timeout=job_cfg["timeout"],

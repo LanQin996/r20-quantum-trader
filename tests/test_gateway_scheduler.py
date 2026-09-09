@@ -53,6 +53,20 @@ class GatewaySchedulerTests(unittest.TestCase):
         reopened = GatewayStore(self.store.path)
         self.assertEqual(reopened.get_state("job.last.news"), self.now.isoformat())
 
+    def test_failed_interval_job_retries_once_in_same_slot(self):
+        trader = next(spec for spec in JOBS if spec.name == "trader")
+        boundary = self.now.replace(minute=15, second=0)
+        self.store.set_state("job.last.trader", boundary.replace(minute=0).isoformat())
+        with patch("r20_gateway.scheduler.current_jobs", return_value=(trader,)), \
+                patch("r20_gateway.scheduler.load_schedule", return_value={}), \
+                patch.object(self.scheduler, "_execute", return_value=False) as execute:
+            self.assertEqual(self.scheduler.tick(boundary), ["trader"])
+            self.assertEqual(self.scheduler.tick(boundary.replace(second=1)), [])
+            self.assertEqual(self.scheduler.tick(boundary + timedelta(seconds=60)), [])
+            self.assertEqual(self.scheduler.tick(boundary + timedelta(seconds=61)), ["trader"])
+            self.assertEqual(self.scheduler.tick(boundary + timedelta(seconds=62)), [])
+            self.assertEqual(execute.call_count, 2)
+
 
     def test_news_staggered_schedule_avoids_trader_collision(self):
         news = next(spec for spec in JOBS if spec.name == "news")

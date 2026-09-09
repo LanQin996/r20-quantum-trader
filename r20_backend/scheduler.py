@@ -6,6 +6,7 @@ which preserves each script's file lock and fail-closed behavior.
 from __future__ import annotations
 import fcntl_compat as fcntl
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -56,7 +57,10 @@ def gateway_scheduler_running() -> bool:
 
 def run_script(name: str) -> None:
     script = SCRIPTS / JOBS[name][0]
-    result = subprocess.run([sys.executable, str(script)], cwd=ROOT, text=True, capture_output=True, timeout=600)
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    result = subprocess.run([sys.executable, str(script)], cwd=ROOT, env=child_env, text=True, capture_output=True, timeout=600)
     if result.returncode:
         logging.error("job=%s rc=%s stderr=%s", name, result.returncode, result.stderr[-1000:])
     else:

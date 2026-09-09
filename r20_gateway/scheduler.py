@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -103,7 +104,10 @@ class GatewayScheduler:
     def __init__(self, store: GatewayStore, max_workers: int = 3):
         self.store = store
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="r20-job")
-        self.running: dict[str, Future[None]] = {}
+        self.running: dict[str, Future[bool]] = {}
+        self.retry_slots: dict[str, int] = {}
+        self.retried_slots: dict[str, int] = {}
+        self.retry_after: dict[str, datetime] = {}
 
     def _last_at(self, name: str) -> datetime | None:
         raw = self.store.get_state(f"job.last.{name}")
@@ -141,15 +145,24 @@ class GatewayScheduler:
             return False
         return not last or last.date() != now.date() or last.strftime("%H:%M") != minute
 
-    def _execute(self, spec: JobSpec) -> None:
+    def _slot(self, spec: JobSpec, timestamp: datetime) -> int | None:
+        if not spec.interval_seconds:
+            return None
+        return (int(timestamp.timestamp()) - spec.offset_seconds) // spec.interval_seconds
+
+    def _execute(self, spec: JobSpec) -> bool:
         run_id = self.store.begin_job(spec.name)
         try:
             command = [sys.executable, str(SCRIPTS / spec.script)]
             if spec.schedule_key.startswith("backup_job:"):
                 command.extend(["--job-id", spec.schedule_key.split(":", 1)[1]])
+            child_env = os.environ.copy()
+            child_env["PYTHONUTF8"] = "1"
+            child_env["PYTHONIOENCODING"] = "utf-8"
             result = subprocess.run(
                 command,
                 cwd=ROOT,
+                env=child_env,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -158,19 +171,55 @@ class GatewayScheduler:
             )
             detail = (result.stderr if result.returncode else result.stdout)[-2000:]
             self.store.finish_job(run_id, result.returncode, detail)
+            return result.returncode == 0
         except subprocess.TimeoutExpired as exc:
             self.store.finish_job(run_id, 124, f"timeout after {spec.timeout_seconds}s: {exc}")
+            return False
         except Exception as exc:
             self.store.finish_job(run_id, 1, f"{type(exc).__name__}: {exc}")
+            return False
 
     def tick(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(BJ_TZ)
-        self.running = {name: future for name, future in self.running.items() if not future.done()}
+        specs_by_name = {spec.name: spec for spec in current_jobs()}
+        finished: dict[str, Future[bool]] = {
+            name: future for name, future in self.running.items() if future.done()
+        }
+        for name, future in finished.items():
+            spec = specs_by_name.get(name)
+            self.running.pop(name, None)
+            if not spec or not spec.interval_seconds:
+                continue
+            try:
+                succeeded = bool(future.result())
+            except Exception:
+                succeeded = False
+            if succeeded:
+                continue
+            last_launch = self._last_at(name)
+            launch_slot = self._slot(spec, last_launch) if last_launch else None
+            if launch_slot is not None and self.retried_slots.get(name) != launch_slot:
+                self.retry_slots[name] = launch_slot
+                self.retry_after[name] = now + timedelta(seconds=60)
         schedule = load_schedule()
         launched: list[str] = []
         for spec in current_jobs():
-            if spec.name in self.running or not self.due(spec, now, schedule):
+            if spec.name in self.running:
                 continue
+            slot = self._slot(spec, now)
+            retry_due = (
+                slot is not None
+                and self.retry_slots.get(spec.name) == slot
+                and now >= self.retry_after.get(spec.name, now + timedelta(days=1))
+            )
+            if retry_due:
+                self.retry_slots.pop(spec.name, None)
+                self.retry_after.pop(spec.name, None)
+                self.retried_slots[spec.name] = slot
+            elif not self.due(spec, now, schedule):
+                continue
+            elif slot is not None:
+                self.retried_slots.pop(spec.name, None)
             future = self.executor.submit(self._execute, spec)
             self.store.set_state(f"job.last.{spec.name}", now.isoformat())
             self.running[spec.name] = future
