@@ -6,6 +6,8 @@ Supports:
 """
 from __future__ import annotations
 import copy
+from functools import wraps
+from threading import RLock
 import json
 import os
 import re
@@ -31,6 +33,17 @@ SUPPORTED_API_FORMATS = [
 STANDARD_REASONING_EFFORTS = ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 
 
+_LLM_CONFIG_LOCK = RLock()
+
+def _serialized_config(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _LLM_CONFIG_LOCK:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_serialized_config
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_path = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
@@ -180,6 +193,7 @@ DEFAULT_PROVIDERS = [
 
 
 
+@_serialized_config
 def init_llm_config() -> Dict[str, Any]:
     """Load or initialize clean, user-centric model configuration with multi-provider support."""
     from .config import settings
@@ -193,6 +207,8 @@ def init_llm_config() -> Dict[str, Any]:
                     data = loaded
         except Exception:
             data = {}
+
+    original_data = copy.deepcopy(data)
 
     # Extract current settings from .env / settings
     # 安全约束：不再内置任何私有中继网关作为静默默认，出口地址必须由用户显式配置。
@@ -324,7 +340,8 @@ def init_llm_config() -> Dict[str, Any]:
         "providers": merged_providers,
         "models": flat_models,
     }
-    _atomic_write_json(LLM_CONFIG_FILE, config)
+    if config != original_data:
+        _atomic_write_json(LLM_CONFIG_FILE, config)
     return config
 
 
@@ -1216,6 +1233,9 @@ def build_chat_payload(
     return payload
 
 
+from r20_backend import analysis_capture
+
+@analysis_capture.observed('llm.call')
 def execute_llm_request(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
@@ -1283,15 +1303,17 @@ def execute_llm_request(
     last_exc: Exception | None = None
     for attempt in range(3):
         try:
-            resp_handle = urllib.request.urlopen(req, timeout=effective_timeout)
+            resp_handle = analysis_capture.llm_request(req, effective_timeout, urllib.request.urlopen, attempt=attempt, api_format=target_format)
             break
         except urllib.error.HTTPError as exc:
             err_b = ""
             try:
                 err_b = exc.read().decode("utf-8", errors="replace")
+                exc.close()
             except Exception:
                 pass
             last_exc = exc
+            analysis_capture.emit("llm.error", {"attempt": attempt, "http_status": exc.code, "body": err_b}, "failed")
 
             # Adaptive fallback retry on rejected parameter
             if exc.code == 400 and any(kw in err_b.lower() for kw in ["reasoning_effort", "temperature", "response_format", "invalid parameter"]):
@@ -1305,7 +1327,7 @@ def execute_llm_request(
                     headers=headers,
                 )
                 try:
-                    resp_handle = urllib.request.urlopen(fb_req, timeout=effective_timeout)
+                    resp_handle = analysis_capture.llm_request(fb_req, effective_timeout, urllib.request.urlopen, attempt=attempt, fallback=True, api_format=target_format)
                     last_exc = None
                     break
                 except Exception as fb_exc:
@@ -1346,6 +1368,7 @@ def execute_llm_request(
         body_bytes = resp.read()
         res_json = json.loads(body_bytes.decode("utf-8", errors="replace"))
 
+    analysis_capture.emit("llm.response", {"response": res_json, "latency_ms": latency_ms}, "received")
     content = ""
     reasoning_content = ""
     usage = res_json.get("usage", {})

@@ -3,7 +3,8 @@
  * 交易台账视图：汇总带 → 筛选条 → 明细表（行点击 → 生命周期抽屉）→ 巡检日志折叠区。
  * 事实源：/api/all trades（交易所持仓史双源交叉验证重建）。
  */
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
+import { get } from '../../api/http';
 import { Download, ScrollText } from 'lucide-vue-next';
 import { useDashboardStore } from '../../stores/dashboard';
 import { useI18n } from '../../composables/useI18n';
@@ -23,12 +24,13 @@ const { t } = useI18n();
 const toast = useToast();
 
 const all = computed<any[]>(() => (store.data as any)?.trades || []);
-const perf = computed<any>(() => (store.data as any)?.performance || {});
+const aggregate = ref<any>({ statistics: {}, performance: {} });
+const perf = computed<any>(() => aggregate.value.performance || {});
 
 /* —— 筛选 —— */
 const fStatus = ref<'all' | 'closed' | 'holding'>('closed');
 const fSide = ref<'all' | 'long' | 'short'>('all');
-const fResult = ref<'all' | 'win' | 'loss'>('all');
+const fResult = ref<'all' | 'win' | 'loss' | 'breakeven'>('all');
 const fInst = ref('all');
 
 const instOptions = computed(() => {
@@ -41,8 +43,10 @@ const filtered = computed(() =>
     if (fStatus.value === 'closed' && x.status === 'holding') return false;
     if (fStatus.value === 'holding' && x.status !== 'holding') return false;
     if (fSide.value !== 'all' && (fSide.value === 'long' ? x.side !== '多' : x.side !== '空')) return false;
+    if (fResult.value !== 'all' && (!x.cost_complete || x.net_pnl == null)) return false;
     if (fResult.value === 'win' && !(Number(x.net_pnl) > 0)) return false;
-    if (fResult.value === 'loss' && !(Number(x.net_pnl) <= 0)) return false;
+    if (fResult.value === 'loss' && !(Number(x.net_pnl) < 0)) return false;
+    if (fResult.value === 'breakeven' && Number(x.net_pnl) !== 0) return false;
     if (fInst.value !== 'all' && x.inst !== fInst.value) return false;
     return true;
   }),
@@ -55,18 +59,28 @@ const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / P
 const rows = computed(() => filtered.value.slice((page.value - 1) * PAGE, page.value * PAGE));
 
 /* —— 汇总 —— */
-const netSum = computed(() => filtered.value.reduce((s, x) => s + (Number(x.net_pnl) || 0), 0));
-const feeSum = computed(() => filtered.value.reduce((s, x) => s + Math.abs(Number(x.fee) || 0), 0));
-const wins = computed(() => filtered.value.filter((x) => Number(x.net_pnl) > 0).length);
-const winRate = computed(() => (filtered.value.length ? Math.round((wins.value / filtered.value.length) * 1000) / 10 : null));
+const netSum = computed(() => aggregate.value.statistics?.net_pnl);
+const feeSum = computed(() => aggregate.value.statistics?.fee == null ? null : Math.abs(aggregate.value.statistics.fee));
+const wins = computed(() => aggregate.value.statistics?.wins ?? 0);
+const winRate = computed(() => aggregate.value.statistics?.win_rate ?? null);
 const best = computed(() => (perf.value.leaderboard || [])[0]);
+let statsRequest = 0;
+watch(() => filtered.value.map(x => x.id).join(','), async (ids) => {
+  const request = ++statsRequest;
+  aggregate.value = { statistics: {}, performance: {} };
+  try {
+    const result = await get('/api/v1/ledger-statistics?trade_ids=' + encodeURIComponent(ids));
+    if (request === statsRequest) aggregate.value = result;
+  } catch (e) { if (request === statsRequest) toast.err(String(e)); }
+}, { immediate: true });
+watch([fStatus, fSide, fResult, fInst], () => { page.value = 1; });
 
 /* —— 详情 —— */
 const detail = ref<any>(null);
 
 /* —— CSV 导出 —— */
 function exportCsv() {
-  const head = ['inst', 'side', 'lever', 'open_time', 'open_px', 'close_time', 'close_px', 'margin', 'fee', 'net_pnl', 'roi_pct', 'duration', 'exit_reason', 'strategy'];
+  const head = ['inst', 'side', 'lever', 'open_time', 'open_px', 'close_time', 'close_px', 'margin', 'fee', 'net_pnl', 'roi_pct', 'duration', 'exit_reason', 'strategy', 'id', 'cost_complete', 'cost_basis', 'funding_fee', 'exit_evidence'];
   const lines = [head.join(',')];
   for (const x of filtered.value) {
     lines.push(head.map((k) => `"${String(x[k] ?? '').replaceAll('"', '""')}"`).join(','));
@@ -94,7 +108,7 @@ function dirOf(side: string): 'long' | 'short' {
       <BaseStat
         :label="t('dash.ledger.summary.winRate')"
         :value="winRate != null ? fmtNum(winRate, 1) + '%' : '--'"
-        :delta="`${wins} / ${filtered.length}`"
+        :delta="`${wins} / ${aggregate.statistics?.sample_count ?? 0}`"
         delta-tone="muted"
        
       />
@@ -140,12 +154,14 @@ function dirOf(side: string): 'long' | 'short' {
             { value: 'all', label: t('common.all') },
             { value: 'win', label: t('dash.ledger.filters.results.win') },
             { value: 'loss', label: t('dash.ledger.filters.results.loss') },
+            { value: 'breakeven', label: t('analysis.breakeven') },
           ]"
         />
         <select v-model="fInst" class="field field-sm w-auto ms-auto" @change="page = 1">
           <option v-for="o in instOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
         </select>
         <span class="t-faint num text-xs shrink-0">{{ t('dash.ledger.filters.n', undefined, { n: filtered.length, total: all.length }) }}</span>
+        <RouterLink to="/admin/analysis" class="btn btn-ghost btn-sm">{{ t("analysis.title") }} · {{ t("analysis.export") }}</RouterLink>
         <button class="btn btn-ghost btn-sm shrink-0" :disabled="!filtered.length" @click="exportCsv">
           <Download />{{ t('dash.ledger.exportCsv') }}
         </button>
@@ -183,7 +199,7 @@ function dirOf(side: string): 'long' | 'short' {
                   {{ arrow(x.net_pnl) }} {{ fmtSigned(x.net_pnl) }}
                   <span class="t-faint block text-2xs">{{ fmtPct(x.roi_pct) }}</span>
                 </td>
-                <td class="col-num t-faint">{{ fmtNum(Math.abs(Number(x.fee) || 0), 2) }}</td>
+                <td class="col-num t-faint">{{ fmtNum(x.fee == null ? null : Math.abs(Number(x.fee)), 2) }}</td>
                 <td class="num text-xs" style="color: var(--ink-2)">{{ x.duration || '--' }}</td>
                 <td class="text-xs" style="color: var(--ink-2)">{{ cleanReason(x.exit_reason) }}</td>
                 <td class="num text-xs" style="color: var(--ink-3)">{{ String(x.close_time || '').slice(5, 16) }}</td>

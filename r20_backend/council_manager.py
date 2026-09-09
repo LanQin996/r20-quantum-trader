@@ -405,6 +405,9 @@ def reset_role_template(role_id: str) -> Dict[str, Any]:
     return save_council_config(config)
 
 
+from r20_backend import analysis_capture
+
+@analysis_capture.observed('council.proposal')
 def _call_single_trader(
     role_id: str,
     role_spec: Dict[str, Any],
@@ -506,6 +509,7 @@ def _call_single_trader(
         }
 
 
+@analysis_capture.observed('council.critique')
 def _call_single_trader_critique(
     role_id: str,
     role_spec: Dict[str, Any],
@@ -667,7 +671,7 @@ def execute_council_debate(
         round1_budget = max(2.0, min(rem * 0.35, rem - (MIN_SAFE_REASONING_TIME * 2.0)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
             futures = {
-                pool.submit(
+                analysis_capture.threaded_submit(pool,
                     _call_single_trader,
                     key,
                     roles[key],
@@ -720,7 +724,7 @@ def execute_council_debate(
                                 f"{p_res.get('content', '（未提交）')}"
                             )
                     peers_text = "\n\n".join(peers_text_list) if peers_text_list else "（无其他同行提案）"
-                    critique_futures[pool.submit(
+                    critique_futures[analysis_capture.threaded_submit(pool,
                         _call_single_trader_critique,
                         k,
                         roles[k],
@@ -752,7 +756,7 @@ def execute_council_debate(
         member_timeout = max(2.0, min(rem * 0.50, rem - MIN_SAFE_REASONING_TIME))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
             futures = {
-                pool.submit(
+                analysis_capture.threaded_submit(pool,
                     _call_single_trader,
                     key,
                     roles[key],

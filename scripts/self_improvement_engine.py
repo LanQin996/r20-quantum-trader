@@ -128,70 +128,43 @@ def load_signal_journal():
 
 
 def _match_snapshot(journal_by_inst, inst, open_time):
-    """按开仓时间就近匹配（不晚于开仓时间的最后一条）开仓快照。"""
-    candidates = journal_by_inst.get(inst) or []
-    if not candidates or not open_time:
-        return None
-    best = None
-    for rec in candidates:
-        if str(rec.get("entryTime") or "") <= str(open_time):
-            if best is None or str(rec.get("entryTime") or "") > str(best.get("entryTime") or ""):
-                best = rec
-    if best is None and candidates:
-        best = candidates[0]
-    return (best or {}).get("snapshot")
+    """Legacy proximity is insufficient to establish a decision-to-fill relation."""
+    return None
 
 
 def load_closed_trades():
-    account_init_file = os.path.join(DATA_DIR, "account_initial_state.json")
-    reset_time_str = "1970-01-01 00:00:00"
-    if os.path.exists(account_init_file):
-        try:
-            with open(account_init_file, "r", encoding="utf-8") as f:
-                acc_init = json.load(f)
-                reset_time_str = acc_init.get("reset_time", "1970-01-01 00:00:00")
-        except Exception:
-            pass
-
-    journal_by_inst = load_signal_journal()
-    closed_trades = []
-    if os.path.exists(LEDGER_JSON_FILE):
-        try:
-            with open(LEDGER_JSON_FILE, "r", encoding="utf-8") as f:
-                t_list = json.load(f)
-                for t in t_list:
-                    if t.get("status") == "holding":
-                        continue
-                    
-                    c_time = str(t.get("close_time") or t.get("time") or "")
-                    if c_time and c_time < reset_time_str:
-                        continue
-
-                    inst = str(t.get("inst") or t.get("name") or "OTHER")
-                    if inst not in TARGET_INSTRUMENTS:
-                        continue
-                    pnl = float(t.get("pnl", 0.0) or 0.0)
-                    gross = float(t.get("gross_pnl", pnl) or pnl)
-                    fee = abs(float(t.get("fee", 0.0) or 0.0))
-                    strat = str(t.get("strategy") or "⚡ 趋势")
-                    reason = str(t.get("exit_reason") or t.get("remark") or "")
-
-                    closed_trades.append({
-                        "inst": inst,
-                        "time": c_time,
-                        "open_time": t.get("open_time", ""),
-                        "strategy": strat,
-                        "margin": t.get("margin", "--"),
-                        "gross_pnl": round(gross, 2),
-                        "fee": round(fee, 2),
-                        "net_pnl": round(pnl, 2),
-                        "exit_reason": reason,
-                        "entry_snapshot": t.get("signal_snapshot") or _match_snapshot(journal_by_inst, inst, t.get("open_time")),
-                    })
-        except Exception as e:
-            log_msg(f"读取交易台账异常: {e}")
-
-    return closed_trades
+    """Only verifiable, cost-complete closed lifecycles feed the review."""
+    from r20_backend.analysis_store import Archive, timestamp_ms
+    from r20_backend.analysis_metrics import cost_complete
+    from r20_backend.analysis_capture import identity
+    from r20_backend.analysis_service import trade_detail
+    reset_ms = 0
+    path = os.path.join(DATA_DIR, "account_initial_state.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            reset_ms = timestamp_ms(json.load(handle).get("reset_time")) or 0
+    archive = Archive()
+    rows = archive.trades(identity(), {"status": "closed", "start_ms": reset_ms})
+    output = []
+    for row in rows:
+        if not cost_complete(row):
+            continue
+        t = dict(row)
+        t["net_pnl"] = float(t["net_pnl"])
+        t["fee"] = float(t["fee"]) if t.get("fee") is not None else None
+        t["time"] = t.get("close_time")
+        # Never guess an entry snapshot from another nearby trade.
+        t["entry_snapshot"] = None
+        if t.get("decision_id"):
+            detail = trade_detail(identity(), t["id"], archive)
+            with archive.connect() as con:
+                for event in (detail or {}).get("events", []):
+                    if event["kind"] == "decision.proposed" and event["decision_id"] == t["decision_id"]:
+                        full = con.execute("SELECT body_hash FROM analysis_events WHERE id=? AND account=?", (event["id"], identity())).fetchone()
+                        if full:
+                            t["entry_snapshot"] = archive.read_blob(con, full[0]).get("market")
+        output.append(t)
+    return output
 
 EVOLUTION_SYSTEM_PROMPT = """你是 R20 Quantum Trader 的首席投资官，负责基于真实已平仓交易证据进行认知复盘。模型只输出严格 JSON；宿主程序负责北京时间戳与 Markdown 渲染。
 
@@ -222,6 +195,9 @@ def resolve_memory_update(change_status: str, proposed_memory: Any, existing_mem
     return status, list(existing_memory if preserve else proposed), preserve
 
 
+from r20_backend import analysis_capture
+from r20_backend.analysis_metrics import summarize as summarize_trades
+
 def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memory_md: str = "", timestamp_str: str = "") -> Dict[str, Any]:
     base_url, api_key = get_cpa_client_config()
     if not api_key:
@@ -233,10 +209,11 @@ def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memo
 
     total = len(closed_trades)
     wins = [t for t in closed_trades if t["net_pnl"] > 0]
-    losses = [t for t in closed_trades if t["net_pnl"] <= 0]
-    win_rate = round(len(wins) / total * 100, 1) if total > 0 else 0.0
+    losses = [t for t in closed_trades if t["net_pnl"] < 0]
+    common_stats = summarize_trades([dict(t, status="closed", cost_complete=True) for t in closed_trades])
+    win_rate = common_stats["win_rate"]
     total_net = round(sum(t["net_pnl"] for t in closed_trades), 2)
-    total_fees = round(sum(t["fee"] for t in closed_trades), 2)
+    total_fees = round(sum(t.get("fee") or 0 for t in closed_trades), 2)
 
     memory_context = f"""======================= 【当前系统已有的历史长期记忆库】 =======================
 {existing_memory_md.strip()}
@@ -283,12 +260,14 @@ def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memo
         "total_net": f"{total_net:+.2f}", "total_fees": f"{total_fees:.2f}",
         "target_instruments": ", ".join(TARGET_INSTRUMENTS),
         "closed_trades_json": json.dumps(closed_trades, indent=2, ensure_ascii=False),
+        "cost_completeness_note": "费用分项缺失时请勿从已知合计推定完整费用；净盈亏以交易所确认为准",
         "active_instruments": ",".join(TARGET_INSTRUMENTS),
         "profile_name": profile.get("name", ""), "timezone": "Asia/Shanghai",
         "strategy_version": os.getenv("R20_VERSION", f"v{__version__}"),
     }
     effective_evolution_system = apply_module_layout(EVOLUTION_SYSTEM_PROMPT, profile, "evolution_system", f"{profile.get('name', '稳健')}自进化系统提示词模板", context=runtime_context)
     effective_evolution_user = apply_module_layout(prompt, profile, "evolution_user", f"{profile.get('name', '稳健')}自进化用户提示词模板", context=runtime_context)
+    analysis_capture.emit("prompt.rendered", {"profile": profile, "variables": runtime_context, "system": effective_evolution_system, "user": effective_evolution_user})
     try:
         snapshot = f"【SYSTEM PROMPT】:\n{effective_evolution_system.strip()}\n\n{'='*70}\n【USER PROMPT ({now_bj_str})】：\n{effective_evolution_user.strip()}"
         fd, temp_path = tempfile.mkstemp(prefix=".evolution-prompt-", suffix=".tmp", dir=DATA_DIR)
@@ -355,10 +334,11 @@ def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memo
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
             )
-            with urllib.request.urlopen(req, timeout=thinking_timeout) as resp:
+            with analysis_capture.llm_request(req, thinking_timeout, urllib.request.urlopen, legacy_fallback=True) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 content = res["choices"][0]["message"]["content"].strip()
                 raw_res = res
+                analysis_capture.emit("llm.response", {"response": res}, "received")
 
         content = (content or "").strip()
         if content.startswith("```json"):
@@ -382,6 +362,7 @@ def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memo
         return {"__llm_error__": f"{type(e).__name__}: {e}"}
 
 @single_evolution_cycle
+@analysis_capture.cycle('self_improvement')
 def run_self_evolution(force: bool = False):
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now_bj = datetime.datetime.now(tz_bj)
@@ -405,13 +386,14 @@ def run_self_evolution(force: bool = False):
 
     # 1. Base Stats
     win_trades = [t for t in closed_trades if t["net_pnl"] > 0]
-    loss_trades = [t for t in closed_trades if t["net_pnl"] <= 0]
+    loss_trades = [t for t in closed_trades if t["net_pnl"] < 0]
     win_count = len(win_trades)
-    win_rate = round(win_count / total_trades * 100, 1) if total_trades > 0 else 0.0
+    common_stats = summarize_trades([dict(t, status="closed", cost_complete=True) for t in closed_trades])
+    win_rate = common_stats["win_rate"]
     total_win_amt = sum(t["net_pnl"] for t in win_trades)
     total_loss_amt = abs(sum(t["net_pnl"] for t in loss_trades))
-    total_fees_amt = sum(t["fee"] for t in closed_trades)
-    profit_factor = round(total_win_amt / total_loss_amt, 2) if total_loss_amt > 0 else (99.0 if total_win_amt > 0 else 0.0)
+    total_fees_amt = sum(t.get("fee") or 0 for t in closed_trades)
+    profit_factor = common_stats["profit_factor"]
 
     from scripts import evolution_shield as memory_service
     memory_snapshot, existing_memory_md, existing_core_lessons = memory_service.read_trading_context(
@@ -501,6 +483,9 @@ def run_self_evolution(force: bool = False):
         "llm_error": str(llm_review.get("__llm_error__") or ""),
     }
 
+    report_payload["statistics"] = common_stats
+    report_payload["statistics_version"] = common_stats["statistics_version"]
+    analysis_capture.emit("evolution.report", report_payload, "completed")
     atomic_write_json(REPORT_JSON_FILE, report_payload)
 
     log_msg(f"🧬 自进化认知复盘完成 | 状态={change_status} | 当前保留 {len(long_term_memory)} 条启发式长期记忆")

@@ -274,86 +274,87 @@ def _load_module_from_file(file_path: Path) -> Any:
 
 
 def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], context: dict[str, Any]) -> tuple[str, str, float]:
-    """
-    Executes core deterministic non-bypassable risk checks, then all enabled interceptor plugins in sequence.
-    Returns: (final_action, rejection_reason, risk_reward_ratio)
-    - If all checks & enabled plugins pass: returns (raw_action, "", rr)
-    - If any check or plugin rejects: returns ("WAIT", rejection_reason, rr)
-    """
+    """Run the existing fail-closed rules, recording only checks actually executed."""
     from scripts.order_risk import validate_quote_geometry_and_rr
+    from r20_backend import analysis_capture as capture
 
     inst_id = str(package.get("instId") or "")
     raw_action = str(decision.get("action", "WAIT")).upper()
     if raw_action not in {"BUY_LONG", "SELL_SHORT", "WAIT"}:
         raw_action = "WAIT"
-
-    entry = decision.get("entry_price")
-    tp = decision.get("take_profit_price")
-    sl = decision.get("stop_loss_price")
-
-    # If already WAIT, return immediately
-    if raw_action == "WAIT":
-        # Calculate rr if possible for telemetry, but never open
-        _, _, rr_val = validate_quote_geometry_and_rr("BUY_LONG" if str(entry or 0) > str(sl or 0) else "SELL_SHORT", entry, tp, sl)
-        return "WAIT", "", rr_val
-
-    # 1. Base Core Pre-check: Data Completeness & Direction Collisions
-    if package.get("data_quality") != "valid":
-        return "WAIT", "关键原始行情不完整，安全降级为 WAIT。", 0.0
-
-    active_inst_ids = context.get("active_inst_ids", set())
-    active_position_sides = context.get("active_position_sides", {})
-    if inst_id in active_inst_ids:
-        pos_side = active_position_sides.get(inst_id, "")
-        is_same = (pos_side == "long" and raw_action == "BUY_LONG") or (pos_side == "short" and raw_action == "SELL_SHORT")
-        if not is_same:
-            return "WAIT", "已有反向或不兼容持仓，禁止借决策通道反向开仓，安全降级为 WAIT。", 0.0
-
-    # 2. Non-Bypassable Core Safety Floor: Finite values, Geometry & Global Minimum RR >= 2.0
-    quote_valid, quote_reason, rr = validate_quote_geometry_and_rr(raw_action, entry, tp, sl)
-    if not quote_valid:
-        return "WAIT", quote_reason, rr
-
-    # 3. Non-Bypassable Core Safety Floor: Confidence threshold (Global Floor: 75%, DOGE floor: 80%)
+    entry, tp, sl = decision.get("entry_price"), decision.get("take_profit_price"), decision.get("stop_loss_price")
+    rule_names = ["data_quality", "direction_collision", "quote_geometry_rr", "confidence"]
     try:
-        conf = float(decision.get("confidence", 0) or 0)
-    except (TypeError, ValueError):
-        return "WAIT", "核心风控拦截：置信度必须是有效数字", rr
+        catalog = [p["filename"] for p in list_plugins(create_if_missing=False) if p.get("enabled")]
+    except Exception:
+        catalog = []
+    pending = rule_names + catalog
 
+    def record(rule, passed, reason="", inputs=None, status=None):
+        if rule in pending: pending.remove(rule)
+        capture.emit("risk.rule", {"rule":rule,"reason":reason,"inputs":inputs or {},
+                     "decision":decision,"context":context}, status or ("passed" if passed else "rejected"), inst=inst_id)
+
+    def finish(action, reason, rr):
+        for rule in pending:
+            capture.emit("risk.rule", {"rule":rule,"reason":"前序裁决已结束，未执行"},
+                         "not_executed",inst=inst_id)
+        return action,reason,rr
+
+    if raw_action == "WAIT":
+        _,_,rr_val = validate_quote_geometry_and_rr("BUY_LONG" if str(entry or 0)>str(sl or 0) else "SELL_SHORT",entry,tp,sl)
+        return finish("WAIT","",rr_val)
+    valid = package.get("data_quality") == "valid"
+    record("data_quality",valid,inputs={"data_quality":package.get("data_quality")})
+    if not valid:
+        return finish("WAIT","关键原始行情不完整，安全降级为 WAIT。",0.0)
+    active_inst_ids = context.get("active_inst_ids",set())
+    active_position_sides = context.get("active_position_sides",{})
+    pos_side = active_position_sides.get(inst_id,"")
+    collision = inst_id in active_inst_ids and not ((pos_side=="long" and raw_action=="BUY_LONG") or (pos_side=="short" and raw_action=="SELL_SHORT"))
+    record("direction_collision",not collision,inputs={"position_side":pos_side,"action":raw_action})
+    if collision:
+        return finish("WAIT","已有反向或不兼容持仓，禁止借决策通道反向开仓，安全降级为 WAIT。",0.0)
+    quote_valid,quote_reason,rr = validate_quote_geometry_and_rr(raw_action,entry,tp,sl)
+    from scripts.order_risk import MIN_RISK_REWARD_RATIO
+    record("quote_geometry_rr",quote_valid,quote_reason,{"entry":entry,"tp":tp,"sl":sl,"rr":rr,"minimum_rr":MIN_RISK_REWARD_RATIO})
+    if not quote_valid:
+        return finish("WAIT",quote_reason,rr)
+    try:
+        conf = float(decision.get("confidence",0) or 0)
+    except (TypeError,ValueError):
+        record("confidence",False,"置信度必须是有效数字",{"confidence":decision.get("confidence")})
+        return finish("WAIT","核心风控拦截：置信度必须是有效数字",rr)
     conf_floor = 80.0 if "DOGE" in inst_id.upper() else 75.0
+    record("confidence",conf>=conf_floor,inputs={"confidence":conf,"minimum":conf_floor})
     if conf < conf_floor:
-        return "WAIT", f"核心风控拦截：置信度低于安全底线 ({conf:.1f}% < {conf_floor:.1f}%)", rr
-
-    # 4. Pipeline Execution across all enabled plugins (with input isolation & fail-closed)
+        return finish("WAIT",f"核心风控拦截：置信度低于安全底线 ({conf:.1f}% < {conf_floor:.1f}%)",rr)
     plugins = list_plugins(create_if_missing=False)
     for p_info in plugins:
-        if not p_info.get("enabled"):
-            continue
-
+        if not p_info.get("enabled"): continue
         filename = p_info["filename"]
         file_path = PLUGINS_DIR / filename
         if not file_path.exists():
-            return "WAIT", f"风控拦截拦截：启用的风控插件 [{filename}] 文件缺失，安全降级为 WAIT", rr
-
+            reason=f"风控拦截拦截：启用的风控插件 [{filename}] 文件缺失，安全降级为 WAIT"
+            record(filename,False,reason,status="failed")
+            return finish("WAIT",reason,rr)
         try:
             mod = _load_module_from_file(file_path)
-            if not hasattr(mod, "check_risk"):
-                return "WAIT", f"风控拦截拦截：启用的风控插件 [{filename}] 缺少 check_risk 入口，安全降级为 WAIT", rr
-
-            # Deepcopy inputs so user plugins cannot mutate decision/package to bypass core checks
-            p_pkg = copy.deepcopy(package)
-            p_dec = copy.deepcopy(decision)
-            p_ctx = copy.deepcopy(context)
-
-            passed, reason = mod.check_risk(p_pkg, p_dec, p_ctx)
+            if not hasattr(mod,"check_risk"):
+                reason=f"风控拦截拦截：启用的风控插件 [{filename}] 缺少 check_risk 入口，安全降级为 WAIT"
+                record(filename,False,reason,status="failed")
+                return finish("WAIT",reason,rr)
+            p_pkg,p_dec,p_ctx=copy.deepcopy(package),copy.deepcopy(decision),copy.deepcopy(context)
+            passed,reason=mod.check_risk(p_pkg,p_dec,p_ctx)
+            record(filename,passed,str(reason or ""),{"package":p_pkg,"decision":p_dec,"context":p_ctx})
             if not passed:
-                return "WAIT", str(reason or f"触发风控拦截插件 [{p_info.get('name', filename)}] 规则"), rr
+                return finish("WAIT",str(reason or f"触发风控拦截插件 [{p_info.get('name',filename)}] 规则"),rr)
         except Exception as e:
-            logger.error("Error executing interceptor plugin %s: %s", filename, e)
-            return "WAIT", f"风控插件 [{p_info.get('name', filename)}] 运行异常: {e}，安全降级为 WAIT", rr
-
-    return raw_action, "", rr
-
+            logger.error("Error executing interceptor plugin %s: %s",filename,e)
+            reason=f"风控插件 [{p_info.get('name',filename)}] 运行异常: {e}，安全降级为 WAIT"
+            record(filename,False,reason,status="failed")
+            return finish("WAIT",reason,rr)
+    return finish(raw_action,"",rr)
 
 def run_sandbox_test(custom_scenario: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Run a sandbox test of all enabled interceptors against standard mock scenarios."""

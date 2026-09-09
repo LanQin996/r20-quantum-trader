@@ -219,6 +219,9 @@ def is_tradfi_market_liquid(asset_type: str) -> bool:
         return True
     return False
 
+from r20_backend import analysis_capture
+
+@analysis_capture.observed('exchange.command')
 def run_cmd_result(cmd, timeout=15):
     """Return process metadata; callers must inspect returncode before mutating local state."""
     try:
@@ -251,6 +254,7 @@ def run_cmd(cmd, timeout=15):
     result = run_cmd_result(cmd, timeout)
     return result["stdout"] if result["ok"] else f"Error: {result['stderr'] or result['stdout']}"
 
+@analysis_capture.observed('exchange.query')
 def run_json_cmd(cmd, timeout=15):
     try:
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -372,6 +376,7 @@ def check_black_swan_sentinel() -> Tuple[bool, str]:
 
     return False, ""
 
+@analysis_capture.observed("execution.circuit")
 def is_circuit_breaker_active(usdt_available: float = None):
     # 1. Black Swan Sentinel Check
     bs_active, bs_reason = check_black_swan_sentinel()
@@ -403,6 +408,7 @@ def is_circuit_breaker_active(usdt_available: float = None):
                 if t.get("status") == "closed" and str(t.get("close_time", "")).startswith(today_str)
             )
             _loss_cap = effective_daily_loss_limit(usdt_available)
+            analysis_capture.emit("execution.gate", {"rule": "daily_loss", "realized_pnl_used": today_pnl, "loss_limit": _loss_cap, "available": usdt_available, "date": today_str}, "rejected" if today_pnl < -_loss_cap else "passed")
             if today_pnl < -_loss_cap:
                 return True, f"今日累计回撤 ({today_pnl:.2f}U) 触及单日最大风控熔断限额 ({_loss_cap}U｜按可用余额自适应)"
         except Exception as e:
@@ -418,6 +424,7 @@ def query_positions() -> Tuple[bool, List[Dict[str, Any]], str]:
     return True, result["data"], ""
 
 
+@analysis_capture.observed('position.close')
 def close_position_confirmed(inst_id: str, pos_side: str, before_size: float) -> Tuple[bool, str]:
     """Close a position and verify at the exchange before changing local state."""
     # Pre-cancel any conflicting pending/reduce-only orders for this instrument to release available size
@@ -474,6 +481,7 @@ def prune_trackers(trackers: Dict[str, Any], real_pos_dict: Dict[str, Any]) -> i
     return removed
 
 
+@analysis_capture.observed('order.submit')
 def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: float, price: float, tp_px: float, sl_px: float) -> Tuple[bool, str]:
     """Submit a protected limit order; acceptance is not treated as a fill."""
     # Check if we are running in simulated/demo mode and price diverged significantly from demo orderbook
@@ -514,6 +522,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     from scripts.order_risk import validate_quote_geometry_and_rr
     action_type = "BUY_LONG" if pos_side == "long" else "SELL_SHORT"
     is_valid, reason, _ = validate_quote_geometry_and_rr(action_type, effective_px, effective_tp, effective_sl)
+    analysis_capture.emit("execution.gate", {"rule": "final_quote_geometry_rr", "passed": is_valid, "reason": reason, "effective": {"price": effective_px, "tp": effective_tp, "sl": effective_sl, "size": size}}, "passed" if is_valid else "rejected")
     if not is_valid:
         print(f"[Order Rejected] 最终有效开仓报价未通过核心安全复验: {reason} (px={effective_px}, tp={effective_tp}, sl={effective_sl})")
         return False, f"最终订单核心安全复验拒绝: {reason}"
@@ -539,6 +548,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         order_id = payload[0].get("ordId")
     if not order_id:
         return False, "exchange accepted response without a verifiable order id"
+    analysis_capture.emit("order.submitted", {"confidence": analysis_capture.context().get("proposal", {}).get("confidence"), "policy_version": analysis_capture.context().get("policy_version"), "decision_config_id": analysis_capture.context().get("decision_config_id"), "effective": {"price": effective_px, "tp": effective_tp, "sl": effective_sl, "size": size}, "requested": {"price": price, "tp": tp_px, "sl": sl_px}, "exchange": payload}, "accepted", order_id=str(order_id), inst=inst_id, side=pos_side)
     return True, str(order_id)
 
 
@@ -569,6 +579,7 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str) -> float:
     return coverage
 
 
+@analysis_capture.observed('position.protection')
 def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, tp_px: float, sl_px: float) -> Tuple[bool, str]:
     """Verify 100% live cloud OCO coverage, repair any gap, and verify again."""
     query = run_cmd_result(okx_private_command(f"okx swap algo orders --instId {inst_id} --json"), timeout=20)
@@ -653,6 +664,9 @@ def record_signal_snapshot(snap: dict) -> None:
 def record_trade(trade_data):
     if not isinstance(trade_data, dict):
         return
+    analysis_capture.emit("execution.trade_record", trade_data)
+    if trade_data.get("action") == "平仓":
+        analysis_capture.emit("position.exit_reason", {"reason": trade_data.get("action_type") or trade_data.get("remark"), "confirmed": True, "execution": trade_data})
     if "policy_version" not in trade_data:
         try:
             from policy_snapshot import generate_policy_snapshot
@@ -884,6 +898,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
                     "instId": inst_id,
                     "name": name,
                     "side": p.get("posSide", p.get("side", "")),
+                    "posSide": p.get("posSide", p.get("side", "")),
+                    "posId": p.get("posId"), "cTime": p.get("cTime"),
                     "pos": pos_val,
                     "avgPx": float(p.get("avgPx", 0)),
                     "markPx": float(p.get("markPx", p.get("last", 0)) or 0),
@@ -1105,6 +1121,7 @@ def sync_cloud_algo_stop(inst_id: str, pos_side: str, new_sl: float, reason: str
         return False
 
 
+@analysis_capture.observed('position.manage')
 def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions):
     if not f.get("market_data_valid"):
         executed_actions.append(f"[{f['name']}] 行情数据不完整，保留云端保护并跳过本地移动止盈")
@@ -1165,6 +1182,9 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     if "entryTs" not in t:
         t["entryTs"] = now_ts
 
+    t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
+    t["lowWaterMark"] = min(t.get("lowWaterMark", cur_px), cur_px)
+    analysis_capture.emit("position.sample", {"position": curr_pos, "tracker": dict(t), "sampling_note": "巡检采样，非逐笔极值"})
     # Peak Profit Tracking
     if is_long:
         t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
@@ -1437,6 +1457,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
 
     return False, "持仓监控中"
 
+@analysis_capture.observed('position.ai_management')
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions):
     """Execute only fresh, high-confidence and risk-reducing AI position instructions."""
     if not os.path.exists(AI_POSITION_MANAGEMENT_FILE):
@@ -1519,6 +1540,7 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
 # =============================================================================
 # 🧠 R20 Quantum Trader v6.8.1 Multi-Factor Scoring & Strategy Setup Classifier
 # =============================================================================
+@analysis_capture.observed('execution.signal')
 def evaluate_asset_signal(f):
     """
     Continuous Multi-Factor Quantitative Scoring Engine (-5.0 ~ +5.0).
@@ -1769,6 +1791,7 @@ def single_trader_cycle(func):
 # Master Portfolio Execution Loop
 # =============================================================================
 @single_trader_cycle
+@analysis_capture.cycle('factor_trader')
 def execute_portfolio():
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now_dt = datetime.datetime.now(tz_bj)
@@ -1848,6 +1871,10 @@ def execute_portfolio():
             if d.get("ccy") == "USDT":
                 usdt_available = float(d.get("availBal", 0.0))
                 break
+
+    analysis_capture.emit("account.snapshot", {"balance": bal_res, "positions": all_positions, "pending_orders": pending_orders, "available": usdt_available, "cooldowns": load_stop_cooldowns()})
+    for observed_pos in all_positions:
+        analysis_capture.observe_position(observed_pos)
 
     # 2. Parallel fetch for the configured crypto universe
     with ThreadPoolExecutor(max_workers=len(TARGET_INSTRUMENTS)) as executor:
@@ -1937,7 +1964,10 @@ def execute_portfolio():
             # Gate 1: LLM AI Brain Full Execution Authority
             # When AI Brain is active, AI Brain is the SOLE decider for action, leverage, margin, and TP/SL.
             ai_info = brain_cache.get(inst_id) if isinstance(brain_cache, dict) else None
+            analysis_capture.bind_decision(inst_id, ai_info)
+            analysis_capture.emit("execution.candidate", {"factor": f, "decision": ai_info, "available": usdt_available})
             if not ai_info or "decision" not in ai_info:
+                analysis_capture.emit("execution.gate", {"rule": "fresh_decision", "reason": "本轮无有效新鲜 AI 决策"}, "rejected")
                 print(f"[AI Brain 全权拦截] {f['name']} 本轮无有效新鲜 AI 决策，禁止开仓")
                 continue
 
@@ -1987,6 +2017,7 @@ def execute_portfolio():
                         actual_sz = min(actual_sz, afford_sz)
                     actual_sz = quantize_size(actual_sz, step_sz)
 
+            analysis_capture.emit("order.sizing", {"proposal": ai_decision, "size": actual_sz, "leverage": ai_lever, "step": step_sz, "available": usdt_available, "base_size": f["sz"], "max_margin_ratio": MAX_MARGIN_EQUITY_RATIO}, "passed" if actual_sz > 0 else "rejected")
             if actual_sz <= 0:
                 if f.get("size_below_exchange_min") or ai_margin > 0:
                     print(f"[仓位跳过] {f['name']} 按风险预算推导的数量低于交易所最小下单量 {step_sz} 张"
@@ -2047,6 +2078,7 @@ def execute_portfolio():
                         elif not calculus_accel_ok:
                             print(f"[Pyramiding 拦截] {f['name']} 数理动能衰竭或延续概率偏低 (加速度={c_accel:+.2f}, 概率={p_cont:.1f}%)，禁止追多加仓")
 
+                analysis_capture.emit("execution.gate", {"rule": "entry_or_pyramiding", "allow_entry": allow_entry, "is_scale_in": is_scale_in, "confidence": ai_conf, "minimum_entry_confidence": MIN_ENTRY_CONFIDENCE, "minimum_scale_confidence": MIN_SCALE_IN_CONFIDENCE, "position": curr_pos, "pending": inst_id in pending_inst_ids, "reserved_slots": reserved_slot_count, "reserved_longs": reserved_long_count, "reserved_shorts": reserved_short_count, "max_slots": MAX_CONCURRENT_POSITIONS, "max_same_side": MAX_SAME_DIRECTION_POSITIONS, "tracker": trackers.get(f"{inst_id}_{'long' if action == 'BUY_LONG' else 'short'}", {}), "max_scale_count": MAX_SCALE_IN_COUNT, "asset_margin_cap": ASSET_MARGIN_CAP, "minimum_scale_profit": MIN_SCALE_IN_PROFIT_RATIO}, "passed" if allow_entry else "rejected")
                 if allow_entry:
                     limit_px = round(ai_decision.get("entry_price") if (ai_decision and ai_decision.get("entry_price", 0) > 0) else (f.get("bidPx") or f["price"]), prec)
                     tp_px = round(ai_decision.get("take_profit_price") if (ai_decision and ai_decision.get("take_profit_price", 0) > 0) else (limit_px + tp_dist), prec)
@@ -2058,6 +2090,7 @@ def execute_portfolio():
                     if tp_px <= limit_px:
                         tp_px = round(limit_px + max(tp_dist, f["price"] * 0.024), prec)
 
+                    analysis_capture.emit("order.adjusted", {"proposal": ai_decision, "effective": {"price": limit_px, "tp": tp_px, "sl": sl_px, "size": actual_sz, "leverage": ai_lever}, "rules_considered": ["price_precision", "quote_geometry_repair", "risk_size_clamp", "margin_cap", "leverage_cap"], "policy_version": f.get("policy_version")}, side="long")
                     accepted, order_ref = submit_protected_limit_order(inst_id, "buy", "long", actual_sz, limit_px, tp_px, sl_px)
                     if accepted:
                         if is_scale_in:
@@ -2145,6 +2178,7 @@ def execute_portfolio():
                         elif not calculus_accel_ok:
                             print(f"[Pyramiding 拦截] {f['name']} 数理动能失速企稳或击穿概率偏低 (加速度={c_accel:+.2f}, 概率={p_break:.1f}%)，禁止追空加仓")
 
+                analysis_capture.emit("execution.gate", {"rule": "entry_or_pyramiding", "allow_entry": allow_entry, "is_scale_in": is_scale_in, "confidence": ai_conf, "minimum_entry_confidence": MIN_ENTRY_CONFIDENCE, "minimum_scale_confidence": MIN_SCALE_IN_CONFIDENCE, "position": curr_pos, "pending": inst_id in pending_inst_ids, "reserved_slots": reserved_slot_count, "reserved_longs": reserved_long_count, "reserved_shorts": reserved_short_count, "max_slots": MAX_CONCURRENT_POSITIONS, "max_same_side": MAX_SAME_DIRECTION_POSITIONS, "tracker": trackers.get(f"{inst_id}_{'long' if action == 'BUY_LONG' else 'short'}", {}), "max_scale_count": MAX_SCALE_IN_COUNT, "asset_margin_cap": ASSET_MARGIN_CAP, "minimum_scale_profit": MIN_SCALE_IN_PROFIT_RATIO}, "passed" if allow_entry else "rejected")
                 if allow_entry:
                     limit_px = round(ai_decision.get("entry_price") if (ai_decision and ai_decision.get("entry_price", 0) > 0) else (f.get("askPx") or f["price"]), prec)
                     tp_px = round(ai_decision.get("take_profit_price") if (ai_decision and ai_decision.get("take_profit_price", 0) > 0) else (limit_px - tp_dist), prec)
@@ -2156,6 +2190,7 @@ def execute_portfolio():
                     if tp_px >= limit_px:
                         tp_px = round(limit_px - max(tp_dist, f["price"] * 0.024), prec)
 
+                    analysis_capture.emit("order.adjusted", {"proposal": ai_decision, "effective": {"price": limit_px, "tp": tp_px, "sl": sl_px, "size": actual_sz, "leverage": ai_lever}, "rules_considered": ["price_precision", "quote_geometry_repair", "risk_size_clamp", "margin_cap", "leverage_cap"], "policy_version": f.get("policy_version")}, side="short")
                     accepted, order_ref = submit_protected_limit_order(inst_id, "sell", "short", actual_sz, limit_px, tp_px, sl_px)
                     if accepted:
                         if is_scale_in:
@@ -2236,11 +2271,12 @@ def execute_portfolio():
     with open(os.path.join(DATA_DIR, "trading_state.json"), "w", encoding="utf-8") as f:
         json.dump(state_payload, f, ensure_ascii=False, indent=2)
 
+    analysis_capture.emit("execution.cycle_state", state_payload)
     # 6. Always Sync Full Lifecycle Ledger and SQLite DB in Realtime
     try:
         sync_script = os.path.join(WORKSPACE_DIR, "scripts", "sync_full_ledger.py")
         if os.path.exists(sync_script):
-            subprocess.run([sys.executable, sync_script], capture_output=True, text=True, timeout=15)
+            subprocess.run([sys.executable, sync_script], capture_output=True, text=True, encoding="utf-8", timeout=90)
         db_script = os.path.join(WORKSPACE_DIR, "scripts", "db_manager.py")
         if os.path.exists(db_script):
             subprocess.run([sys.executable, db_script], capture_output=True, text=True, timeout=15)

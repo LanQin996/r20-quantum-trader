@@ -1022,17 +1022,15 @@ def update_cache_cycle():
         except Exception:
             pass
     
-    # Filter lifecycle trades past reset_time
-    valid_ledger_trades = []
-    for t in ledger_trades:
-        # Check either close_time or open_time >= reset_time
-        c_time = str(t.get("close_time", ""))
-        o_time = str(t.get("open_time", ""))
-        t_time = str(t.get("time", ""))
-        if (c_time and c_time >= reset_time_str) or (o_time and o_time >= reset_time_str) or (t_time and t_time >= reset_time_str) or t.get("status") == "holding":
-            valid_ledger_trades.append(t)
-
-    trades_table = valid_ledger_trades[:60]
+    from r20_backend.analysis_capture import identity as analysis_identity
+    from r20_backend.analysis_store import Archive, timestamp_ms
+    from r20_backend.analysis_metrics import summarize, legacy_performance
+    archive_trades = Archive().trades(analysis_identity(), {"start_ms": timestamp_ms(reset_time_str) or 0})
+    # Compatibility rows contain formatting and floating P&L; archive supplies all statistics.
+    valid_ledger_trades = [t for t in ledger_trades if t.get("account") == analysis_identity()]
+    trades_table = sorted(valid_ledger_trades, key=lambda t: t.get("close_ms") or t.get("open_ms") or 0, reverse=True)[:60]
+    lifecycle_performance = legacy_performance(archive_trades)
+    lifecycle_today = summarize([t for t in archive_trades if str(t.get("close_time") or "").startswith(today_bj_str)])
 
     # 8. Read Review & Adaptive Config
     review_data = {}
@@ -1166,27 +1164,19 @@ def update_cache_cycle():
             "margin_usage_pct": round(((total_eq - avail_eq) / total_eq * 100) if total_eq > 0 else 0, 1)
         },
         "today_stats": {
-            "realized_gross": round(today_realized_gross, 2),
-            "fees_paid": round(today_fees, 2),
-            "funding_paid": round(today_funding, 2),
-            "net_realized": round(today_net_realized_pnl, 2),
-            "total_pnl": round(today_net_realized_pnl + total_pos_upl, 2),
-            "win_trades": today_win_trades,
-            "loss_trades": today_loss_trades,
-            "win_rate": today_win_rate
+            "realized_gross": lifecycle_today["gross_pnl"],
+            "fees_paid": lifecycle_today["fee"],
+            "funding_paid": lifecycle_today["funding_fee"],
+            "net_realized": lifecycle_today["net_pnl"],
+            "total_pnl": lifecycle_today["net_pnl"],
+            "win_trades": lifecycle_today["wins"], "loss_trades": lifecycle_today["losses"],
+            "breakeven_trades": lifecycle_today["breakeven"],
+            "closed_trades": lifecycle_today["sample_count"],
+            "incomplete_count": lifecycle_today["incomplete_count"],
+            "win_rate": lifecycle_today["win_rate"], "statistics_version": lifecycle_today["statistics_version"]
         },
-        "performance": {
-            "all_trades": all_closed,
-            "win_trades": all_win_trades,
-            "loss_trades": all_loss_trades,
-            "win_rate": all_win_rate,
-            "profit_factor": profit_factor,
-            "total_win_amt": round(all_win_amt, 2),
-            "total_loss_amt": round(all_loss_amt, 2),
-            "avg_win": avg_win,
-            "avg_loss": avg_loss,
-            "leaderboard": inst_leaderboard
-        },
+        "performance": lifecycle_performance,
+        "ledger_statistics": summarize(archive_trades),
         "positions_summary": {
             "total": len(positions),
             "active_count": len(positions),

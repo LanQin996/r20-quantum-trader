@@ -3394,6 +3394,9 @@ def positions(x_r20_admin_token: str | None = Header(default=None)) -> dict[str,
 
 # Preserve the existing public dashboard and its relative-path API contract at /.
 # Admin and /api/v1 routes above are evaluated before this catch-all mount.
+from r20_backend.analysis_routes import install_routes as install_analysis_routes
+install_analysis_routes(app, require_admin_header)
+
 from dashboard.app import app as dashboard_app
 app.mount("/", dashboard_app)
 

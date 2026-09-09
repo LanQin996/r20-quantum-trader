@@ -842,6 +842,8 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
             runtime_context_out["policy_snapshot"] = policy_snapshot
     return apply_module_layout(prompt, profile, "trading_user", f"{profile.get('name', '稳健')}交易用户提示词模板", context=runtime_vars)
 
+from r20_backend import analysis_capture
+
 def validate_and_filter_decision(p: Dict[str, Any], d_item: Dict[str, Any], active_inst_ids: set, active_position_sides: Dict[str, str]) -> tuple[str, str, float]:
     """
     Fail-closed execution layer gatekeeper powered by pluggable interceptors.
@@ -901,9 +903,11 @@ def assemble_decision_cache(
 
     for p in packages:
         inst_id = p["instId"]
+        analysis_capture.bind_decision(inst_id)
         d_item = decisions_dict.get(inst_id, {})
         if not isinstance(d_item, dict):
             d_item = {}
+        analysis_capture.emit("decision.proposed", {"proposal": d_item, "market": p, "policy_snapshot": policy_snapshot}, "proposed" if d_item.get("action") in ("BUY_LONG", "SELL_SHORT") else "wait")
         # Smooth field alias normalization (support both standard contract and council desk outputs)
         entry = safe_float(d_item.get("entry_price") or d_item.get("limit_price"))
         take_profit = safe_float(d_item.get("take_profit_price") or d_item.get("take_profit"))
@@ -930,7 +934,9 @@ def assemble_decision_cache(
             p, normalized_d_item, active_inst_ids, active_position_sides
         )
 
+        analysis_capture.emit("decision.filtered", {"original": d_item, "normalized": normalized_d_item, "action": final_action, "reason": rejection_reason, "rr": rr}, "passed" if final_action != "WAIT" else "rejected" if rejection_reason else "wait")
         standard_cache[inst_id] = {
+            "analysis": analysis_capture.decision_meta(inst_id),
             "instId": inst_id,
             "name": p["name"],
             "timestamp": int(time.time()),
@@ -980,6 +986,7 @@ def assemble_decision_cache(
 
 
 @single_brain_cycle
+@analysis_capture.cycle('trading_brain')
 def execute_batch_ai_brain_cycle(
     pos_summary: str = "[MISSING_CONTEXT:account_positions]",
     active_positions_detail: List[Dict[str, Any]] = None,
@@ -1109,6 +1116,8 @@ def execute_batch_ai_brain_cycle(
         get_effective_system_prompt(), profile, "trading_system", f"{profile.get('name', '稳健')}交易系统提示词模板", context=runtime_context
     )
 
+    analysis_capture.emit("prompt.rendered", {"profile": profile, "variables": runtime_context, "system": effective_system_prompt, "user": prompt, "packages": packages, "positions": positions_context, "pending_orders": pending_orders_list})
+
     # Save Realtime Prompt Snapshot for Web Transparent Inspection
     try:
         tmp_prompt = AI_LAST_PROMPT_FILE + ".tmp"
@@ -1199,10 +1208,11 @@ def execute_batch_ai_brain_cycle(
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
                 )
-                with urllib.request.urlopen(req, timeout=thinking_timeout) as resp:
+                with analysis_capture.llm_request(req, thinking_timeout, urllib.request.urlopen, legacy_fallback=True) as resp:
                     res = json.loads(resp.read().decode("utf-8"))
                     content = res["choices"][0]["message"]["content"].strip()
                     raw_res = res
+                analysis_capture.emit("llm.response", {"response": res}, "received")
 
             if content.startswith("```json"): content = content[7:]
             if content.startswith("```"): content = content[3:]
@@ -1315,6 +1325,7 @@ def execute_batch_ai_brain_cycle(
             ]
         }
 
+        analysis_capture.emit("brain.result", history_record, "completed")
         history_list = []
         if os.path.exists(AI_DECISION_HISTORY_FILE):
             try:

@@ -1,3 +1,4 @@
+import { analysis } from './analysis';
 import { enCommon } from './common';
 import { enNav } from './nav';
 import { enDash } from './dash';
@@ -9,5 +10,6 @@ export const enUS = {
   nav: enNav,
   dash: enDash,
   admin: enAdmin,
+  analysis,
   docs: enDocs,
 };

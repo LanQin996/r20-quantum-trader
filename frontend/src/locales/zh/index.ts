@@ -1,3 +1,4 @@
+import { analysis } from './analysis';
 import { zhCommon } from './common';
 import { zhNav } from './nav';
 import { zhDash } from './dash';
@@ -9,5 +10,6 @@ export const zhCN = {
   nav: zhNav,
   dash: zhDash,
   admin: zhAdmin,
+  analysis,
   docs: zhDocs,
 };

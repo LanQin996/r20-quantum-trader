@@ -52,6 +52,7 @@ export const adminGroups: { key: string; labelKey: string; items: NavItem[] }[] 
     labelKey: 'nav.groups.observe',
     items: [
       { key: 'admin-overview', labelKey: 'nav.admin.overview', path: '/admin/overview', icon: Gauge, alias: 'overview 总览' },
+      { key: 'admin-analysis', labelKey: 'nav.admin.analysis', path: '/admin/analysis', icon: ReceiptText, alias: 'analysis review 复盘 分析 导出' },
       { key: 'admin-decisions', labelKey: 'nav.admin.decisions', path: '/admin/decisions', icon: ScrollText, alias: 'decisions 决策' },
       { key: 'admin-gateway', labelKey: 'nav.admin.gateway', path: '/admin/gateway', icon: Workflow, alias: 'gateway scheduler 调度' },
     ],

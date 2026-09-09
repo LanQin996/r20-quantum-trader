@@ -17,12 +17,8 @@ const today = computed(() => (store.data as any)?.today_stats || {});
 
 const equity = computed(() => fmtNum(Number(account.value.total_eq || 0), 2));
 const todayNet = computed(() => Number(today.value.net_realized ?? today.value.total_pnl ?? 0));
-const todayTrades = computed(() => Number(today.value.win_trades ?? 0) + Number(today.value.loss_trades ?? 0));
-const todayWinRate = computed(() => {
-  const w = Number(today.value.win_trades ?? 0);
-  const n = todayTrades.value;
-  return n > 0 ? Math.round((w / n) * 100) : null;
-});
+const todayTrades = computed(() => Number(today.value.closed_trades ?? (Number(today.value.win_trades ?? 0) + Number(today.value.loss_trades ?? 0) + Number(today.value.breakeven_trades ?? 0))));
+const todayWinRate = computed(() => today.value.win_rate == null ? '—' : fmtNum(Number(today.value.win_rate), 1));
 
 const floatPnl = computed(() => Number(account.value.pos_upl_total ?? account.value.upl ?? 0));
 const posMargin = computed(() =>

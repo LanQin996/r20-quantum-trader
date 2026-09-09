@@ -87,9 +87,9 @@ def sync_json_to_sqlite():
             str(t.get("side") or t.get("direction") or ""),
             float(t.get("sz") or t.get("size") or 0.0),
             px,
-            float(t.get("fee", 0.0) or 0.0),
+            float(t.get("fee") or 0.0),
             float(t.get("gross_pnl", 0.0) or t.get("pnl", 0.0) or 0.0),
-            float(t.get("pnl", 0.0) or 0.0),
+            float(t.get("pnl") or 0.0),
             str(t.get("exit_reason") or t.get("remark") or t.get("comment") or "")
         ))
         if cursor.rowcount > 0:

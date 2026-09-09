@@ -86,3 +86,29 @@ export function useHttp() {
   }
   return { loading, error, request };
 }
+
+/** Download an authenticated artifact with the same session/error behavior as JSON calls. */
+export async function download(path: string, filename: string): Promise<void> {
+  const auth = useAuthStore();
+  let resp: Response;
+  try {
+    resp = await fetch(path, { headers: auth.token ? { 'X-R20-Session': auth.token } : {} });
+  } catch {
+    throw new HttpError('网络错误，请稍后重试', 0);
+  }
+  if (resp.status === 401) {
+    auth.logout();
+    throw new HttpError('会话已过期，请重新登录', 401);
+  }
+  if (!resp.ok) {
+    let body: unknown;
+    try { body = await resp.json(); } catch { body = null; }
+    throw new HttpError(normalizeDetail(body, resp.status), resp.status);
+  }
+  const url = URL.createObjectURL(await resp.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

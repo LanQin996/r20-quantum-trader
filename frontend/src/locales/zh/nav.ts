@@ -27,6 +27,7 @@ export const zhNav = {
     system: '系统',
   },
   admin: {
+    analysis: '交易复盘',
     overview: '运行总览',
     decisions: '决策审计',
     gateway: '任务网关',

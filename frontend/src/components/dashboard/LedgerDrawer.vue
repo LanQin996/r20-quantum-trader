@@ -58,7 +58,7 @@ const cells = computed(() => [
           </div>
           <div>
             <dt class="t-label">{{ t('dash.ledger.col.exitReason') }}</dt>
-            <dd class="mt-0.5 leading-snug" style="color: var(--ink-1)">{{ cleanReason(x.exit_reason) }}</dd>
+            <dd class="mt-0.5 leading-snug" style="color: var(--ink-1)">{{ cleanReason(x.exit_reason) }} · {{ t("analysis." + (x.exit_evidence || "unknown")) }}</dd>
           </div>
         </dl>
       </div>
@@ -76,16 +76,16 @@ const cells = computed(() => [
         <p class="t-label mb-2">{{ t('dash.ledger.lifecycle.feesBreak') }}</p>
         <dl class="space-y-1.5 text-xs">
           <div class="flex justify-between">
-            <dt style="color: var(--ink-3)">{{ t('dash.ledger.lifecycle.makerFee') }} (open)</dt>
-            <dd class="num down">{{ fmtNum(Math.abs(Number(x.open_fee) || 0), 4) }}</dd>
+            <dt style="color: var(--ink-3)">{{ t('dash.ledger.col.fees') }} (open)</dt>
+            <dd class="num down">{{ fmtNum(x.open_fee == null ? null : Math.abs(Number(x.open_fee)), 4) }}</dd>
           </div>
           <div class="flex justify-between">
-            <dt style="color: var(--ink-3)">{{ t('dash.ledger.lifecycle.takerFee') }} (close)</dt>
-            <dd class="num down">{{ fmtNum(Math.abs(Number(x.close_fee) || 0), 4) }}</dd>
+            <dt style="color: var(--ink-3)">{{ t('dash.ledger.col.fees') }} (close)</dt>
+            <dd class="num down">{{ fmtNum(x.close_fee == null ? null : Math.abs(Number(x.close_fee)), 4) }}</dd>
           </div>
           <div class="flex justify-between border-t pt-1.5" style="border-color: var(--line-1)">
             <dt class="font-semibold" style="color: var(--ink-2)">{{ t('common.total') }}</dt>
-            <dd class="num font-semibold down">{{ fmtNum(Math.abs(Number(x.fee) || 0), 4) }}</dd>
+            <dd class="num font-semibold down">{{ fmtNum(x.fee == null ? null : Math.abs(Number(x.fee)), 4) }}</dd>
           </div>
         </dl>
       </div>

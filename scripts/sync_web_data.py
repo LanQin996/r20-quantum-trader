@@ -290,6 +290,20 @@ def generate_trading_data():
         }
     }
 
+    from r20_backend.analysis_store import Archive
+    from r20_backend.analysis_capture import identity as analysis_identity
+    from r20_backend.analysis_metrics import summarize, legacy_performance
+    archived = Archive().trades(analysis_identity())
+    today_lifecycles = [t for t in archived if str(t.get("close_time") or "").startswith(datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d"))]
+    common_stats = summarize(today_lifecycles)
+    data["performance"] = legacy_performance(archived)
+    data["today_stats"].update({
+        "win_trades": common_stats["wins"], "loss_trades": common_stats["losses"],
+        "breakeven_trades": common_stats["breakeven"], "closed_trades": common_stats["sample_count"],
+        "win_rate": common_stats["win_rate"], "net_realized": common_stats["net_pnl"],
+        "statistics_version": common_stats["statistics_version"], "incomplete_count": common_stats["incomplete_count"]
+    })
+
     # Write atomic JSON to local project data cache
     os.makedirs(DATA_DIR, exist_ok=True)
     temp_path = DATA_JSON_PATH + ".tmp"
