@@ -304,7 +304,7 @@ class AiFactorTraderPositionProtectionTest(unittest.TestCase):
     def test_stale_order_cancel_uses_valid_cli_and_fail_closed(self):
         order={"instId":"SOL-USDT-SWAP","ordId":"11","state":"live","cTime":"1"}
         responses=[{"ok":True,"data":[order],"stderr":"","stdout":"[]"},{"ok":False,"data":None,"stderr":"rejected","stdout":""}]
-        with patch.object(ai_factor_trader,"run_cmd_result",side_effect=responses) as run, patch.object(ai_factor_trader.time,"time",return_value=1000):
+        with patch.object(ai_factor_trader,"run_cmd_result",side_effect=responses) as run, patch.object(ai_factor_trader.time,"time",return_value=1000+ai_factor_trader.STALE_ORDER_TTL_SECONDS):
             ok,detail=ai_factor_trader.clean_stale_open_orders()
         self.assertFalse(ok); self.assertIn("rejected",detail)
         self.assertIn("swap cancel SOL-USDT-SWAP --ordId 11",run.call_args_list[1].args[0])
