@@ -316,6 +316,25 @@ def normalize_position(row: dict, live: bool = False) -> dict:
     status = "holding" if live else "partial" if kind in {"1","4"} else "closed" if kind in {"2","3","5"} else "unknown"
     reason = "liquidation" if kind == "3" else "adl" if kind == "5" else None
     def val(v): return str(v) if v is not None else None
+    def lifecycle_margin():
+        """Closed lifecycles carry no margin field, so estimate it like the web ledger does."""
+        exchange = row.get("margin") or row.get("imr")
+        if exchange: return decimal(exchange), "exchange"
+        if live: return None, "unknown"
+        qty = decimal(row.get("closeTotalPos") or row.get("openMaxPos"))
+        entry, lever = decimal(row.get("openAvgPx")), decimal(row.get("lever"))
+        ct_val = None
+        try:
+            from scripts.instrument_pool import load_instruments
+            for item in load_instruments():
+                if str(item.get("instId")) == str(row.get("instId")):
+                    ct_val = decimal(item.get("ctVal")); break
+        except Exception:
+            ct_val = None
+        if qty and entry and lever and ct_val:
+            return qty*ct_val*entry/lever, "notional_estimate"
+        return None, "unknown"
+    margin, margin_basis = lifecycle_margin()
     return {
         "id":lifecycle_id(row),"pos_id":row.get("posId"),"inst":str(row.get("instId","")).replace("-USDT-SWAP",""),
         "inst_id":row.get("instId"),"side":direction,"status":status,"open_ms":opened,
@@ -323,7 +342,7 @@ def normalize_position(row: dict, live: bool = False) -> dict:
         "close_time":time_text(updated) if status=="closed" else "",
         "open_px":row.get("avgPx") if live else row.get("openAvgPx"),"close_px":row.get("closeAvgPx"),
         "sz":row.get("pos") if live else (row.get("closeTotalPos") or row.get("openMaxPos")),"lever":row.get("lever"),
-        "margin":row.get("margin") or row.get("imr"),"unrealized_pnl":row.get("upl") if live else None,
+        "margin":val(margin),"margin_basis":margin_basis,"unrealized_pnl":row.get("upl") if live else None,
         "mark_px":row.get("markPx") if live else None,
         "gross_pnl":val(gross),"fee":val(fee),"funding_fee":val(funding),
         "other_settlement":val(penalty+settled) if penalty is not None and settled is not None else None,

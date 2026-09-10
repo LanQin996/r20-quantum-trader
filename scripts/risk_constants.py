@@ -112,6 +112,22 @@ DEFAULTS = {
 RISK_ENV_KEYS = tuple(DEFAULTS.keys())
 
 
+def risk_base_balance(detail: dict) -> float:
+    """风险预算基数（权益口径）= 可用余额 + 冻结保证金。
+
+    直接把 availBal 当基数，会让「平仓释放保证金」反向抬高当日熔断线（当日已实现亏损后
+    预算反而变大），也会让在途挂单冻结的保证金凭空压缩预算。冻结部分仍属账户权益，
+    且不随持仓开平跳变，因此计入基数；cashBal 作为兜底口径。
+    """
+    def num(key: str) -> float:
+        try:
+            return float(detail.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    available, frozen, cash = num("availBal"), num("frozenBal"), num("cashBal")
+    return max(available + frozen, cash, available)
+
+
 def effective_max_positions(pool_size: int) -> int:
     """并发持仓上限 = min(配置值或池容量, 池容量)；同向上限再钳制不超过总仓上限。"""
     pool = max(int(pool_size or 0), 1)

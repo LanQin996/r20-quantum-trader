@@ -68,6 +68,7 @@ from risk_constants import (
     TIME_STOP_ATR_BAND,
     TIME_STOP_HOURS,
     effective_max_positions,
+    risk_base_balance,
 )
 
 WORKSPACE_DIR = str(_PROJECT_ROOT)
@@ -335,6 +336,11 @@ def load_adaptive_config():
     """Fallback config reader maintaining compatibility."""
     return {}
 
+# 挂单清扫阈值：必须大于一个决策周期（15 分钟），否则 AI 每轮输出的 KEEP 永远无效——
+# 下单后必然在下一次清理被机械撤掉。原值 240s 远短于巡检周期，实测入场挂单存活仅
+# 4.5~13 分钟、20 张挂单里 11 张未成交，并诱发"撤单改价追价"（taker 入场）。
+STALE_ORDER_TTL_SECONDS = 1800
+
 def clean_stale_open_orders() -> Tuple[bool, str]:
     """Cancel stale entry orders; any inability to verify/cancel blocks the trading cycle."""
     result = run_cmd_result(okx_private_command("okx swap orders --json"), timeout=20)
@@ -346,7 +352,7 @@ def clean_stale_open_orders() -> Tuple[bool, str]:
         order_id = str(order.get("ordId") or "")
         state = str(order.get("state", "live")).lower()
         created_at = int(order.get("cTime", now_ts) or now_ts)
-        if state not in {"live", "partially_filled"} or not order_id or now_ts - created_at <= 240000:
+        if state not in {"live", "partially_filled"} or not order_id or now_ts - created_at <= STALE_ORDER_TTL_SECONDS * 1000:
             continue
         canceled = run_cmd_result(okx_private_command(f"okx swap cancel {inst_id} --ordId {order_id} --json"), timeout=20)
         if not canceled["ok"]:
@@ -384,7 +390,10 @@ def check_black_swan_sentinel() -> Tuple[bool, str]:
     return False, ""
 
 @analysis_capture.observed("execution.circuit")
-def is_circuit_breaker_active(usdt_available: float = None):
+def is_circuit_breaker_active(usdt_equity: float = None, usdt_available: float = None):
+    # 日亏熔断基数取「权益口径」（可用余额 + 冻结保证金，见 risk_constants.risk_base_balance）：
+    # 用自由保证金判定时，平仓释放保证金会把当日熔断线反向抬高（实测亏损 -1.80U 后 3.49 → 4.63）。
+    usdt_available = usdt_equity if usdt_equity is not None else usdt_available
     # 1. Black Swan Sentinel Check
     bs_active, bs_reason = check_black_swan_sentinel()
     if bs_active:
@@ -415,9 +424,9 @@ def is_circuit_breaker_active(usdt_available: float = None):
                 if t.get("status") == "closed" and str(t.get("close_time", "")).startswith(today_str)
             )
             _loss_cap = effective_daily_loss_limit(usdt_available)
-            analysis_capture.emit("execution.gate", {"rule": "daily_loss", "realized_pnl_used": today_pnl, "loss_limit": _loss_cap, "available": usdt_available, "date": today_str}, "rejected" if today_pnl < -_loss_cap else "passed")
+            analysis_capture.emit("execution.gate", {"rule": "daily_loss", "realized_pnl_used": today_pnl, "loss_limit": _loss_cap, "risk_base_equity": usdt_available, "date": today_str}, "rejected" if today_pnl < -_loss_cap else "passed")
             if today_pnl < -_loss_cap:
-                return True, f"今日累计回撤 ({today_pnl:.2f}U) 触及单日最大风控熔断限额 ({_loss_cap}U｜按可用余额自适应)"
+                return True, f"今日累计回撤 ({today_pnl:.2f}U) 触及单日最大风控熔断限额 ({_loss_cap}U｜按权益基数自适应)"
         except Exception as e:
             return True, f"日亏损风控数据读取失败，安全暂停开仓: {e}"
 
@@ -675,12 +684,13 @@ def record_signal_snapshot(snap: dict) -> None:
         print(f"Failed to record signal snapshot: {e}")
 
 
-def record_trade(trade_data):
+def record_trade(trade_data, position=None):
     if not isinstance(trade_data, dict):
         return
-    analysis_capture.emit("execution.trade_record", trade_data)
+    meta = analysis_capture.position_meta(position)
+    analysis_capture.emit("execution.trade_record", trade_data, **meta)
     if trade_data.get("action") == "平仓":
-        analysis_capture.emit("position.exit_reason", {"reason": trade_data.get("action_type") or trade_data.get("remark"), "confirmed": True, "execution": trade_data})
+        analysis_capture.emit("position.exit_reason", {"reason": trade_data.get("action_type") or trade_data.get("remark"), "confirmed": True, "execution": trade_data}, **meta)
     if "policy_version" not in trade_data:
         try:
             from policy_snapshot import generate_policy_snapshot
@@ -1509,6 +1519,22 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
             closed, close_detail = close_position_confirmed(inst_id, pos_side, float(position.get("pos", 0) or 0))
             if closed:
                 executed_actions.append(f"[{name}] AI高置信度整仓退出: {reason}")
+                closed_sz = abs(float(position.get("pos", 0) or 0))
+                record_trade({
+                    "is_trade": True,
+                    "time": timestamp_full,
+                    "inst": name,
+                    "name": name,
+                    "action": "平仓",
+                    "action_type": "AI裁量整仓退出",
+                    "direction": f"平{'多' if pos_side == 'long' else '空'}",
+                    "side": f"{'多' if pos_side == 'long' else '空'}单AI裁量整仓退出",
+                    "size": closed_sz,
+                    "sz": closed_sz,
+                    "price": current_px,
+                    "pnl": position.get("upl"),
+                    "remark": f"AI高置信度({confidence:.0f}%)整仓退出: {reason}",
+                }, position=position)
                 trackers.pop(f"{inst_id}_{pos_side}", None)
             else:
                 executed_actions.append(f"[{name}] AI平仓请求未获交易所确认，仓位保持不变: {close_detail}")
@@ -1885,10 +1911,12 @@ def execute_portfolio():
         print("[Trader] Abort: unable to verify account balance")
         return None
     usdt_available = 0.0
+    usdt_equity = 0.0
     if bal_res and isinstance(bal_res, list) and len(bal_res) > 0:
         for d in bal_res[0].get("details", []):
             if d.get("ccy") == "USDT":
                 usdt_available = float(d.get("availBal", 0.0))
+                usdt_equity = risk_base_balance(d)
                 break
 
     analysis_capture.emit("account.snapshot", {"balance": bal_res, "positions": all_positions, "pending_orders": pending_orders, "available": usdt_available, "cooldowns": load_stop_cooldowns()})
@@ -1912,7 +1940,9 @@ def execute_portfolio():
     save_trackers(trackers)
 
     # 4. Check Circuit Breaker & Batch AI Brain Scan (Including Active Positions Detail)
-    cb_active, cb_reason = is_circuit_breaker_active(usdt_available)
+    cb_active, cb_reason = is_circuit_breaker_active(usdt_equity)
+    # 日亏熔断按权益基数（可用余额 + 冻结保证金）判定：若按自由保证金判定，平仓释放保证金
+    # 会把当日熔断线反向抬高（实测 -1.80U 亏损后 3.49 → 4.63）。
     # 单标的累计保证金上限按可用余额自适应，与提示词 {{risk_budget}} 同口径
     ASSET_MARGIN_CAP = effective_single_asset_margin(usdt_available)
 
@@ -2018,7 +2048,10 @@ def execute_portfolio():
             ai_margin = float(ai_decision.get("margin_usdt", 0.0) or 0.0)
             ai_lever = float(ai_decision.get("leverage", 3) or 3)
             # 杠杆硬钳制：无论 AI 裁决多激进，执行层不超过后台风控管理页配置的杠杆上限
-            ai_lever = max(1.0, min(ai_lever, MAX_LEVERAGE))
+            # 执行层钳制：不超过后台配置的全局杠杆上限，也不超过该标的在交易所实际可用的杠杆。
+            # 下单命令不下发杠杆，实际持仓恒按账户既有杠杆结算；计划值若高于它，
+            # afford_sz 会按未生效的杠杆高估可承受张数（实测计划 5x / 实际 3x = 高估 67%）。
+            ai_lever = max(1.0, min(ai_lever, MAX_LEVERAGE, float(f.get("max_leverage", MAX_LEVERAGE) or MAX_LEVERAGE)))
             min_sz = float(f.get("minSz", 1) or 1)
             step_sz = float(f.get("lotSz", min_sz) or min_sz)
 
@@ -2110,7 +2143,7 @@ def execute_portfolio():
                     if tp_px <= limit_px:
                         tp_px = round(limit_px + max(tp_dist, f["price"] * 0.024), prec)
 
-                    analysis_capture.emit("order.adjusted", {"proposal": ai_decision, "effective": {"price": limit_px, "tp": tp_px, "sl": sl_px, "size": actual_sz, "leverage": ai_lever}, "rules_considered": ["price_precision", "quote_geometry_repair", "risk_size_clamp", "margin_cap", "leverage_cap"], "policy_version": f.get("policy_version")}, side="long")
+                    analysis_capture.emit("order.adjusted", {"proposal": ai_decision, "effective": {"price": limit_px, "tp": tp_px, "sl": sl_px, "size": actual_sz, "leverage": ai_lever, "notional": round(actual_sz * ct_val * limit_px, 4), "margin": round(actual_sz * ct_val * limit_px / max(1.0, ai_lever), 4), "planned_margin": ai_margin, "base_size": f["sz"]}, "rules_considered": ["price_precision", "quote_geometry_repair", "risk_size_clamp", "margin_cap", "leverage_cap"], "policy_version": f.get("policy_version")}, side="long")
                     accepted, order_ref = submit_protected_limit_order(inst_id, "buy", "long", actual_sz, limit_px, tp_px, sl_px)
                     if accepted:
                         if is_scale_in:
@@ -2210,7 +2243,7 @@ def execute_portfolio():
                     if tp_px >= limit_px:
                         tp_px = round(limit_px - max(tp_dist, f["price"] * 0.024), prec)
 
-                    analysis_capture.emit("order.adjusted", {"proposal": ai_decision, "effective": {"price": limit_px, "tp": tp_px, "sl": sl_px, "size": actual_sz, "leverage": ai_lever}, "rules_considered": ["price_precision", "quote_geometry_repair", "risk_size_clamp", "margin_cap", "leverage_cap"], "policy_version": f.get("policy_version")}, side="short")
+                    analysis_capture.emit("order.adjusted", {"proposal": ai_decision, "effective": {"price": limit_px, "tp": tp_px, "sl": sl_px, "size": actual_sz, "leverage": ai_lever, "notional": round(actual_sz * ct_val * limit_px, 4), "margin": round(actual_sz * ct_val * limit_px / max(1.0, ai_lever), 4), "planned_margin": ai_margin, "base_size": f["sz"]}, "rules_considered": ["price_precision", "quote_geometry_repair", "risk_size_clamp", "margin_cap", "leverage_cap"], "policy_version": f.get("policy_version")}, side="short")
                     accepted, order_ref = submit_protected_limit_order(inst_id, "sell", "short", actual_sz, limit_px, tp_px, sl_px)
                     if accepted:
                         if is_scale_in:
