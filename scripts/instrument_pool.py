@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -29,13 +31,13 @@ TIER_PROFILES = {
 # 默认 10 标的池：按 24H 名义成交额降序；规格取自 OKX /public/instruments 实时数据。
 # 扩容说明：MAX_CONCURRENT_POSITIONS = len(池) 自动跟随，同向持仓上限仍固定 3 笔(防 Beta 踩踏)。
 DEFAULT_INSTRUMENTS = [
-    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 5, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 1, "ctVal": 0.01, "tickSz": "0.1", "minSz": "0.01", "risk_per_trade_usd": 15.0},
+    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 5, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 1, "ctVal": 0.01, "tickSz": "0.1", "minSz": "0.01", "lotSz": "0.01", "risk_per_trade_usd": 15.0},
     {"instId": "ETH-USDT-SWAP", "name": "ETH", "type": "crypto", "ccy": "ETH", "tier": "tier_1_bluechip", "max_leverage": 5, "sl_atr_mult": 1.8, "base_sz": 3, "precision": 2, "ctVal": 0.1, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 15.0},
     {"instId": "SOL-USDT-SWAP", "name": "SOL", "type": "crypto", "ccy": "SOL", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 7, "precision": 2, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 15.0},
     {"instId": "XRP-USDT-SWAP", "name": "XRP", "type": "crypto", "ccy": "XRP", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 4, "ctVal": 100.0, "tickSz": "0.0001", "minSz": "0.01", "risk_per_trade_usd": 15.0},
-    {"instId": "DOGE-USDT-SWAP", "name": "DOGE", "type": "crypto", "ccy": "DOGE", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 10, "precision": 4, "ctVal": 1000.0, "tickSz": "0.0001", "minSz": "0.01", "risk_per_trade_usd": 15.0, "conf_floor": 80.0},
+    {"instId": "DOGE-USDT-SWAP", "name": "DOGE", "type": "crypto", "ccy": "DOGE", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 10, "precision": 5, "ctVal": 1000.0, "tickSz": "0.00001", "minSz": "0.01", "lotSz": "0.01", "risk_per_trade_usd": 15.0, "conf_floor": 80.0},
     {"instId": "ARB-USDT-SWAP", "name": "ARB", "type": "crypto", "ccy": "ARB", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 5, "ctVal": 10.0, "tickSz": "0.00001", "minSz": "0.1", "risk_per_trade_usd": 15.0},
-    {"instId": "SUI-USDT-SWAP", "name": "SUI", "type": "crypto", "ccy": "SUI", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 50, "precision": 4, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "0.01", "risk_per_trade_usd": 15.0},
+    {"instId": "SUI-USDT-SWAP", "name": "SUI", "type": "crypto", "ccy": "SUI", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 50, "precision": 4, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "1", "lotSz": "1", "risk_per_trade_usd": 15.0},
     {"instId": "LINK-USDT-SWAP", "name": "LINK", "type": "crypto", "ccy": "LINK", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 64, "precision": 3, "ctVal": 1.0, "tickSz": "0.001", "minSz": "0.1", "risk_per_trade_usd": 15.0},
     {"instId": "ADA-USDT-SWAP", "name": "ADA", "type": "crypto", "ccy": "ADA", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 4, "ctVal": 100.0, "tickSz": "0.0001", "minSz": "0.1", "risk_per_trade_usd": 15.0},
     {"instId": "UNI-USDT-SWAP", "name": "UNI", "type": "crypto", "ccy": "UNI", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 3, "ctVal": 1.0, "tickSz": "0.001", "minSz": "1", "risk_per_trade_usd": 15.0},
@@ -113,6 +115,7 @@ def from_okx_instrument(raw: dict[str, Any]) -> dict[str, Any]:
         "ctVal": float(raw.get("ctVal") or 1.0),
         "tickSz": tick_size,
         "minSz": str(raw.get("minSz") or "1"),
+        "lotSz": str(raw.get("lotSz") or raw.get("minSz") or "1"),
         "risk_per_trade_usd": 15.0,
     }
 
@@ -125,6 +128,10 @@ def load_instruments() -> list[dict[str, Any]]:
         instruments = payload.get("instruments", payload) if isinstance(payload, dict) else payload
         if isinstance(instruments, list) and instruments:
             for item in instruments:
+                # Old pool files predate lotSz. Keep them usable by falling
+                # back to minSz until the next official instrument refresh.
+                if not item.get("lotSz"):
+                    item["lotSz"] = item.get("minSz", "1")
                 if "tier" not in item:
                     item["tier"] = evaluate_instrument_tier(item.get("instId", ""), item.get("name", ""))
                     item["max_leverage"] = TIER_PROFILES[item["tier"]]["max_leverage"]
@@ -133,6 +140,35 @@ def load_instruments() -> list[dict[str, Any]]:
     except (OSError, json.JSONDecodeError):
         pass
     return [dict(item) for item in DEFAULT_INSTRUMENTS]
+
+
+def refresh_instrument_specs(instruments: list[dict[str, Any]], timeout: float = 4.0) -> list[dict[str, Any]]:
+    """Refresh ctVal/tickSz/minSz/lotSz from OKX public instruments in one call.
+
+    Failure is fail-soft: the last validated pool remains in use and the caller
+    can record the refresh error without blocking protective execution.
+    """
+    try:
+        query = urllib.parse.urlencode({"instType": "SWAP"})
+        request = urllib.request.Request(
+            "https://www.okx.com/api/v5/public/instruments?" + query,
+            headers={"User-Agent": "R20-Quantum-Trader/lot-size-refresh"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        rows = {str(row.get("instId")): row for row in (payload.get("data") or []) if isinstance(row, dict)}
+        for item in instruments:
+            row = rows.get(str(item.get("instId")))
+            if not row:
+                continue
+            for key in ("ctVal", "tickSz", "minSz", "lotSz"):
+                if row.get(key) not in (None, ""):
+                    item[key] = str(row[key]) if key in {"tickSz", "minSz", "lotSz"} else float(row[key])
+            if row.get("tickSz") not in (None, ""):
+                item["precision"] = _precision(str(row["tickSz"]))
+        return instruments
+    except Exception:
+        return instruments
 
 
 def save_instruments(instruments: list[dict[str, Any]]) -> None:

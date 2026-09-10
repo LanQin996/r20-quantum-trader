@@ -43,6 +43,14 @@ class QuantizeSizeTests(unittest.TestCase):
         self.assertEqual(aft.quantize_size(None, 0.01), 0.0)
         self.assertAlmostEqual(aft.quantize_size(2.0, 0), 2.0, places=10)  # 无步长退化为原值
 
+    def test_lot_size_is_distinct_from_minimum_size(self):
+        self.assertAlmostEqual(aft.quantize_size(0.37, 0.1, 0.01), 0.3, places=10)
+        self.assertEqual(aft.quantize_size(0.09, 0.1, 0.01), 0.0)
+
+    def test_order_size_serialization_keeps_decimal_without_scientific_notation(self):
+        self.assertEqual(aft.format_order_size(0.3), "0.3")
+        self.assertEqual(aft.format_order_size(1.25), "1.25")
+
     def test_result_is_always_multiple_of_step(self):
         for raw in (0.013, 0.077, 0.5, 1.0, 3.33, 12.9):
             sz = aft.quantize_size(raw, 0.01)

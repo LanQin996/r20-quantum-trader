@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
@@ -44,6 +45,19 @@ class InstrumentPoolUniverseTests(unittest.TestCase):
         cand_crowded = {"instId": "DOGE-USDT-SWAP", "name": "DOGE"}
         scored_crowded = ip.score_universe_candidate(cand_crowded, vol_24h_usd=50_000_000, atr_pct=3.0, funding_rate=0.0009)
         self.assertLess(scored_crowded["universe_score"], scored["universe_score"])
+
+    def test_refresh_instrument_specs_uses_lot_size_and_tick_precision(self):
+        response = {"data": [{"instId": "SUI-USDT-SWAP", "minSz": "1", "lotSz": "1", "ctVal": "1", "tickSz": "0.0001"}]}
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return __import__("json").dumps(response).encode()
+        rows = [{"instId": "SUI-USDT-SWAP", "minSz": "0.01", "lotSz": "0.01", "precision": 2, "tickSz": "0.01", "ctVal": 1.0}]
+        with patch("scripts.instrument_pool.urllib.request.urlopen", return_value=Reply()):
+            result = ip.refresh_instrument_specs(rows)
+        self.assertEqual(result[0]["minSz"], "1")
+        self.assertEqual(result[0]["lotSz"], "1")
+        self.assertEqual(result[0]["precision"], 4)
 
     def test_load_instruments_ensures_tiers_and_risk_parameters(self):
         insts = ip.load_instruments()
