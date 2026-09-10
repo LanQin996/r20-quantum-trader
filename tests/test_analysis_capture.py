@@ -184,5 +184,18 @@ class CaptureReplayTests(unittest.TestCase):
             bodies=[self.archive.read_blob(con,r["body_hash"]) for r in rows]
         self.assertEqual({b["loaded_risk"]["R20_MAX_LEVERAGE"] for b in bodies},{3})
 
+    def test_saved_configuration_does_not_require_python_dotenv_and_clears_stale_fault(self):
+        from r20_backend import analysis_capture as module
+        module.ROOT = Path(self.temp.name)
+        (Path(self.temp.name) / ".env").write_text("R20_OKX_ENV='live'\nR20_MAX_LEVERAGE=3\n", encoding="utf-8")
+        fault_path = self.path.parent / "analysis_capture_fault.json"
+        fault_path.write_text(json.dumps({"action":"configuration","error":"No module named 'dotenv'"}), encoding="utf-8")
+        with patch.dict(sys.modules, {"dotenv": None}):
+            body = module.saved_configuration()
+            module.configuration("test-process", {"MAX_LEVERAGE": 3})
+        self.assertEqual(body["mode"], "live")
+        self.assertNotEqual(body["risk"]["R20_MAX_LEVERAGE"]["configured"], None)
+        self.assertFalse(fault_path.exists())
+
 if __name__=="__main__":
     unittest.main()

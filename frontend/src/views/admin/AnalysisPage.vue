@@ -58,6 +58,7 @@ const metrics = computed(() => [
 ] as const);
 const fault = computed(() => Boolean(health.value.capture_fault && Object.keys(health.value.capture_fault).length) || health.value.sync?.some((x: RecordData) => x.error));
 const pending = computed(() => !health.value.sync?.length || health.value.sync.some((x: RecordData) => !x.complete));
+const syncProblems = computed(() => (health.value.sync || []).filter((x: RecordData) => x.error).map((x: RecordData) => `${x.source}: ${x.error}`));
 
 function params() {
   if (!startDate.value || !endDate.value || endDate.value < startDate.value) throw new Error(tr('start') + ' / ' + tr('end'));
@@ -194,7 +195,7 @@ onMounted(() => apply());
         <span>{{ tr('linkRate') }}: {{ pct(stats.decision_link_rate) }}</span>
         <span>{{ tr('costRate') }}: {{ pct(stats.cost_complete_rate) }}</span>
       </div>
-      <p v-if="fault" role="status" class="text-xs down">{{ tr('syncError') }}</p>
+      <p v-if="fault" role="status" class="text-xs down">{{ tr('syncError') }}<span v-if="syncProblems.length"> · {{ syncProblems.join('；') }}</span></p>
       <p v-else-if="pending" class="text-xs t-faint">{{ tr('syncPending') }}</p>
       <details v-if="fault || pending" class="text-xs t-faint"><summary>{{ tr('coverageNote') }}</summary><BaseCodeBlock :code="json(health)" /></details>
     </div>
@@ -212,7 +213,7 @@ onMounted(() => apply());
       <div class="card p-4">
         <h2 class="font-semibold text-sm">{{ tr('curve') }}</h2><p class="text-xs t-faint mt-1">{{ tr('curveNote') }}</p>
         <BaseEmpty v-if="!plot.points.length" :text="tr('noData')" />
-        <div v-if="plot.points.length" class="flex gap-4 text-xs mt-3"><span style="color: var(--accent)">{{ tr('net') }} · USDT</span><span class="down">{{ tr('drawdown') }} · USDT</span></div>
+        <div v-if="plot.points.length" class="flex items-center text-xs mt-3"><span style="color: var(--accent)">{{ tr('net') }} · USDT</span><span class="down ml-4">{{ tr('drawdown') }} · USDT</span></div>
         <svg v-if="plot.points.length" viewBox="0 0 800 170" class="w-full mt-3 min-h-40" role="img" :aria-label="tr('curve')">
           <line x1="0" x2="800" :y1="plot.zero" :y2="plot.zero" stroke="var(--line-2)" stroke-dasharray="4 4" />
           <polyline :points="plot.drawdown" fill="none" stroke="var(--down)" stroke-width="1.5" opacity=".65" />

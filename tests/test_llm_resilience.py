@@ -237,6 +237,35 @@ class LLMResilienceTests(unittest.TestCase):
         self.assertIn("LLM 推演超时", str(ctx.exception))
         self.assertIn("调大思考上限时间", str(ctx.exception))
 
+    def test_timeout_does_not_retry_same_model_for_full_timeout_window(self):
+        """A 300s model timeout must finish the single-model call, not become ~600s."""
+        llm_manager.update_llm_settings(request_attempts=3, fallback_model_ids=[])
+        calls = []
+
+        def timed_out(cand, messages, temperature, response_format, timeout, **meta):
+            calls.append(timeout)
+            raise llm_manager._LLMTransientError("timed out", timed_out=True)
+
+        with patch.object(llm_manager, "_attempt_llm_call", side_effect=timed_out), patch("time.sleep"):
+            with self.assertRaises(TimeoutError):
+                llm_manager.execute_llm_request(messages=[{"role": "user", "content": "hi"}], timeout=300)
+        self.assertEqual(len(calls), 1)
+        self.assertLessEqual(calls[0], 300)
+
+    def test_chain_budget_is_split_between_primary_and_fallback(self):
+        llm_manager.update_llm_settings(request_attempts=3, fallback_model_ids=["backup-m"])
+        calls = []
+
+        def timed_out(cand, messages, temperature, response_format, timeout, **meta):
+            calls.append((cand["model"], timeout))
+            raise llm_manager._LLMTransientError("timed out", timed_out=True)
+
+        with patch.object(llm_manager, "_attempt_llm_call", side_effect=timed_out), patch("time.sleep"):
+            with self.assertRaises(TimeoutError):
+                llm_manager.execute_llm_request(messages=[{"role": "user", "content": "hi"}], timeout=300)
+        self.assertEqual([name for name, _ in calls], ["primary-m", "backup-m"])
+        self.assertTrue(all(timeout <= 150.0 for _, timeout in calls))
+
     def test_single_model_http_error_keeps_legacy_runtime_error(self):
         llm_manager.update_llm_settings(request_attempts=1, fallback_model_ids=[])
         with patch("r20_backend.llm_manager.urllib.request.urlopen", side_effect=http_error(404, "no such model")):

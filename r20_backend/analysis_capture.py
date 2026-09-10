@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 import sys
 import threading
+import sqlite3
+import time
 import uuid
 from r20_backend.analysis_store import Archive, ROOT, now_ms, digest, sanitize, timestamp_ms, lifecycle_id
 
@@ -90,6 +92,24 @@ def fault_status() -> dict:
     except Exception:
         return _MEMORY_FAULT
 
+def clear_fault(action: str | None = None) -> None:
+    """Remove a persisted fault after the same capture boundary succeeds.
+
+    A previous transient failure must not keep the dashboard red forever.
+    """
+    global _MEMORY_FAULT
+    path = Archive().path.parent / "analysis_capture_fault.json"
+    try:
+        with _fault_lock:
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if action is None or payload.get("action") == action:
+                    path.unlink()
+            if action is None or _MEMORY_FAULT.get("action") == action:
+                _MEMORY_FAULT = {}
+    except Exception:
+        pass
+
 def emit(kind: str, body=None, status: str = "observed", **meta) -> str:
     if not enabled(): return ""
     try:
@@ -98,7 +118,18 @@ def emit(kind: str, body=None, status: str = "observed", **meta) -> str:
         if isinstance(body, dict):
             body = {**body, "capture_span_id": ctx.get("span_id"), "request_id": ctx.get("request_id")}
         account = ctx.pop("account",None) or identity()
-        return Archive().event(account,kind,body if body is not None else {},status,**ctx)
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return Archive().event(account,kind,body if body is not None else {},status,**ctx)
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        if last_exc:
+            raise last_exc
+        return ""
     except Exception as exc:
         fault(exc,kind)
         return ""
@@ -112,8 +143,21 @@ def read_json(path: Path):
 def saved_configuration() -> dict:
     """Read persisted files, never invoke loaders that create defaults or mutate state."""
     from scripts.risk_constants import DEFAULTS
-    from dotenv import dotenv_values
-    saved_env = dotenv_values(ROOT/".env",encoding="utf-8") if (ROOT/".env").exists() else {}
+    saved_env = {}
+    env_path = ROOT / ".env"
+    if env_path.exists():
+        # Keep the analysis collector dependency-free. The application already
+        # has its own dotenv parser; this read-only subset handles KEY=value,
+        # optional quotes and comments without importing python-dotenv.
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
+                value = value[1:-1]
+            saved_env[key] = value
     risk = {k:{"configured":saved_env.get(k),"default":v} for k,v in DEFAULTS.items()}
     names = {
         "prompt_library":"prompt_library.json","council":"council_config.json",
@@ -146,7 +190,9 @@ def configuration(process: str, loaded: dict | None = None, effective: dict | No
                 if key in loaded: body[key] = loaded[key]
         body["effective"] = effective or {}
         body["source_note"] = "进程在事件边界实际观测的值；未观测字段不推定为已加载"
-        return Archive().configuration(identity(),body,"runtime",process,os.getpid())
+        result = Archive().configuration(identity(),body,"runtime",process,os.getpid())
+        clear_fault("configuration")
+        return result
     except Exception as exc:
         fault(exc,"configuration")
         return ""

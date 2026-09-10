@@ -32,9 +32,10 @@ DEFAULT_REQUEST_ATTEMPTS = 3
 MIN_REQUEST_ATTEMPTS = 1
 MAX_REQUEST_ATTEMPTS = 10
 MAX_FALLBACK_MODELS = 5
-# 整条模型链的总等待软预算（只在新一次尝试发起前检查，不切断进行中的请求）；
-# 必须低于网关 trader 任务 840s 超时，避免整轮推演被调度器硬杀。
-FAILOVER_MAX_TOTAL_WAIT = float(os.getenv("LLM_FAILOVER_MAX_WAIT_SECONDS", "600"))
+# 整条模型链的总等待硬预算。旧值 600s 配合单模型 300s + 3 次重试，
+# 会让一次无响应的请求连续耗掉约 10 分钟；交易巡检每 15 分钟一次，几乎
+# 会把下一轮也拖住。默认 300s，并在候选模型之间分配预算。
+FAILOVER_MAX_TOTAL_WAIT = float(os.getenv("LLM_FAILOVER_MAX_WAIT_SECONDS", "300"))
 
 SUPPORTED_API_FORMATS = [
     {"id": "openai_chat", "name": "OpenAI Chat (/chat/completions)", "desc": "标准 ChatML 对话格式，兼容 OpenAI/Gemini/DeepSeek/主流中继"},
@@ -1620,6 +1621,9 @@ def execute_llm_request(
             candidates.append(rt)
 
     call_started = time.perf_counter()
+    chain_budget = min(FAILOVER_MAX_TOTAL_WAIT, max(30.0, effective_timeout))
+    global_deadline = call_started + chain_budget
+    candidate_budget = chain_budget / max(1, len(candidates))
     failures: List[str] = []
     last_error: Optional[BaseException] = None
     last_timed_out = False
@@ -1627,15 +1631,25 @@ def execute_llm_request(
 
     for cand_idx, cand in enumerate(candidates):
         cand_timeout = effective_timeout if cand_idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
+        candidate_started = time.perf_counter()
+        candidate_deadline = min(global_deadline, candidate_started + candidate_budget)
         for attempt in range(attempts):
+            remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
+            if remaining <= 0:
+                deadline_hit = True
+                break
             if attempt > 0:
-                if (time.perf_counter() - call_started) > FAILOVER_MAX_TOTAL_WAIT:
+                if remaining <= 0:
                     deadline_hit = True
                     break
-                time.sleep(min(2.0 * attempt, 8.0))
+                time.sleep(min(2.0 * attempt, 8.0, remaining))
+                remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
+                if remaining <= 0:
+                    deadline_hit = True
+                    break
             try:
                 content, reasoning, usage, latency = _attempt_llm_call(
-                    cand, messages, temperature, response_format, cand_timeout,
+                    cand, messages, temperature, response_format, min(cand_timeout, remaining),
                     attempt=attempt, candidate_index=cand_idx,
                 )
                 if cand_idx > 0:
@@ -1665,6 +1679,11 @@ def execute_llm_request(
                 failures.append(str(exc))
                 last_error = exc
                 last_timed_out = exc.timed_out
+                # A timeout consumes the model's whole attempt budget. Retrying
+                # the same long reasoning request only duplicates the stall;
+                # move to the next candidate while the global budget remains.
+                if exc.timed_out:
+                    break
             except Exception as exc:  # 兜底：任何未分类异常按瞬时处理，绝不让整链崩在第一次
                 failures.append(f"模型 {cand['model']} 未预期异常：{type(exc).__name__}: {str(exc)[:200]}")
                 last_error = exc
@@ -1679,6 +1698,17 @@ def execute_llm_request(
             raise RuntimeError(str(last_error)) from last_error
         if isinstance(last_error, _LLMTransientError):
             if last_error.timed_out:
+                record_failover_event({
+                    "type": "single_model_timeout",
+                    "from_model": primary["model"],
+                    "to_model": "",
+                    "chain": primary["model"],
+                    "attempts_per_model": attempts,
+                    "attempts_used": len(failures),
+                    "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                    "deadline_hit": deadline_hit,
+                    "succeeded": False,
+                })
                 raise TimeoutError(str(last_error)) from last_error
             raise RuntimeError(str(last_error)) from last_error
         raise RuntimeError(f"LLM 请求未获得响应（模型 {primary['model']}）")

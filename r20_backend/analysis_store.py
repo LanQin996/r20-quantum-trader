@@ -132,11 +132,13 @@ class Archive:
             return
         if write:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            con = sqlite3.connect(str(self.path),timeout=0.25)
+            con = sqlite3.connect(str(self.path),timeout=5.0)
             con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA busy_timeout=5000")
             con.executescript(SCHEMA)
         else:
-            con = sqlite3.connect(self.path.resolve().as_uri()+"?mode=ro",uri=True,timeout=0.25)
+            con = sqlite3.connect(self.path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5.0)
+            con.execute("PRAGMA busy_timeout=5000")
             if not con.execute("SELECT 1 FROM sqlite_master WHERE name='analysis_events'").fetchone():
                 con.close()
                 yield None
@@ -307,7 +309,11 @@ def normalize_position(row: dict, live: bool = False) -> dict:
         "gross_pnl":val(gross),"fee":val(fee),"funding_fee":val(funding),
         "other_settlement":val(penalty+settled) if penalty is not None and settled is not None else None,
         "net_pnl":val(net) if not live else None,"pnl":val(net) if not live else None,
-        "cost_complete":net is not None and not live,
+        # Exchange realizedPnl is authoritative for the net result, but it does
+        # not prove that fee/funding/liquidation components were all captured.
+        # Keep those two facts separate so the completeness percentage cannot
+        # look perfect merely because one aggregate field exists.
+        "cost_complete":components_complete and net is not None and not live,
         "cost_basis":"exchange_realizedPnl" if realized is not None else "complete_components" if components_complete else "incomplete",
         "components_complete":components_complete,
         "known_net_pnl":val(gross+fee) if gross is not None and fee is not None else None,

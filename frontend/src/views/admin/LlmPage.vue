@@ -838,7 +838,7 @@ onMounted(() => {
               </div>
             </div>
             <p class="text-[10px] leading-relaxed" style="color: var(--ink-3);">
-              重试间指数退避；整条模型链共享 600s 总等待预算（低于任务 14 分钟硬超时），防止拖垮本轮推演。
+              单模型超时不会重复消耗完整等待时间；整条模型链默认共享 300s 总预算，并为备用模型预留时间，防止拖垮下一轮巡检。
             </p>
           </div>
 
@@ -916,7 +916,7 @@ onMounted(() => {
             >
               <div class="flex items-center justify-between gap-2">
                 <span class="font-bold" :class="ev.succeeded ? 'text-emerald-400' : 'text-red-400'">
-                  {{ ev.type === 'fallback_hit' ? '✅ 已回退生效' : '⛔ 模型链全灭' }}
+                  {{ ev.type === 'fallback_hit' ? '✅ 已回退生效' : ev.type === 'single_model_timeout' ? '⏱️ 单模型超时' : '⛔ 模型链全灭' }}
                   {{ ev.from_model }}<template v-if="ev.to_model"> → {{ ev.to_model }}</template>
                 </span>
                 <span class="shrink-0" style="color: var(--ink-3);">{{ ev.time_str }} · {{ ev.elapsed_seconds }}s</span>
