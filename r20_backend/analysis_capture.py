@@ -294,6 +294,22 @@ def llm_request(request, timeout: float, transport, **meta):
         raise
     return response
 
+def position_meta(position: dict | None = None) -> dict:
+    """Bind one event to the position lifecycle it belongs to.
+
+    Judgement-based exits are executed per position inside a single span, so the
+    ambient context cannot say which lifecycle the exit belonged to. Without an
+    explicit binding the review archive has to mark the trade unlinked.
+    """
+    pos = position or {}
+    meta = {}
+    if pos.get("instId"): meta["inst"] = str(pos.get("instId"))
+    side = str(pos.get("posSide") or pos.get("side") or "")
+    if side and side != "net": meta["side"] = side
+    if pos.get("cTime") and pos.get("instId"): meta["trade_id"] = lifecycle_id(pos)
+    return meta
+
+
 def observe_position(row: dict, tracker: dict | None = None):
     tracker = tracker or {}
     emit("position.sample",{"position":row,"tracker":tracker,

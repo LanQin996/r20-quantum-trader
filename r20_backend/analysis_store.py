@@ -2,6 +2,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -287,16 +288,53 @@ def normalize_position(row: dict, live: bool = False) -> dict:
     if direction == "net":
         pos = decimal(row.get("pos"))
         direction = "long" if pos and pos > 0 else "short" if pos and pos < 0 else "unknown"
-    gross, fee = decimal(row.get("pnl")), decimal(row.get("fee"))
-    funding, penalty, settled = (decimal(row.get(k)) for k in ("fundingFee","liqPenalty","settledPnl"))
+    def component(key):
+        # OKX blanks fields that cannot apply to the instrument (settledPnl is
+        # cross-FUTURES only). A present-but-blank value is a stated zero, while
+        # an absent key stays unknown.
+        if key not in row: return None
+        value = row.get(key)
+        return decimal("0") if isinstance(value,str) and not value.strip() else decimal(value)
+    gross, fee = component("pnl"), component("fee")
+    funding, penalty, settled = (component(k) for k in ("fundingFee","liqPenalty","settledPnl"))
+    # A blank realizedPnl is unknown, not zero: the component sum then becomes
+    # the net result instead of a false break-even.
     realized = decimal(row.get("realizedPnl"))
-    components_complete = all(x is not None for x in (gross,fee,funding,penalty,settled))
+    components = [gross,fee,funding,penalty,settled]
+    if realized is not None and None in components:
+        # OKX defines realizedPnl = pnl + fee + fundingFee + liqPenalty + settledPnl.
+        # When the captured components already reconcile to realizedPnl, the
+        # uncaptured ones contribute nothing: that is proof, not the assumption
+        # that unknown costs are zero.
+        if sum((x for x in components if x is not None),Decimal(0)) == realized:
+            components = [x if x is not None else Decimal(0) for x in components]
+            gross, fee, funding, penalty, settled = components
+    components_complete = all(x is not None for x in components)
     net = realized if realized is not None else (gross+fee+funding+penalty+settled if components_complete else None)
     # OKX type 1/4 are partial close/liquidation; only type 2/3/5 are final.
     kind = str(row.get("type",""))
     status = "holding" if live else "partial" if kind in {"1","4"} else "closed" if kind in {"2","3","5"} else "unknown"
     reason = "liquidation" if kind == "3" else "adl" if kind == "5" else None
     def val(v): return str(v) if v is not None else None
+    def lifecycle_margin():
+        """Closed lifecycles carry no margin field, so estimate it like the web ledger does."""
+        exchange = row.get("margin") or row.get("imr")
+        if exchange: return decimal(exchange), "exchange"
+        if live: return None, "unknown"
+        qty = decimal(row.get("closeTotalPos") or row.get("openMaxPos"))
+        entry, lever = decimal(row.get("openAvgPx")), decimal(row.get("lever"))
+        ct_val = None
+        try:
+            from scripts.instrument_pool import load_instruments
+            for item in load_instruments():
+                if str(item.get("instId")) == str(row.get("instId")):
+                    ct_val = decimal(item.get("ctVal")); break
+        except Exception:
+            ct_val = None
+        if qty and entry and lever and ct_val:
+            return qty*ct_val*entry/lever, "notional_estimate"
+        return None, "unknown"
+    margin, margin_basis = lifecycle_margin()
     return {
         "id":lifecycle_id(row),"pos_id":row.get("posId"),"inst":str(row.get("instId","")).replace("-USDT-SWAP",""),
         "inst_id":row.get("instId"),"side":direction,"status":status,"open_ms":opened,
@@ -304,7 +342,7 @@ def normalize_position(row: dict, live: bool = False) -> dict:
         "close_time":time_text(updated) if status=="closed" else "",
         "open_px":row.get("avgPx") if live else row.get("openAvgPx"),"close_px":row.get("closeAvgPx"),
         "sz":row.get("pos") if live else (row.get("closeTotalPos") or row.get("openMaxPos")),"lever":row.get("lever"),
-        "margin":row.get("margin") or row.get("imr"),"unrealized_pnl":row.get("upl") if live else None,
+        "margin":val(margin),"margin_basis":margin_basis,"unrealized_pnl":row.get("upl") if live else None,
         "mark_px":row.get("markPx") if live else None,
         "gross_pnl":val(gross),"fee":val(fee),"funding_fee":val(funding),
         "other_settlement":val(penalty+settled) if penalty is not None and settled is not None else None,

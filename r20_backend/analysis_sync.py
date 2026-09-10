@@ -89,6 +89,54 @@ def sync_source(archive: Archive, account: str, source: str, fetch, max_pages: i
     archive.sync_state(account,source,state)
     return state
 
+def _closing_order(orders: list[dict], direction: str) -> dict | None:
+    """The order that reduced the position: opposite side, reduce-only or market."""
+    want = "sell" if direction=="long" else "buy"
+    for order in orders:
+        if str(order.get("side") or "").lower() != want: continue
+        if str(order.get("reduceOnly") or "").lower()=="true" or str(order.get("ordType") or "").lower()=="market":
+            return order
+    return None
+
+def _attached_triggers(orders: list[dict], direction: str) -> tuple:
+    """Cloud OCO trigger prices (sl, tp) carried on the entry order."""
+    want = "buy" if direction=="long" else "sell"
+    for order in orders:
+        if str(order.get("side") or "").lower() != want: continue
+        for algo in order.get("attachAlgoOrds") or []:
+            sl, tp = number(algo.get("slTriggerPx")), number(algo.get("tpTriggerPx"))
+            if sl or tp: return sl, tp
+    return None, None
+
+def infer_exit_reason(orders: list[dict], fills_by_order: dict, direction: str) -> dict | None:
+    """Classify a close from exchange facts when no captured exit event exists.
+
+    positions-history reports every normal close as type=2 with an empty triggerPx,
+    so the reason can only be inferred: an attached algo id proves the cloud OCO
+    fired, and the entry order's trigger prices say which leg it was. A plain
+    market reduce-only close is the engine's own judgement exit. Inferred reasons
+    are never promoted to confirmed evidence.
+    """
+    order = _closing_order(orders, direction)
+    if not order: return None
+    triggered = bool(order.get("algoId")) or str(order.get("clOrdId") or "").startswith("O")
+    if not triggered:
+        return {"reason":"系统主动平仓","source":"system_market_close"}
+    px = None
+    for fill in fills_by_order.get((order.get("instId"), order.get("ordId"))) or []:
+        px = number(fill.get("fillPx")) or px
+    px = px or number(order.get("avgPx")) or number(order.get("px"))
+    sl, tp = _attached_triggers(orders, direction)
+    reason = "云端保护单触发"
+    if px and sl and tp:
+        hit_sl = px <= sl if direction=="long" else px >= sl
+        hit_tp = px >= tp if direction=="long" else px <= tp
+        if hit_sl != hit_tp:
+            reason = "云端止损触发" if hit_sl else "云端止盈触发"
+        else:
+            reason = "云端止损触发" if abs(px-sl) <= abs(px-tp) else "云端止盈触发"
+    return {"reason":reason,"source":"attached_algo_trigger"}
+
 def reconcile(archive: Archive, account: str, positions: list[dict] | None = None) -> list[dict]:
     """Keep source financial facts separate from captured strategy evidence."""
     histories = archive.raw_rows(account,"positions-history")
@@ -176,6 +224,12 @@ def reconcile(archive: Archive, account: str, positions: list[dict] | None = Non
                 detail = archive.read_blob(con,exact_exits[-1]["body_hash"])
             t["exit_reason"] = detail.get("reason")
             t["exit_evidence"] = "confirmed" if detail.get("confirmed") else "inferred"
+        else:
+            inferred = infer_exit_reason(linked_orders, fills_by_order, direction)
+            if inferred:
+                t["exit_reason"] = inferred["reason"]
+                t["exit_evidence"] = "inferred"
+                t["exit_source"] = inferred["source"]
         samples = [e for e in events if e["trade_id"]==t["id"] and e["kind"] in ("position.manage.end","position.sample")]
         highs, lows = [], []
         with archive.connect() as con:

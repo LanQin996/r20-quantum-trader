@@ -72,6 +72,23 @@ class AnalysisTests(unittest.TestCase):
         self.assertIsNone(summarize([])["win_rate"])
         self.assertIsNone(summarize(rows[:1])["profit_factor"])
 
+    def test_cross_swap_blank_settlement_fields_stay_statistically_visible(self):
+        blank=position(7,settledPnl="",nonSettleAvgPx="",realizedPnl="1.7")
+        t=normalize_position(blank)
+        self.assertTrue(t["cost_complete"])
+        self.assertEqual(t["net_pnl"],"1.7")
+        self.assertEqual(t["other_settlement"],"0")
+        stat=summarize([t])
+        self.assertEqual(stat["sample_count"],1)
+        self.assertEqual(stat["win_rate"],100)
+        self.assertAlmostEqual(stat["net_pnl"],1.7)
+
+    def test_absent_component_is_zero_only_when_realized_identity_proves_it(self):
+        proven=position(8); proven.pop("settledPnl")
+        self.assertTrue(normalize_position(proven)["cost_complete"])
+        unproven=position(9,realizedPnl="9"); unproven.pop("settledPnl")
+        self.assertFalse(normalize_position(unproven)["cost_complete"])
+
     def test_exchange_realized_not_double_deducted(self):
         t=normalize_position(position())
         self.assertEqual(t["net_pnl"],"1.7")

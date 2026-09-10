@@ -44,6 +44,16 @@ JOBS = {
 }
 
 
+JOB_TIMEOUTS = {
+    "trader": 840,
+    "factor_library": 55,
+    "news": 300,
+    "daily_briefing": 600,
+    "self_improvement": 1200,
+    "nightly_backup": 1800,
+}
+
+
 def gateway_scheduler_running() -> bool:
     """Return True when the gateway worker holds its exclusive lock (i.e. is alive)."""
     with GATEWAY_LOCK.open("a+") as handle:
@@ -55,16 +65,47 @@ def gateway_scheduler_running() -> bool:
     return False
 
 
-def run_script(name: str) -> None:
+def run_script(name: str) -> bool:
     script = SCRIPTS / JOBS[name][0]
     child_env = os.environ.copy()
     child_env["PYTHONUTF8"] = "1"
     child_env["PYTHONIOENCODING"] = "utf-8"
-    result = subprocess.run([sys.executable, str(script)], cwd=ROOT, env=child_env, text=True, capture_output=True, timeout=600)
+    timeout = JOB_TIMEOUTS.get(name, 600)
+    try:
+        result = subprocess.run([sys.executable, str(script)], cwd=ROOT, env=child_env, text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logging.error("job=%s timeout=%ss expired; killed", name, timeout)
+        return False
     if result.returncode:
         logging.error("job=%s rc=%s stderr=%s", name, result.returncode, result.stderr[-1000:])
     else:
         logging.info("job=%s completed stdout=%s", name, result.stdout[-500:])
+    return result.returncode == 0
+
+
+def run_interval_job(name: str, interval: float, now: datetime, last: dict[str, datetime | None], retry: dict[str, float]) -> bool:
+    """Launch an interval job when due, retrying a failure once 60s later in the same slot.
+
+    ``last`` and ``retry`` are mutated in place, and ``now`` is injected so the helper
+    stays deterministic. Returns True when a job was launched.
+    """
+    previous = last.get(name)
+    interval_elapsed = previous is None or (now - previous).total_seconds() >= interval
+    retry_at = retry.get(name)
+    is_retry = not interval_elapsed and retry_at is not None and now.timestamp() >= retry_at
+    if not interval_elapsed and not is_retry:
+        return False
+    retry.pop(name, None)
+    if is_retry:
+        logging.warning("job=%s retrying after failure", name)
+    succeeded = run_script(name)
+    last[name] = now
+    if not succeeded and not is_retry:
+        logging.warning("job=%s failed; scheduling retry in 60s", name)
+        retry[name] = now.timestamp() + 60
+    elif not succeeded:
+        logging.warning("job=%s retry failed; waiting for next interval slot", name)
+    return True
 
 
 def due_daily(now: datetime, schedule_time: str, last_run: datetime | None) -> bool:
@@ -87,6 +128,7 @@ def main() -> None:
 
         tz = timezone(timedelta(hours=8))
         last: dict[str, datetime | None] = {key: None for key in JOBS}
+        retry: dict[str, float] = {}
         gateway_active = False
         logging.info("R20 standalone scheduler v6.6.2 started")
         while True:
@@ -103,15 +145,9 @@ def main() -> None:
                 gateway_active = False
             now = datetime.now(tz).replace(second=0, microsecond=0)
             current = datetime.now(tz)
-            if not last["trader"] or (current - last["trader"]).total_seconds() >= 15 * 60:
-                run_script("trader")
-                last["trader"] = datetime.now(tz)
-            if not last["factor_library"] or (current - last["factor_library"]).total_seconds() >= 60:
-                run_script("factor_library")
-                last["factor_library"] = datetime.now(tz)
-            if not last["news"] or (current - last["news"]).total_seconds() >= 10 * 60:
-                run_script("news")
-                last["news"] = datetime.now(tz)
+            run_interval_job("trader", 15 * 60, current, last, retry)
+            run_interval_job("factor_library", 60, current, last, retry)
+            run_interval_job("news", 10 * 60, current, last, retry)
             schedule = load_schedule()
             briefing_times = schedule.get("briefing_times", ["08:00", "20:00"])
             if any(due_daily(now, schedule_time, last["daily_briefing"]) for schedule_time in briefing_times):
