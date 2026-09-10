@@ -644,7 +644,7 @@ onMounted(() => {
             <div>
               <div class="flex items-center space-x-2">
                 <h2 class="text-xs sm:text-[13px] font-bold" style="color: var(--ink-1);">
-                  全局思考推演与超时上限
+                  单模型响应等待上限
                 </h2>
                 <span
                   class="px-2 py-0.5 rounded text-[11px] font-bold border"
@@ -654,7 +654,7 @@ onMounted(() => {
                 </span>
               </div>
               <p class="text-[11px] mt-0.5" style="color: var(--ink-2);">
-                针对长思考链旗舰模型（o1/o3、DeepSeek-R1、Claude 3.7 Thinking、Gemini 3 Pro 等）自定义推演等待上限，杜绝硬编码超时过早截断。
+                每个模型独立使用此等待上限，包含连接、思考和完整答案读取；同一模型的重试共享这段时间。
               </p>
             </div>
           </div>
@@ -688,7 +688,7 @@ onMounted(() => {
           <div class="p-3 rounded-xl border space-y-1.5 sm:col-span-1 lg:col-span-2" style="background-color: var(--surface-1); border-color: var(--line-1);">
             <div class="flex items-center justify-between">
               <label class="text-[11px] font-bold" style="color: var(--ink-2);">
-                思考时间上限（秒）
+                单模型等待上限（秒）
               </label>
               <span class="text-[11px]" style="color: var(--ink-3);">有效范围: 10 ~ 1800 秒</span>
             </div>
@@ -789,7 +789,7 @@ onMounted(() => {
                 </span>
               </div>
               <p class="text-[11px] mt-0.5" style="color: var(--ink-2);">
-                模型请求失败（超时/断连/网关抖动/空响应/额度故障）不再一次即弃：先按请求次数指数退避重试，仍失败则按顺序回退到备用模型继续推演。
+                断连、网关抖动、空响应或无效答案会在当前模型的等待上限内重试；超时后直接按顺序切换备用模型。
               </p>
             </div>
           </div>
@@ -838,7 +838,7 @@ onMounted(() => {
               </div>
             </div>
             <p class="text-[10px] leading-relaxed" style="color: var(--ink-3);">
-              单模型超时不会重复消耗完整等待时间；整条模型链默认共享 300s 总预算，并为备用模型预留时间，防止拖垮下一轮巡检。
+              配置 300s 时，每个模型最多等待 300s，增加备用模型会增加整轮最长等待时间。超时后直接切换；重试不会重置当前模型的计时。若服务器另设整链总上限，则优先遵守该上限。
             </p>
           </div>
 

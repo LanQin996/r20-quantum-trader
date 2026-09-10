@@ -7,6 +7,7 @@ Supports:
 from __future__ import annotations
 import copy
 from functools import wraps
+import http.client
 from threading import RLock
 import json
 import os
@@ -32,10 +33,10 @@ DEFAULT_REQUEST_ATTEMPTS = 3
 MIN_REQUEST_ATTEMPTS = 1
 MAX_REQUEST_ATTEMPTS = 10
 MAX_FALLBACK_MODELS = 5
-# 整条模型链的总等待硬预算。旧值 600s 配合单模型 300s + 3 次重试，
-# 会让一次无响应的请求连续耗掉约 10 分钟；交易巡检每 15 分钟一次，几乎
-# 会把下一轮也拖住。默认 300s，并在候选模型之间分配预算。
-FAILOVER_MAX_TOTAL_WAIT = float(os.getenv("LLM_FAILOVER_MAX_WAIT_SECONDS", "300"))
+# thinking_timeout 是每个模型的等待上限，含该模型重试及参数兼容请求。
+# 不再把默认 300s 平均分配：配置 300s + 两个模型曾被静默缩短为各 150s。
+# 整链默认预算为各模型预算之和；部署方可显式设置额外硬上限（0 表示不额外限制）。
+FAILOVER_MAX_TOTAL_WAIT = float(os.getenv("LLM_FAILOVER_MAX_WAIT_SECONDS", "0"))
 
 SUPPORTED_API_FORMATS = [
     {"id": "openai_chat", "name": "OpenAI Chat (/chat/completions)", "desc": "标准 ChatML 对话格式，兼容 OpenAI/Gemini/DeepSeek/主流中继"},
@@ -1231,6 +1232,7 @@ def build_request_spec(
     response_format: Optional[Dict[str, Any]] = None,
     reasoning_type: str = "auto",
     max_tokens: int = 4096,
+    stream: bool = False,
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Build endpoint URL, headers, and request payload according to the specific API protocol format."""
     cleaned_url = base_url.rstrip("/")
@@ -1329,6 +1331,9 @@ def build_request_spec(
             "model": model,
             "messages": messages,
         }
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
 
         # Temperature handling for reasoning models vs normal models
         is_reasoning_model = (
@@ -1415,6 +1420,10 @@ class _LLMHardError(Exception):
 
 
 def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+    if not isinstance(res_json, dict):
+        raise _LLMTransientError("LLM 响应格式错误：根节点不是对象")
+    if res_json.get("error"):
+        raise _LLMTransientError(f"LLM 上游返回错误：{str(res_json['error'])[:220]}")
     content = ""
     reasoning_content = ""
     usage = res_json.get("usage", {}) if isinstance(res_json, dict) else {}
@@ -1446,11 +1455,159 @@ def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[s
 
     # Protocol 3: OpenAI Chat Completions Response
     else:
-        msg = res_json.get("choices", [{}])[0].get("message", {})
-        content = str(msg.get("content", "")).strip()
+        choices = res_json.get("choices") or [{}]
+        msg = choices[0].get("message") or {}
+        content = str(msg.get("content") or "").strip()
         reasoning_content = str(msg.get("reasoning_content") or "").strip()
 
     return content, reasoning_content, usage
+
+
+def _response_chunks(resp, deadline: float, progress: Dict[str, Any]):
+    """Bound the entire body read, including an upstream that keeps sending heartbeats."""
+    read1 = getattr(resp, "read1", None)
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("request deadline exceeded")
+        # urllib exposes a socket timeout, not a total deadline. Recalculate it
+        # before each read so headers + body + heartbeats share the same budget.
+        raw = getattr(getattr(resp, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        chunk = read1(8192) if callable(read1) else resp.read()
+        if chunk:
+            progress["received_bytes"] = progress.get("received_bytes", 0) + len(chunk)
+        if time.perf_counter() >= deadline:
+            raise TimeoutError("request deadline exceeded")
+        if not chunk:
+            return
+        yield chunk
+        if not callable(read1):
+            return  # non-socket test transports / file-like wrappers: read() reads all
+
+
+def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept ordinary JSON or Chat Completions SSE, preserving usage and reasoning."""
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    usage: Dict[str, Any] = {}
+    finish_reason = None
+    done = False
+    data_lines: List[bytes] = []
+
+    def consume_event():
+        nonlocal usage, finish_reason, done
+        if not data_lines:
+            return
+        data = b"\n".join(data_lines).strip()
+        data_lines.clear()
+        if data == b"[DONE]":
+            done = True
+            return
+        event = json.loads(data.decode("utf-8"))
+        if not isinstance(event, dict):
+            raise ValueError("SSE event is not an object")
+        if event.get("error"):
+            raise _LLMTransientError(f"LLM 流式响应错误：{str(event['error'])[:220]}")
+        if isinstance(event.get("usage"), dict):
+            usage.update(event["usage"])
+        for choice in event.get("choices") or []:
+            if choice.get("index", 0) != 0:
+                continue
+            delta = choice.get("delta") or choice.get("message") or {}
+            text = delta.get("content") or ""
+            reasoning = delta.get("reasoning_content") or ""
+            if text:
+                content_parts.append(text)
+                progress["content_chars"] = progress.get("content_chars", 0) + len(text)
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                progress["reasoning_chars"] = progress.get("reasoning_chars", 0) + len(reasoning)
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+
+    def consume_line(line: bytes):
+        line = line.rstrip(b"\r")
+        if not line:
+            consume_event()
+        elif line.startswith(b"data:"):
+            data_lines.append(line[5:].lstrip(b" "))
+
+    pending = b""
+    is_sse = None
+    sse_prefixes = (b":", b"data:", b"event:", b"id:", b"retry:")
+    for chunk in _response_chunks(resp, deadline, progress):
+        pending += chunk
+        if is_sse is None:
+            if b"\xef\xbb\xbf".startswith(pending) and len(pending) < 3:
+                continue
+            pending = pending.removeprefix(b"\xef\xbb\xbf")
+            prefix = pending.lstrip()
+            if not prefix:
+                continue
+            # Some compatible gateways omit
+            # Content-Type, or ignore stream=true and send a complete JSON body.
+            if target_format == "openai_chat" and any(field.startswith(prefix) for field in sse_prefixes):
+                continue  # a field name may be split across socket reads
+            is_sse = target_format == "openai_chat" and prefix.startswith(sse_prefixes)
+        if is_sse:
+            while b"\n" in pending and not done:
+                line, pending = pending.split(b"\n", 1)
+                consume_line(line)
+            if done:
+                break
+    if not is_sse:
+        return json.loads(pending.decode("utf-8"))
+    if not done:
+        if pending:
+            consume_line(pending)
+        consume_event()
+    if not done and not finish_reason:
+        raise _LLMTransientError("LLM 流式响应中断：未收到结束标记，不能使用未完成答案")
+    return {
+        "choices": [{"index": 0, "message": {
+            "content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts),
+        }, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
+
+
+def _validate_llm_answer(res_json: Dict[str, Any], content: str, reasoning: str,
+                         response_format: Optional[Dict[str, Any]], model: str) -> str:
+    choices = res_json.get("choices") or [{}]
+    finish = choices[0].get("finish_reason") or res_json.get("stop_reason")
+    if finish in ("length", "max_tokens") or res_json.get("status") == "incomplete":
+        raise _LLMTransientError(f"模型 {model} 输出被截断（{finish or 'incomplete'}），未获得完整答案")
+    if not content:
+        detail = "仅返回思考内容，没有最终答案" if reasoning else "返回空正文"
+        raise _LLMTransientError(f"模型 {model} {detail}")
+    if response_format and response_format.get("type") in ("json_object", "json_schema"):
+        # Normalize fenced JSON for all callers and retry malformed/truncated
+        # answers inside this chain. The unnormalized answer remains in the archive.
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
+        try:
+            value = json.loads(text)
+        except ValueError as exc:
+            raise _LLMTransientError(f"模型 {model} 未返回有效 JSON 答案") from exc
+        if response_format.get("type") == "json_object" and not isinstance(value, dict):
+            raise _LLMTransientError(f"模型 {model} JSON 答案必须为对象")
+        return text
+    return content
+
+
+def _adapt_chat_payload(payload: Dict[str, Any], error_body: str) -> Optional[Dict[str, Any]]:
+    """Change only a named rejected parameter, preserving the other request settings."""
+    low = error_body.lower()
+    adapted = dict(payload)
+    for key in ("stream_options", "response_format", "temperature", "reasoning_effort", "stream"):
+        if key in payload and re.search(r"\b" + key + r"\b", low):
+            adapted.pop(key)
+            if key == "stream":
+                adapted.pop("stream_options", None)
+            return adapted
+    return None
 
 
 def _attempt_llm_call(
@@ -1474,88 +1631,90 @@ def _attempt_llm_call(
         temperature=temperature,
         response_format=response_format,
         reasoning_type=cand.get("reasoning_type", "auto"),
+        stream=cand.get("api_format", "openai_chat") == "openai_chat",
     )
 
     t0 = time.perf_counter()
-    req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
-    try:
-        resp_handle = analysis_capture.llm_request(
-            req, effective_timeout, urllib.request.urlopen,
-            attempt=attempt, candidate_index=candidate_index,
-            api_format=cand.get("api_format", "openai_chat"),
-        )
-    except urllib.error.HTTPError as exc:
-        err_b = ""
-        try:
-            err_b = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        finally:
-            exc.close()
+    deadline = t0 + effective_timeout
+    target_format = cand.get("api_format", "openai_chat")
+    progress: Dict[str, Any] = {"stage": "response_headers", "received_bytes": 0}
+    seen_payloads = set()
+    adaptation = 0
+
+    def timeout_error(exc: BaseException) -> _LLMTransientError:
+        if progress.get("content_chars"):
+            detail = "已收到部分答案，但未完成"
+        elif progress.get("reasoning_chars"):
+            detail = "已收到思考内容，但未收到最终答案"
+        elif progress["stage"] == "response_headers":
+            detail = "等待连接或响应头超时（可能是网络、网关排队或模型处理延迟）"
+        else:
+            detail = "读取响应体超时"
+        elapsed = time.perf_counter() - t0
         analysis_capture.emit("llm.error", {
             "attempt": attempt, "candidate_index": candidate_index,
-            "http_status": exc.code, "body": err_b,
-        }, "failed")
-        # Adaptive fallback retry on rejected parameter (400: reasoning_effort/temperature/response_format)
-        if (
-            exc.code == 400
-            and cand.get("api_format", "openai_chat") == "openai_chat"
-            and any(kw in err_b.lower() for kw in ["reasoning_effort", "temperature", "response_format", "invalid parameter"])
-        ):
-            fb_payload = {"model": cand["model"], "messages": messages}
-            fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
-            try:
-                with analysis_capture.llm_request(
-                    fb_req, effective_timeout, urllib.request.urlopen,
-                    attempt=attempt, candidate_index=candidate_index, fallback=True,
-                    api_format=cand.get("api_format", "openai_chat"),
-                ) as fb_resp:
-                    latency_ms = int((time.perf_counter() - t0) * 1000)
-                    fb_json = json.loads(fb_resp.read().decode("utf-8", errors="replace"))
-                analysis_capture.emit("llm.response", {"response": fb_json, "latency_ms": latency_ms}, "received")
-                content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), fb_json)
-                if not content and not reasoning:
-                    raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（已自适应去参数重试）")
-                return content, reasoning, usage, latency_ms
-            except (urllib.error.URLError, TimeoutError, socket.timeout, ValueError) as fb_exc:
-                fb_code = getattr(fb_exc, "code", 0) or 0
-                if fb_code and not _is_transient_http(fb_code, str(getattr(fb_exc, "msg", "") or fb_exc)):
-                    raise _LLMHardError(f"LLM 网关返回 HTTP {fb_code}（模型 {cand['model']}）：{str(fb_exc)[:280]}") from fb_exc
-                raise _LLMTransientError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from fb_exc
-        if _is_transient_http(exc.code, err_b):
-            raise _LLMTransientError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from exc
-        raise _LLMHardError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise _LLMTransientError(
-            f"LLM 推演超时（已达到思考上限时间 {effective_timeout:.0f}s）：模型思考链过长未在时限内完成响应，可前往后台 AI 模型设置中调大思考上限时间",
-            timed_out=True,
-        ) from exc
-    except urllib.error.URLError as exc:
-        # 连接层异常（拒绝/重置/DNS/TLS/断线）与超时包装同样属于瞬时故障：
-        # 旧版在此处直接 raise，导致「失败一次就不再请求」——现在纳入重试与回退。
-        reason = getattr(exc, "reason", None)
-        timed_out = isinstance(reason, (socket.timeout, TimeoutError))
-        raise _LLMTransientError(
-            f"LLM 连接层异常（模型 {cand['model']}）：{type(reason).__name__ if reason is not None else type(exc).__name__}: {str(reason or exc)[:220]}",
-            timed_out=timed_out,
-        ) from exc
-    except (ValueError, OSError) as exc:
-        # 响应体非 JSON（如反代 HTML 错误页）、读取中断等：可重试
-        raise _LLMTransientError(f"LLM 响应体解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
+            "model": cand["model"], "timeout_seconds": effective_timeout,
+            "elapsed_seconds": round(elapsed, 3), **progress, "error": str(exc),
+        }, "timeout")
+        return _LLMTransientError(
+            f"LLM 请求超时（模型 {cand['model']}，本模型预算 {effective_timeout:.0f}s，"
+            f"已等待 {elapsed:.1f}s）：{detail}", timed_out=True,
+        )
 
-    with resp_handle as resp:
-        latency_ms = int((time.perf_counter() - t0) * 1000)
-        body_bytes = resp.read()
+    while True:
+        seen_payloads.add(json.dumps(payload, sort_keys=True))
         try:
-            res_json = json.loads(body_bytes.decode("utf-8", errors="replace"))
-        except ValueError as exc:
-            raise _LLMTransientError(f"LLM 响应体非 JSON（模型 {cand['model']}）：{str(body_bytes[:160])!r}") from exc
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise TimeoutError("request deadline exceeded")
+            progress = {"stage": "response_headers", "received_bytes": 0}
+            req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            try:
+                resp_handle = analysis_capture.llm_request(
+                    req, remaining, urllib.request.urlopen,
+                    attempt=attempt, candidate_index=candidate_index, fallback=adaptation > 0,
+                    adaptation=adaptation, api_format=target_format,
+                )
+            except urllib.error.HTTPError as exc:
+                try:
+                    progress["stage"] = "error_body"
+                    err_b = b"".join(_response_chunks(exc, deadline, progress)).decode("utf-8", errors="replace")
+                finally:
+                    exc.close()
+                analysis_capture.emit("llm.error", {
+                    "attempt": attempt, "candidate_index": candidate_index,
+                    "http_status": exc.code, "body": err_b,
+                }, "failed")
+                adapted = _adapt_chat_payload(payload, err_b) if exc.code == 400 and target_format == "openai_chat" else None
+                if adapted is not None and json.dumps(adapted, sort_keys=True) not in seen_payloads:
+                    analysis_capture.emit("llm.parameter_adaptation", {
+                        "model": cand["model"], "attempt": attempt, "candidate_index": candidate_index,
+                        "removed_parameters": sorted(set(payload) - set(adapted)),
+                        "added_parameters": sorted(set(adapted) - set(payload)),
+                    })
+                    payload = adapted
+                    adaptation += 1
+                    continue
+                error_type = _LLMTransientError if _is_transient_http(exc.code, err_b) else _LLMHardError
+                raise error_type(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{err_b[:280]}") from exc
 
-    analysis_capture.emit("llm.response", {"response": res_json, "latency_ms": latency_ms}, "received")
-    content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), res_json)
-    if not content and not reasoning:
-        raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（HTTP 200 但无 content/reasoning，疑似上游静默失败）")
-    return content, reasoning, usage, latency_ms
+            with resp_handle as resp:
+                progress["stage"] = "response_body"
+                res_json = _read_llm_response(resp, target_format, deadline, progress)
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            analysis_capture.emit("llm.response", {"response": res_json, "latency_ms": latency_ms}, "received")
+            content, reasoning, usage = _parse_llm_response(target_format, res_json)
+            content = _validate_llm_answer(res_json, content, reasoning, response_format, cand["model"])
+            return content, reasoning, usage, latency_ms
+        except (TimeoutError, socket.timeout) as exc:
+            raise timeout_error(exc) from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                raise timeout_error(exc) from exc
+            raise _LLMTransientError(f"LLM 连接层异常（模型 {cand['model']}）：{str(reason or exc)[:220]}") from exc
+        except (ValueError, OSError, http.client.HTTPException) as exc:
+            raise _LLMTransientError(f"LLM 响应读取或解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
 
 
 @analysis_capture.observed("llm.call")
@@ -1620,34 +1779,39 @@ def execute_llm_request(
                 rt["thinking_timeout"] = float(timeout)
             candidates.append(rt)
 
+    candidate_timeouts = [
+        effective_timeout if idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
+        for idx, cand in enumerate(candidates)
+    ]
     call_started = time.perf_counter()
-    chain_budget = min(FAILOVER_MAX_TOTAL_WAIT, max(30.0, effective_timeout))
+    chain_budget = sum(candidate_timeouts)
+    if FAILOVER_MAX_TOTAL_WAIT > 0:
+        chain_budget = min(chain_budget, FAILOVER_MAX_TOTAL_WAIT)
     global_deadline = call_started + chain_budget
-    candidate_budget = chain_budget / max(1, len(candidates))
     failures: List[str] = []
+    attempted_models: List[str] = []
     last_error: Optional[BaseException] = None
-    last_timed_out = False
+    all_timed_out = True
     deadline_hit = False
 
     for cand_idx, cand in enumerate(candidates):
-        cand_timeout = effective_timeout if cand_idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
+        cand_timeout = candidate_timeouts[cand_idx]
         candidate_started = time.perf_counter()
-        candidate_deadline = min(global_deadline, candidate_started + candidate_budget)
+        candidate_deadline = min(global_deadline, candidate_started + cand_timeout)
         for attempt in range(attempts):
             remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
             if remaining <= 0:
-                deadline_hit = True
+                deadline_hit = time.perf_counter() >= global_deadline
                 break
             if attempt > 0:
-                if remaining <= 0:
-                    deadline_hit = True
-                    break
                 time.sleep(min(2.0 * attempt, 8.0, remaining))
                 remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
                 if remaining <= 0:
-                    deadline_hit = True
+                    deadline_hit = time.perf_counter() >= global_deadline
                     break
             try:
+                if cand["model"] not in attempted_models:
+                    attempted_models.append(cand["model"])
                 content, reasoning, usage, latency = _attempt_llm_call(
                     cand, messages, temperature, response_format, min(cand_timeout, remaining),
                     attempt=attempt, candidate_index=cand_idx,
@@ -1667,18 +1831,20 @@ def execute_llm_request(
                         "chain": " → ".join(c["model"] for c in candidates),
                         "errors": [f[:220] for f in failures[-6:]],
                         "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                        "chain_budget_seconds": chain_budget,
+                        "attempted_models": attempted_models,
                         "succeeded": True,
                     })
                 return content, reasoning, usage, latency
             except _LLMHardError as exc:
                 failures.append(str(exc))
                 last_error = exc
-                last_timed_out = False
+                all_timed_out = False
                 break  # 该模型硬故障：不再原地重试，切换下一个回退模型
             except _LLMTransientError as exc:
                 failures.append(str(exc))
                 last_error = exc
-                last_timed_out = exc.timed_out
+                all_timed_out = all_timed_out and exc.timed_out
                 # A timeout consumes the model's whole attempt budget. Retrying
                 # the same long reasoning request only duplicates the stall;
                 # move to the next candidate while the global budget remains.
@@ -1687,13 +1853,14 @@ def execute_llm_request(
             except Exception as exc:  # 兜底：任何未分类异常按瞬时处理，绝不让整链崩在第一次
                 failures.append(f"模型 {cand['model']} 未预期异常：{type(exc).__name__}: {str(exc)[:200]}")
                 last_error = exc
-                last_timed_out = False
+                all_timed_out = False
         if deadline_hit:
             break
 
     summary_tail = " | ".join(failures[-6:]) if failures else (str(last_error) if last_error else "无响应")
+    deadline_hit = deadline_hit or time.perf_counter() >= global_deadline
     if len(candidates) == 1:
-        # 单模型（未配置回退）：保持旧版异常语义，前端提示文案不变
+        # 单模型（未配置回退）：保持 TimeoutError / RuntimeError 异常语义。
         if isinstance(last_error, _LLMHardError):
             raise RuntimeError(str(last_error)) from last_error
         if isinstance(last_error, _LLMTransientError):
@@ -1706,6 +1873,8 @@ def execute_llm_request(
                     "attempts_per_model": attempts,
                     "attempts_used": len(failures),
                     "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                    "chain_budget_seconds": chain_budget,
+                    "errors": [str(last_error)[:220]],
                     "deadline_hit": deadline_hit,
                     "succeeded": False,
                 })
@@ -1721,11 +1890,15 @@ def execute_llm_request(
         "attempts_per_model": attempts,
         "errors": [f[:220] for f in failures[-8:]],
         "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+        "chain_budget_seconds": chain_budget,
+        "attempted_models": attempted_models,
         "deadline_hit": deadline_hit,
         "succeeded": False,
     })
     chain_names = " → ".join(c["model"] for c in candidates)
-    if last_timed_out:
+    if deadline_hit and len(attempted_models) < len(candidates):
+        raise TimeoutError(f"LLM 模型链总预算 {chain_budget:.0f}s 耗尽（已尝试 {' → '.join(attempted_models)}；部分备用模型未执行）：{summary_tail}") from last_error
+    if all_timed_out and failures:
         raise TimeoutError(f"LLM 模型链全部超时（{chain_names}）：{summary_tail}")
     raise RuntimeError(f"LLM 模型链全部失败（{chain_names}）：{summary_tail}") from last_error
 

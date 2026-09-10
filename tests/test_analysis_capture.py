@@ -43,7 +43,7 @@ class CaptureReplayTests(unittest.TestCase):
         def transport(req,timeout):
             payload=json.loads(req.data.decode("utf-8")); calls.append(payload)
             if len(calls)==1:
-                raise urllib.error.HTTPError(req.full_url,400,"invalid parameter",{},io.BytesIO(b"reasoning_effort invalid parameter"))
+                raise urllib.error.HTTPError(req.full_url,400,"invalid parameter",{},io.BytesIO(b"temperature invalid parameter"))
             return Reply(json.dumps(response).encode("utf-8"))
         runtime={"model":"replay-model","base_url":"https://example.test/v1","api_key":"secret-for-test","api_format":"openai_chat","reasoning_type":"none","thinking_timeout":30}
         with patch.object(llm_manager,"get_active_llm_runtime",return_value=runtime),patch.object(llm_manager.urllib.request,"urlopen",side_effect=transport):
@@ -53,6 +53,7 @@ class CaptureReplayTests(unittest.TestCase):
         self.assertEqual(requests[0]["body"]["request"],calls[0])
         self.assertEqual(requests[1]["body"]["request"],calls[1])
         self.assertNotIn("temperature",requests[1]["body"]["request"])
+        self.assertTrue(requests[1]["body"]["request"]["stream"])
         recorded=self.events("llm.response")[0]
         self.assertEqual(recorded["body"]["response"],response)
         self.assertEqual(recorded["body"]["request_id"],requests[-1]["body"]["request_id"])

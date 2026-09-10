@@ -229,13 +229,14 @@ class LLMResilienceTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "chain_failed")
         self.assertFalse(events[0]["succeeded"])
 
-    def test_single_model_timeout_keeps_legacy_message(self):
+    def test_single_model_timeout_reports_observed_stage(self):
         llm_manager.update_llm_settings(request_attempts=1, fallback_model_ids=[])
         with patch("r20_backend.llm_manager.urllib.request.urlopen", side_effect=socket.timeout("timed out")):
             with self.assertRaises(TimeoutError) as ctx:
                 llm_manager.execute_llm_request(messages=[{"role": "user", "content": "hi"}], timeout=10)
-        self.assertIn("LLM 推演超时", str(ctx.exception))
-        self.assertIn("调大思考上限时间", str(ctx.exception))
+        self.assertIn("LLM 请求超时", str(ctx.exception))
+        self.assertIn("等待连接或响应头", str(ctx.exception))
+        self.assertNotIn("模型思考链过长", str(ctx.exception))
 
     def test_timeout_does_not_retry_same_model_for_full_timeout_window(self):
         """A 300s model timeout must finish the single-model call, not become ~600s."""
@@ -252,7 +253,7 @@ class LLMResilienceTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertLessEqual(calls[0], 300)
 
-    def test_chain_budget_is_split_between_primary_and_fallback(self):
+    def test_each_model_gets_its_configured_timeout(self):
         llm_manager.update_llm_settings(request_attempts=3, fallback_model_ids=["backup-m"])
         calls = []
 
@@ -264,7 +265,7 @@ class LLMResilienceTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 llm_manager.execute_llm_request(messages=[{"role": "user", "content": "hi"}], timeout=300)
         self.assertEqual([name for name, _ in calls], ["primary-m", "backup-m"])
-        self.assertTrue(all(timeout <= 150.0 for _, timeout in calls))
+        self.assertTrue(all(299.0 <= timeout <= 300.0 for _, timeout in calls))
 
     def test_single_model_http_error_keeps_legacy_runtime_error(self):
         llm_manager.update_llm_settings(request_attempts=1, fallback_model_ids=[])
