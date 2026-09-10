@@ -2,6 +2,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -287,10 +288,28 @@ def normalize_position(row: dict, live: bool = False) -> dict:
     if direction == "net":
         pos = decimal(row.get("pos"))
         direction = "long" if pos and pos > 0 else "short" if pos and pos < 0 else "unknown"
-    gross, fee = decimal(row.get("pnl")), decimal(row.get("fee"))
-    funding, penalty, settled = (decimal(row.get(k)) for k in ("fundingFee","liqPenalty","settledPnl"))
+    def component(key):
+        # OKX blanks fields that cannot apply to the instrument (settledPnl is
+        # cross-FUTURES only). A present-but-blank value is a stated zero, while
+        # an absent key stays unknown.
+        if key not in row: return None
+        value = row.get(key)
+        return decimal("0") if isinstance(value,str) and not value.strip() else decimal(value)
+    gross, fee = component("pnl"), component("fee")
+    funding, penalty, settled = (component(k) for k in ("fundingFee","liqPenalty","settledPnl"))
+    # A blank realizedPnl is unknown, not zero: the component sum then becomes
+    # the net result instead of a false break-even.
     realized = decimal(row.get("realizedPnl"))
-    components_complete = all(x is not None for x in (gross,fee,funding,penalty,settled))
+    components = [gross,fee,funding,penalty,settled]
+    if realized is not None and None in components:
+        # OKX defines realizedPnl = pnl + fee + fundingFee + liqPenalty + settledPnl.
+        # When the captured components already reconcile to realizedPnl, the
+        # uncaptured ones contribute nothing: that is proof, not the assumption
+        # that unknown costs are zero.
+        if sum((x for x in components if x is not None),Decimal(0)) == realized:
+            components = [x if x is not None else Decimal(0) for x in components]
+            gross, fee, funding, penalty, settled = components
+    components_complete = all(x is not None for x in components)
     net = realized if realized is not None else (gross+fee+funding+penalty+settled if components_complete else None)
     # OKX type 1/4 are partial close/liquidation; only type 2/3/5 are final.
     kind = str(row.get("type",""))
