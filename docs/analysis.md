@@ -16,7 +16,7 @@
 
 模型调用按每个模型配置的等待上限执行，连接、响应读取、重试和参数兼容请求共享该模型的预算；超时后直接切换备用模型。配置 300 秒、两个模型时，每个模型各有最多 300 秒，不再静默平分成 150 秒。整轮最长等待时间默认为各模型预算之和，可通过 `LLM_FAILOVER_MAX_WAIT_SECONDS` 显式设置整链硬上限（默认 0，不额外限制）；上限耗尽导致备用模型未执行时会单独注明。
 
-Chat Completions 调用优先使用流式响应，兼容返回普通 JSON 的网关；只收到思考内容、截断答案或无效 JSON 都会进入重试/回退。网关拒绝参数时只调整点名的参数，保留其他设置；兼容请求也不会重新获得完整等待时间。超时记录区分等待连接/响应头、读取响应体、已有思考或部分答案，单模型超时记录为 `single_model_timeout`。后台模型等待上限之外，定时任务仍受调度器的整项任务执行上限约束。
+Chat Completions 调用优先使用流式响应，兼容返回普通 JSON 的网关；只收到思考内容、截断答案或无效 JSON 都会进入重试/回退。网关拒绝参数时只调整点名的参数，保留其他设置；兼容请求也不会重新获得完整等待时间。流式请求默认 45 秒没有响应头就提前切换备用模型；收到 `reasoning_content` 后默认 60 秒仍无最终正文也会中止。两个阈值分别由 `LLM_RESPONSE_START_TIMEOUT_SECONDS` 和 `LLM_REASONING_ONLY_TIMEOUT_SECONDS` 配置，设为 0 可关闭。Qwen3 的结构化 JSON 请求遇到思考专用超时，会在同一模型剩余预算内追加一次 60 秒的直接答案请求（`reasoning_effort=none`、`enable_thinking=false`、`max_tokens=8192`），失败后继续模型链；可通过 `LLM_QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS` 和 `LLM_QWEN_DIRECT_RECOVERY_MAX_TOKENS` 调整。超时记录区分等待连接/响应头、读取响应体、已有思考或部分答案，单模型超时记录为 `single_model_timeout`。后台模型等待上限之外，定时任务仍受调度器的整项任务执行上限约束。
 
 ## 统计口径
 

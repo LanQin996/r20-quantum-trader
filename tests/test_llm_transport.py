@@ -72,6 +72,10 @@ class LLMTransportTests(unittest.TestCase):
             patch.object(lm, "get_active_llm_runtime", return_value=self.primary),
             patch.object(lm, "resolve_model_runtime", return_value=self.backup),
             patch.object(lm, "FAILOVER_MAX_TOTAL_WAIT", 0),
+            # Existing transport cases validate the full configured model
+            # budget. Dedicated watchdog tests exercise the shorter limits.
+            patch.object(lm, "RESPONSE_START_TIMEOUT_SECONDS", 0),
+            patch.object(lm, "REASONING_ONLY_TIMEOUT_SECONDS", 0),
             patch.object(lm.time, "perf_counter", self.clock),
             patch.object(lm.time, "sleep", side_effect=self.clock.tick),
             patch.object(lm.analysis_capture, "emit"),

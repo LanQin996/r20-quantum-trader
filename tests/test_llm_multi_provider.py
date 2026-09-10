@@ -225,6 +225,8 @@ class LLMMultiProviderTests(unittest.TestCase):
         data = resp.json()
         self.assertIn("models", data)
         self.assertIn("supported_api_formats", data)
+        self.assertIn("transport_watchdogs", data)
+        self.assertIn("response_start_timeout_seconds", data["transport_watchdogs"])
 
         # 2. POST /api/v1/admin/llm/models (create new model with custom api_format)
         add_m = self.client.post("/api/v1/admin/llm/models", headers=headers, json={

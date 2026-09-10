@@ -38,6 +38,35 @@ MAX_FALLBACK_MODELS = 5
 # 整链默认预算为各模型预算之和；部署方可显式设置额外硬上限（0 表示不额外限制）。
 FAILOVER_MAX_TOTAL_WAIT = float(os.getenv("LLM_FAILOVER_MAX_WAIT_SECONDS", "0"))
 
+
+def _nonnegative_timeout_env(name: str, default: float) -> float:
+    """Read an optional watchdog timeout. Zero explicitly disables the watchdog."""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(0.0, value)
+
+
+# A long model budget must not make a request with no response headers occupy the
+# whole failover chain. These are transport safeguards; the configured model
+# thinking timeout remains the candidate's accounting budget.
+RESPONSE_START_TIMEOUT_SECONDS = _nonnegative_timeout_env(
+    "LLM_RESPONSE_START_TIMEOUT_SECONDS", 45.0
+)
+REASONING_ONLY_TIMEOUT_SECONDS = _nonnegative_timeout_env(
+    "LLM_REASONING_ONLY_TIMEOUT_SECONDS", 60.0
+)
+QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS = _nonnegative_timeout_env(
+    "LLM_QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS", 60.0
+)
+try:
+    QWEN_DIRECT_RECOVERY_MAX_TOKENS = max(
+        256, int(os.getenv("LLM_QWEN_DIRECT_RECOVERY_MAX_TOKENS", "8192"))
+    )
+except (TypeError, ValueError):
+    QWEN_DIRECT_RECOVERY_MAX_TOKENS = 8192
+
 SUPPORTED_API_FORMATS = [
     {"id": "openai_chat", "name": "OpenAI Chat (/chat/completions)", "desc": "标准 ChatML 对话格式，兼容 OpenAI/Gemini/DeepSeek/主流中继"},
     {"id": "openai_responses", "name": "OpenAI Responses (/responses)", "desc": "OpenAI 专属 Responses API 结构化接口"},
@@ -413,6 +442,12 @@ def load_llm_config(mask_keys: bool = True) -> Dict[str, Any]:
         "max_fallback_models": MAX_FALLBACK_MODELS,
         "standard_reasoning_efforts": STANDARD_REASONING_EFFORTS,
         "supported_api_formats": SUPPORTED_API_FORMATS,
+        "transport_watchdogs": {
+            "response_start_timeout_seconds": RESPONSE_START_TIMEOUT_SECONDS,
+            "reasoning_only_timeout_seconds": REASONING_ONLY_TIMEOUT_SECONDS,
+            "qwen_direct_recovery_timeout_seconds": QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS,
+            "qwen_direct_recovery_max_tokens": QWEN_DIRECT_RECOVERY_MAX_TOKENS,
+        },
         "providers": [],
         "models": [],
         "active_provider_id": "openai",
@@ -1231,8 +1266,9 @@ def build_request_spec(
     temperature: Optional[float] = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
     reasoning_type: str = "auto",
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = None,
     stream: bool = False,
+    enable_thinking: Optional[bool] = None,
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Build endpoint URL, headers, and request payload according to the specific API protocol format."""
     cleaned_url = base_url.rstrip("/")
@@ -1261,7 +1297,7 @@ def build_request_spec(
 
         payload: Dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else 4096,
             "messages": chat_messages,
         }
         if system_chunks:
@@ -1277,7 +1313,7 @@ def build_request_spec(
             }
             budget = budget_map[effort]
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            payload["max_tokens"] = budget + max_tokens
+            payload["max_tokens"] = budget + (max_tokens if max_tokens is not None else 4096)
         elif effort == "none":
             payload["thinking"] = {"type": "disabled"}
             if temperature is not None:
@@ -1331,6 +1367,8 @@ def build_request_spec(
             "model": model,
             "messages": messages,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
@@ -1354,8 +1392,19 @@ def build_request_spec(
         if rtype == "standard_effort" or (rtype == "auto" and ("gemini" in m_lower or "qwen3" in m_lower or "qwen-3" in m_lower or "qwq" in m_lower or m_lower.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6")) or "gpt-5" in m_lower or "gpt-6" in m_lower)):
             if effort in ("max", "xhigh", "high", "medium", "low", "minimal"):
                 payload["reasoning_effort"] = effort
-            elif effort == "none" and ("gemini" in m_lower or "gpt" in m_lower):
+            elif effort == "none" and (
+                "gemini" in m_lower or "gpt" in m_lower
+                or "qwen3" in m_lower or "qwen-3" in m_lower
+            ):
                 payload["reasoning_effort"] = "none"
+
+        # Qwen3-compatible gateways use this switch to disable the thinking
+        # channel. Only add it for an explicit recovery request so ordinary
+        # configured calls retain their provider defaults.
+        if enable_thinking is not None and (
+            "qwen3" in m_lower or "qwen-3" in m_lower
+        ):
+            payload["enable_thinking"] = bool(enable_thinking)
 
         if response_format and rtype != "deepseek_reasoner":
             payload["response_format"] = response_format
@@ -1370,6 +1419,8 @@ def build_chat_payload(
     temperature: Optional[float] = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
     reasoning_type: str = "auto",
+    max_tokens: Optional[int] = None,
+    enable_thinking: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Compatibility wrapper for standard chat payload generation."""
     _, _, payload = build_request_spec(
@@ -1381,6 +1432,8 @@ def build_chat_payload(
         temperature=temperature,
         response_format=response_format,
         reasoning_type=reasoning_type,
+        max_tokens=max_tokens,
+        enable_thinking=enable_thinking,
     )
     return payload
 
@@ -1410,9 +1463,10 @@ def _is_transient_http(code: int, body: str) -> bool:
 class _LLMTransientError(Exception):
     """可重试错误：瞬时 HTTP、超时、连接层异常（拒绝/重置/DNS/TLS）、坏响应体、空正文。"""
 
-    def __init__(self, message: str, timed_out: bool = False):
+    def __init__(self, message: str, timed_out: bool = False, reasoning_only: bool = False):
         super().__init__(message)
         self.timed_out = timed_out
+        self.reasoning_only = reasoning_only
 
 
 class _LLMHardError(Exception):
@@ -1467,7 +1521,11 @@ def _response_chunks(resp, deadline: float, progress: Dict[str, Any]):
     """Bound the entire body read, including an upstream that keeps sending heartbeats."""
     read1 = getattr(resp, "read1", None)
     while True:
-        remaining = deadline - time.perf_counter()
+        active_deadline = min(
+            deadline,
+            float(progress.get("read_deadline", deadline) or deadline),
+        )
+        remaining = active_deadline - time.perf_counter()
         if remaining <= 0:
             raise TimeoutError("request deadline exceeded")
         # urllib exposes a socket timeout, not a total deadline. Recalculate it
@@ -1479,7 +1537,7 @@ def _response_chunks(resp, deadline: float, progress: Dict[str, Any]):
         chunk = read1(8192) if callable(read1) else resp.read()
         if chunk:
             progress["received_bytes"] = progress.get("received_bytes", 0) + len(chunk)
-        if time.perf_counter() >= deadline:
+        if time.perf_counter() >= active_deadline:
             raise TimeoutError("request deadline exceeded")
         if not chunk:
             return
@@ -1496,9 +1554,10 @@ def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict
     finish_reason = None
     done = False
     data_lines: List[bytes] = []
+    reasoning_deadline: Optional[float] = None
 
     def consume_event():
-        nonlocal usage, finish_reason, done
+        nonlocal usage, finish_reason, done, reasoning_deadline
         if not data_lines:
             return
         data = b"\n".join(data_lines).strip()
@@ -1522,9 +1581,27 @@ def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict
             if text:
                 content_parts.append(text)
                 progress["content_chars"] = progress.get("content_chars", 0) + len(text)
+                # The watchdog only covers the reasoning-only phase. Once the
+                # model starts its final answer, restore the candidate's full
+                # body deadline so a long JSON answer is not cut off at 60s.
+                if reasoning_deadline is not None:
+                    reasoning_deadline = None
+                    progress.pop("read_deadline", None)
+                    progress.pop("reasoning_watchdog_seconds", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
                 progress["reasoning_chars"] = progress.get("reasoning_chars", 0) + len(reasoning)
+                if (
+                    reasoning_deadline is None
+                    and REASONING_ONLY_TIMEOUT_SECONDS > 0
+                    and not content_parts
+                ):
+                    reasoning_deadline = min(
+                        deadline,
+                        time.perf_counter() + REASONING_ONLY_TIMEOUT_SECONDS,
+                    )
+                    progress["read_deadline"] = reasoning_deadline
+                    progress["reasoning_watchdog_seconds"] = REASONING_ONLY_TIMEOUT_SECONDS
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
 
@@ -1539,6 +1616,13 @@ def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict
     is_sse = None
     sse_prefixes = (b":", b"data:", b"event:", b"id:", b"retry:")
     for chunk in _response_chunks(resp, deadline, progress):
+        if (
+            reasoning_deadline is not None
+            and not content_parts
+            and time.perf_counter() >= reasoning_deadline
+        ):
+            progress["reasoning_only_timeout"] = True
+            raise TimeoutError("reasoning-only watchdog exceeded")
         pending += chunk
         if is_sse is None:
             if b"\xef\xbb\xbf".startswith(pending) and len(pending) < 3:
@@ -1558,6 +1642,13 @@ def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict
                 consume_line(line)
             if done:
                 break
+    if (
+        reasoning_deadline is not None
+        and not content_parts
+        and time.perf_counter() >= reasoning_deadline
+    ):
+        progress["reasoning_only_timeout"] = True
+        raise TimeoutError("reasoning-only watchdog exceeded")
     if not is_sse:
         return json.loads(pending.decode("utf-8"))
     if not done:
@@ -1582,7 +1673,9 @@ def _validate_llm_answer(res_json: Dict[str, Any], content: str, reasoning: str,
         raise _LLMTransientError(f"模型 {model} 输出被截断（{finish or 'incomplete'}），未获得完整答案")
     if not content:
         detail = "仅返回思考内容，没有最终答案" if reasoning else "返回空正文"
-        raise _LLMTransientError(f"模型 {model} {detail}")
+        raise _LLMTransientError(
+            f"模型 {model} {detail}", reasoning_only=bool(reasoning)
+        )
     if response_format and response_format.get("type") in ("json_object", "json_schema"):
         # Normalize fenced JSON for all callers and retry malformed/truncated
         # answers inside this chain. The unnormalized answer remains in the archive.
@@ -1601,7 +1694,10 @@ def _adapt_chat_payload(payload: Dict[str, Any], error_body: str) -> Optional[Di
     """Change only a named rejected parameter, preserving the other request settings."""
     low = error_body.lower()
     adapted = dict(payload)
-    for key in ("stream_options", "response_format", "temperature", "reasoning_effort", "stream"):
+    for key in (
+        "stream_options", "response_format", "temperature", "reasoning_effort",
+        "enable_thinking", "max_tokens", "stream",
+    ):
         if key in payload and re.search(r"\b" + key + r"\b", low):
             adapted.pop(key)
             if key == "stream":
@@ -1619,6 +1715,8 @@ def _attempt_llm_call(
     *,
     attempt: int = 0,
     candidate_index: int = 0,
+    enable_thinking: Optional[bool] = None,
+    max_tokens: Optional[int] = None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """单次请求一个模型；失败时抛 _LLMTransientError（可重试）或 _LLMHardError（换模型）。"""
     endpoint, headers, payload = build_request_spec(
@@ -1632,6 +1730,8 @@ def _attempt_llm_call(
         response_format=response_format,
         reasoning_type=cand.get("reasoning_type", "auto"),
         stream=cand.get("api_format", "openai_chat") == "openai_chat",
+        enable_thinking=enable_thinking,
+        max_tokens=max_tokens,
     )
 
     t0 = time.perf_counter()
@@ -1642,12 +1742,29 @@ def _attempt_llm_call(
     adaptation = 0
 
     def timeout_error(exc: BaseException) -> _LLMTransientError:
+        reasoning_only = bool(
+            progress.get("reasoning_only_timeout")
+            or (
+                progress.get("reasoning_chars")
+                and progress.get("read_deadline") is not None
+                and time.perf_counter() >= float(progress["read_deadline"])
+                and not progress.get("content_chars")
+            )
+        )
         if progress.get("content_chars"):
             detail = "已收到部分答案，但未完成"
-        elif progress.get("reasoning_chars"):
-            detail = "已收到思考内容，但未收到最终答案"
+        elif reasoning_only or progress.get("reasoning_chars"):
+            watchdog = progress.get("reasoning_watchdog_seconds")
+            if watchdog:
+                detail = f"仅思考看门狗 {float(watchdog):.0f}s 到期，已收到思考内容但未收到最终答案"
+            else:
+                detail = "已收到思考内容，但未收到最终答案"
         elif progress["stage"] == "response_headers":
-            detail = "等待连接或响应头超时（可能是网络、网关排队或模型处理延迟）"
+            watchdog = progress.get("response_start_watchdog_seconds")
+            if watchdog:
+                detail = f"响应头看门狗 {float(watchdog):.0f}s 到期（可能是网络、网关排队或模型处理延迟）"
+            else:
+                detail = "等待连接或响应头超时（可能是网络、网关排队或模型处理延迟）"
         else:
             detail = "读取响应体超时"
         elapsed = time.perf_counter() - t0
@@ -1659,6 +1776,7 @@ def _attempt_llm_call(
         return _LLMTransientError(
             f"LLM 请求超时（模型 {cand['model']}，本模型预算 {effective_timeout:.0f}s，"
             f"已等待 {elapsed:.1f}s）：{detail}", timed_out=True,
+            reasoning_only=reasoning_only,
         )
 
     while True:
@@ -1670,8 +1788,16 @@ def _attempt_llm_call(
             progress = {"stage": "response_headers", "received_bytes": 0}
             req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
             try:
+                transport_timeout = remaining
+                # The short response-start watchdog is only a transport
+                # timeout. Once headers arrive, body reads use the candidate
+                # deadline (and the reasoning-only watchdog below).
+                if target_format == "openai_chat" and RESPONSE_START_TIMEOUT_SECONDS > 0:
+                    transport_timeout = min(remaining, RESPONSE_START_TIMEOUT_SECONDS)
+                    if transport_timeout < remaining:
+                        progress["response_start_watchdog_seconds"] = transport_timeout
                 resp_handle = analysis_capture.llm_request(
-                    req, remaining, urllib.request.urlopen,
+                    req, transport_timeout, urllib.request.urlopen,
                     attempt=attempt, candidate_index=candidate_index, fallback=adaptation > 0,
                     adaptation=adaptation, api_format=target_format,
                 )
@@ -1715,6 +1841,32 @@ def _attempt_llm_call(
             raise _LLMTransientError(f"LLM 连接层异常（模型 {cand['model']}）：{str(reason or exc)[:220]}") from exc
         except (ValueError, OSError, http.client.HTTPException) as exc:
             raise _LLMTransientError(f"LLM 响应读取或解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
+
+
+def _is_qwen3_model(model: str) -> bool:
+    model_lower = str(model or "").lower()
+    return "qwen3" in model_lower or "qwen-3" in model_lower
+
+
+def _is_structured_response(response_format: Optional[Dict[str, Any]]) -> bool:
+    return bool(
+        response_format
+        and response_format.get("type") in ("json_object", "json_schema")
+    )
+
+
+def _direct_answer_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Clone the prompt and ask the model to deliver the final JSON immediately."""
+    instruction = (
+        "请立即结束内部思考并直接输出最终答案。只输出符合要求的最终 JSON，"
+        "不要输出思考过程、解释、Markdown 代码围栏或其他文字。"
+    )
+    cloned = [dict(message) for message in messages]
+    for message in cloned:
+        if message.get("role") == "system":
+            message["content"] = f"{message.get('content', '')}\n\n{instruction}".strip()
+            return cloned
+    return [{"role": "system", "content": instruction}, *cloned]
 
 
 @analysis_capture.observed("llm.call")
@@ -1798,6 +1950,7 @@ def execute_llm_request(
         cand_timeout = candidate_timeouts[cand_idx]
         candidate_started = time.perf_counter()
         candidate_deadline = min(global_deadline, candidate_started + cand_timeout)
+        recovery_attempted = False
         for attempt in range(attempts):
             remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
             if remaining <= 0:
@@ -1845,6 +1998,125 @@ def execute_llm_request(
                 failures.append(str(exc))
                 last_error = exc
                 all_timed_out = all_timed_out and exc.timed_out
+                # Qwen3 can spend the entire stream emitting reasoning_content
+                # and never transition to content. Give the same model one
+                # bounded, no-thinking finalizer attempt before moving on.
+                if (
+                    exc.reasoning_only
+                    and not recovery_attempted
+                    and _is_qwen3_model(cand.get("model", ""))
+                    and cand.get("api_format", "openai_chat") == "openai_chat"
+                    and _is_structured_response(response_format)
+                    and QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS > 0
+                ):
+                    recovery_attempted = True
+                    recovery_remaining = min(
+                        global_deadline, candidate_deadline
+                    ) - time.perf_counter()
+                    if recovery_remaining > 0:
+                        recovery_timeout = min(
+                            recovery_remaining,
+                            QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS,
+                        )
+                        recovery_cand = {
+                            **cand,
+                            "reasoning_effort": "none",
+                        }
+                        recovery_messages = _direct_answer_messages(messages)
+                        analysis_capture.emit(
+                            "llm.reasoning_finalizer",
+                            {
+                                "model": cand["model"],
+                                "attempt": attempt,
+                                "candidate_index": cand_idx,
+                                "timeout_seconds": recovery_timeout,
+                                "max_tokens": QWEN_DIRECT_RECOVERY_MAX_TOKENS,
+                            },
+                            "started",
+                        )
+                        try:
+                            content, reasoning, usage, latency = _attempt_llm_call(
+                                recovery_cand,
+                                recovery_messages,
+                                temperature,
+                                response_format,
+                                recovery_timeout,
+                                attempt=attempt,
+                                candidate_index=cand_idx,
+                                enable_thinking=False,
+                                max_tokens=QWEN_DIRECT_RECOVERY_MAX_TOKENS,
+                            )
+                            if cand_idx > 0:
+                                print(
+                                    f"[LLM Failover] ✅ 主模型 {primary['model']} 请求失败，已回退至模型 {cand['model']}"
+                                    f"（{cand.get('provider_name') or '备用'} · 第 {cand_idx + 1}/{len(candidates)} 个候选 · 直接答案恢复成功）"
+                                )
+                                record_failover_event({
+                                    "type": "fallback_hit",
+                                    "from_model": primary["model"],
+                                    "to_model": cand["model"],
+                                    "to_provider": cand.get("provider_name", ""),
+                                    "attempt": attempt + 1,
+                                    "attempts_per_model": attempts,
+                                    "chain": " → ".join(c["model"] for c in candidates),
+                                    "errors": [f[:220] for f in failures[-6:]],
+                                    "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                                    "chain_budget_seconds": chain_budget,
+                                    "attempted_models": attempted_models,
+                                    "succeeded": True,
+                                })
+                            record_failover_event({
+                                "type": "reasoning_finalizer_hit",
+                                "from_model": cand["model"],
+                                "to_model": cand["model"],
+                                "attempt": attempt + 1,
+                                "chain": " → ".join(c["model"] for c in candidates),
+                                "errors": [str(exc)[:220]],
+                                "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                                "chain_budget_seconds": chain_budget,
+                                "attempted_models": attempted_models,
+                                "succeeded": True,
+                            })
+                            analysis_capture.emit(
+                                "llm.reasoning_finalizer",
+                                {
+                                    "model": cand["model"],
+                                    "attempt": attempt,
+                                    "candidate_index": cand_idx,
+                                    "latency_ms": latency,
+                                },
+                                "completed",
+                            )
+                            return content, reasoning, usage, latency
+                        except _LLMHardError as recovery_exc:
+                            recovery_error = str(recovery_exc)
+                            last_error = recovery_exc
+                            all_timed_out = False
+                        except _LLMTransientError as recovery_exc:
+                            recovery_error = str(recovery_exc)
+                            last_error = recovery_exc
+                            all_timed_out = all_timed_out and recovery_exc.timed_out
+                        except Exception as recovery_exc:
+                            recovery_error = (
+                                f"模型 {cand['model']} 直接答案恢复异常："
+                                f"{type(recovery_exc).__name__}: {str(recovery_exc)[:200]}"
+                            )
+                            last_error = recovery_exc
+                            all_timed_out = False
+                        failures.append(f"模型 {cand['model']} 直接答案恢复失败：{recovery_error}")
+                        analysis_capture.emit(
+                            "llm.reasoning_finalizer",
+                            {
+                                "model": cand["model"],
+                                "attempt": attempt,
+                                "candidate_index": cand_idx,
+                                "error": recovery_error,
+                            },
+                            "failed",
+                        )
+                    # A finalizer is the one allowed same-model recovery. Do
+                    # not spend another full thinking attempt on this model.
+                    break
                 # A timeout consumes the model's whole attempt budget. Retrying
                 # the same long reasoning request only duplicates the stall;
                 # move to the next candidate while the global budget remains.

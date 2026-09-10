@@ -656,6 +656,9 @@ onMounted(() => {
               <p class="text-[11px] mt-0.5" style="color: var(--ink-2);">
                 每个模型独立使用此等待上限，包含连接、思考和完整答案读取；同一模型的重试共享这段时间。
               </p>
+              <p class="text-[10px] mt-1" style="color: var(--ink-3);">
+                传输保护：响应头 {{ cfg?.transport_watchdogs?.response_start_timeout_seconds ?? 45 }}s · 仅思考 {{ cfg?.transport_watchdogs?.reasoning_only_timeout_seconds ?? 60 }}s · Qwen3 直接恢复 {{ cfg?.transport_watchdogs?.qwen_direct_recovery_timeout_seconds ?? 60 }}s；阈值为 0 时停用，可通过环境变量调整并重启后端生效。
+              </p>
             </div>
           </div>
 
@@ -916,7 +919,7 @@ onMounted(() => {
             >
               <div class="flex items-center justify-between gap-2">
                 <span class="font-bold" :class="ev.succeeded ? 'text-emerald-400' : 'text-red-400'">
-                  {{ ev.type === 'fallback_hit' ? '✅ 已回退生效' : ev.type === 'single_model_timeout' ? '⏱️ 单模型超时' : '⛔ 模型链全灭' }}
+                  {{ ev.type === 'fallback_hit' ? '✅ 已回退生效' : ev.type === 'reasoning_finalizer_hit' ? '✅ 思考超时已恢复' : ev.type === 'single_model_timeout' ? '⏱️ 单模型超时' : '⛔ 模型链全灭' }}
                   {{ ev.from_model }}<template v-if="ev.to_model"> → {{ ev.to_model }}</template>
                 </span>
                 <span class="shrink-0" style="color: var(--ink-3);">{{ ev.time_str }} · {{ ev.elapsed_seconds }}s</span>
