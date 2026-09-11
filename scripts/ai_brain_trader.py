@@ -1159,6 +1159,7 @@ def execute_batch_ai_brain_cycle(
         t0 = time.time()
         raw_res = None
         brain_output = None
+        content = ""
 
         # Transparent check: is Multi-Agent Council enabled?
         council_enabled = False
