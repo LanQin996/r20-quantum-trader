@@ -92,9 +92,14 @@ def load_summary(account: str, query: dict, archive: Archive | None = None) -> d
 
 def trade_list(account: str, query: dict, page: int = 1, page_size: int = 20, archive=None):
     archive = archive or Archive()
-    trades = list(reversed(archive.trades(account,query)))
-    return {"items":trades[(page-1)*page_size:page*page_size],"total":len(trades),"page":page,"page_size":page_size,
-            "statistics_version":VERSION}
+    if query.get("result"):
+        all_rows = list(reversed(archive.trades(account, query)))
+        items, total = all_rows[(page-1)*page_size:page*page_size], len(all_rows)
+    else:
+        with archive.connect() as con:
+            items, total = archive.trade_page(account, query, page, page_size, con) if con else ([], 0)
+        items = list(reversed(items))
+    return {"items":items,"total":total,"page":page,"page_size":page_size,"statistics_version":VERSION}
 
 def trade_detail(account: str, trade_id: str, archive=None) -> dict | None:
     archive = archive or Archive()

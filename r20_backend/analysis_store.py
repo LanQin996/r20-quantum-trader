@@ -227,6 +227,25 @@ class Archive:
                     (account,t["id"],t.get("inst",""),t.get("side",""),t.get("status","unknown"),t.get("open_ms"),t.get("close_ms"),
                      t.get("config_id") or "",t.get("decision_id") or "",self.blob(con,t),now_ms()))
 
+    def trade_page(self, account: str, filters: dict | None = None, page: int = 1, page_size: int = 20, con=None) -> tuple[list[dict], int]:
+        if con is None:
+            with self.connect() as reader:
+                return self.trade_page(account, filters, page, page_size, reader) if reader else ([], 0)
+        filters = filters or {}
+        where, args = ["account=?"], [account]
+        for key in ("inst", "side", "config_id", "status"):
+            if filters.get(key) and filters[key] != "all": where.append(f"{key}=?"); args.append(filters[key])
+        for key, op in (("start_ms", ">="), ("end_ms", "<")):
+            if filters.get(key) is not None: where.append(f"COALESCE(close_ms,open_ms) {op} ?"); args.append(filters[key])
+        clause = " AND ".join(where)
+        rows = con.execute(f"SELECT body_hash FROM analysis_trades WHERE {clause} ORDER BY COALESCE(close_ms,open_ms),id LIMIT ? OFFSET ?", args + [page_size, (page-1)*page_size]).fetchall()
+        total = con.execute(f"SELECT COUNT(*) FROM analysis_trades WHERE {clause}", args).fetchone()[0]
+        result = [self.read_blob(con, r[0]) for r in rows]
+        if filters.get("result") not in (None, "", "all"):
+            wanted = filters["result"]
+            result = [t for t in result if (lambda v: v is not None and {"win":v>0,"loss":v<0,"breakeven":v==0}.get(wanted, True))(decimal(t.get("net_pnl")))]
+        return result, total
+
     def trades(self, account: str, filters: dict | None = None, con=None) -> list[dict]:
         if con is None:
             with self.connect() as reader:

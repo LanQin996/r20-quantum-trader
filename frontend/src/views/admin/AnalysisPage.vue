@@ -74,8 +74,8 @@ async function apply(reset = true) {
     const [s, rows, grouped, history] = await Promise.all([
       get<RecordData>(api + '/summary?' + query),
       get<{ items: Trade[]; total: number }>(api + '/trades?' + query + '&page=' + tradePage.value),
-      get<{ items: RecordData[] }>(api + '/breakdown?' + query + '&by=' + groupBy.value),
-      get<{ items: Event[]; total: number }>(api + '/events?' + query + '&page=' + eventPage.value),
+      tab.value === 'attribution' ? get<{ items: RecordData[] }>(api + '/breakdown?' + query + '&by=' + groupBy.value) : Promise.resolve({ items: [] }),
+      tab.value === 'execution' ? get<{ items: Event[]; total: number }>(api + '/events?' + query + '&page=' + eventPage.value) : Promise.resolve({ items: [], total: 0 }),
     ]);
     if (id !== sequence) return;
     summary.value = s; account.value = s.account;
@@ -153,13 +153,17 @@ async function exportAll() {
   try { await download(api + '/export?' + applied.value, 'r20-analysis-' + bjToday + '.zip'); toast.ok(tr('exported')); }
   catch (e) { toast.err(String(e)); } finally { exporting.value = false; }
 }
+type PlotPoint = { time_ms: number; net: number; drawdown: number; trade_id: string; x: number; y: number; dy: number };
+const hoveredPoint = ref<PlotPoint | null>(null);
 const plot = computed(() => {
-  const rows: { time_ms: number; net: number; drawdown: number; trade_id: string }[] = stats.value.curve || [];
+  const source: { time_ms: number; net: number; drawdown: number; trade_id: string }[] = stats.value.curve || [];
+  const limit = 300;
+  const rows = source.length <= limit ? source : Array.from({ length: limit }, (_, i) => source[Math.round(i * (source.length - 1) / (limit - 1))]);
   const values = rows.flatMap(p => [p.net, -p.drawdown]);
   const min = values.reduce((a, b) => Math.min(a, b), 0), max = values.reduce((a, b) => Math.max(a, b), 0), span = max - min || 1;
   const y = (n: number) => 150 - (n - min) / span * 132;
   const points = rows.map((p, i) => ({ ...p, x: 10 + i / Math.max(1, rows.length - 1) * 780, y: y(p.net), dy: y(-p.drawdown) }));
-  return { points, zero: y(0), line: points.map(p => p.x + ',' + p.y).join(' '), drawdown: points.map(p => p.x + ',' + p.dy).join(' ') };
+  return { points, zero: y(0), min, max, current: rows.at(-1)?.net ?? null, trades: source.length, line: points.map(p => p.x + ',' + p.y).join(' '), drawdown: points.map(p => p.x + ',' + p.dy).join(' ') };
 });
 watch(groupBy, loadGroups);
 watch([leftId, rightId], compare);
@@ -213,13 +217,14 @@ onMounted(() => apply());
       <div class="card p-4">
         <h2 class="font-semibold text-sm">{{ tr('curve') }}</h2><p class="text-xs t-faint mt-1">{{ tr('curveNote') }}</p>
         <BaseEmpty v-if="!plot.points.length" :text="tr('noData')" />
-        <div v-if="plot.points.length" class="flex items-center text-xs mt-3"><span style="color: var(--accent)">{{ tr('net') }} · USDT</span><span class="down ml-4">{{ tr('drawdown') }} · USDT</span></div>
-        <svg v-if="plot.points.length" viewBox="0 0 800 170" class="w-full mt-3 min-h-40" role="img" :aria-label="tr('curve')">
-          <line x1="0" x2="800" :y1="plot.zero" :y2="plot.zero" stroke="var(--line-2)" stroke-dasharray="4 4" />
-          <polyline :points="plot.drawdown" fill="none" stroke="var(--down)" stroke-width="1.5" opacity=".65" />
-          <polyline :points="plot.line" fill="none" stroke="var(--accent)" stroke-width="2" />
-          <circle v-for="p in plot.points" :key="p.trade_id" :cx="p.x" :cy="p.y" r="4" fill="var(--accent)"><title>{{ time(p.time_ms) }} · {{ tr('net') }} {{ format(p.net) }} · {{ tr('drawdown') }} {{ format(p.drawdown) }}</title></circle>
-        </svg>
+        <div v-if="plot.points.length" class="curve-summary grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs"><span><b>{{ tr('minimum') }}</b><strong>{{ format(plot.min) }}</strong></span><span><b>{{ tr('maximum') }}</b><strong>{{ format(plot.max) }}</strong></span><span><b>{{ tr('current') }}</b><strong :class="color(plot.current)">{{ format(plot.current) }}</strong></span><span><b>{{ tr('trades') }}</b><strong>{{ format(plot.trades, 0) }}</strong></span></div>
+        <div v-if="plot.points.length" class="curve-wrap mt-3"><svg viewBox="0 0 800 190" class="w-full" role="img" :aria-label="tr('curve')">
+          <line x1="34" x2="790" :y1="plot.zero + 10" :y2="plot.zero + 10" stroke="var(--line-2)" stroke-dasharray="4 4" />
+          <text x="2" y="18" class="curve-label">{{ format(plot.max) }}</text><text x="2" y="158" class="curve-label">{{ format(plot.min) }}</text><text x="2" :y="plot.zero + 7" class="curve-label">0</text>
+          <polyline :points="plot.drawdown" fill="none" stroke="var(--down)" stroke-width="2" opacity=".7" transform="translate(0 10)" />
+          <polyline :points="plot.line" fill="none" stroke="var(--accent)" stroke-width="2.5" transform="translate(0 10)" />
+          <circle v-for="p in plot.points" :key="p.trade_id" :cx="p.x" :cy="p.y + 10" r="4.5" fill="var(--accent)" tabindex="0" role="button" @mouseenter="hoveredPoint = p" @mouseleave="hoveredPoint = null" @focus="hoveredPoint = p" @blur="hoveredPoint = null"><title>{{ time(p.time_ms) }} · {{ tr('net') }} {{ format(p.net) }}</title></circle>
+        </svg><div v-if="hoveredPoint" class="curve-tooltip" role="status">{{ time(hoveredPoint.time_ms) }} · {{ tr('net') }} {{ format(hoveredPoint.net) }} · {{ tr('drawdown') }} {{ format(hoveredPoint.drawdown) }}</div></div>
       </div>
     </section>
     <section v-if="tab === 'attribution'" class="space-y-4">
@@ -298,4 +303,12 @@ onMounted(() => apply());
 .config-diff { table-layout: fixed; min-width: 660px; }
 .config-diff td { overflow-wrap: anywhere; vertical-align: top; }
 .config-diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; font-size: 11px; }
+.curve-wrap { position: relative; min-height: 190px; }
+.curve-summary span { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--line-1); border-radius: 6px; }
+.curve-summary b, .curve-label { color: var(--ink-3); font-size: 10px; }
+.curve-summary strong { color: var(--ink-1); font-variant-numeric: tabular-nums; }
+.curve-label { fill: var(--ink-3); }
+.curve-wrap circle { cursor: crosshair; outline: none; }
+.curve-wrap circle:hover, .curve-wrap circle:focus { r: 7px; stroke: var(--ink-1); stroke-width: 2px; }
+.curve-tooltip { position: absolute; top: 4px; right: 4px; padding: 6px 8px; border: 1px solid var(--line-1); border-radius: 6px; background: var(--surface-2); color: var(--ink-1); font-size: 11px; pointer-events: none; }
 </style>

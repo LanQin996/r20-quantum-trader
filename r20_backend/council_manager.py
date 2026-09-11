@@ -407,6 +407,23 @@ def reset_role_template(role_id: str) -> Dict[str, Any]:
 
 from r20_backend import analysis_capture
 
+
+def _usage_fields(usage: Any) -> Dict[str, Any]:
+    if not isinstance(usage, dict) or not usage:
+        return {}
+    fields = {"usage": dict(usage)}
+    total = usage.get("total_tokens")
+    if total is None:
+        for input_key, output_key in (("prompt_tokens", "completion_tokens"), ("input_tokens", "output_tokens")):
+            input_tokens, output_tokens = usage.get(input_key), usage.get(output_key)
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                total = input_tokens + output_tokens
+                break
+    if isinstance(total, int) and total >= 0:
+        fields["total_tokens"] = total
+    return fields
+
+
 @analysis_capture.observed('council.proposal')
 def _call_single_trader(
     role_id: str,
@@ -495,6 +512,7 @@ def _call_single_trader(
             "reasoning": reasoning.strip() if reasoning else "",
             "latency_ms": latency,
             "weight": role_spec.get("weight", 1.0),
+            **_usage_fields(usage),
         }
     except Exception as e:
         return {
@@ -593,6 +611,7 @@ def _call_single_trader_critique(
             "content": content.strip(),
             "reasoning": reasoning.strip() if reasoning else "",
             "latency_ms": latency,
+            **_usage_fields(usage),
         }
     except Exception as e:
         return {
@@ -961,6 +980,7 @@ def execute_council_debate(
             "model_used": override_model or get_active_llm_runtime().get("model", "default"),
             "latency_ms": latency,
             "reasoning": reasoning,
+            **_usage_fields(usage),
         },
         "advisors": trader_proposals,
         "cross_examinations": trader_critiques if consensus_mode == "cross_examination" else {},

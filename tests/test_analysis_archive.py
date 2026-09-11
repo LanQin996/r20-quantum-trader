@@ -254,5 +254,12 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(client.get("/api/v1/admin/analysis/trades"+query+"&page=0",headers=headers).status_code,422)
         self.assertEqual(client.get("/api/v1/admin/analysis/summary?start=invalid",headers=headers).status_code,422)
 
+    def test_trade_page_sql_pagination_and_count(self):
+        self.archive.upsert_trades(ACCOUNT, [normalize_position(position(i)) for i in range(1, 46)])
+        with self.archive.connect() as con:
+            rows, total = self.archive.trade_page(ACCOUNT, {"status": "closed"}, 2, 20, con)
+        self.assertEqual(total, 45)
+        self.assertEqual(len(rows), 20)
+
 if __name__=="__main__":
     unittest.main()

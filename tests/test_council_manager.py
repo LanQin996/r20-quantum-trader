@@ -69,7 +69,7 @@ class TestCouncilManager(unittest.TestCase):
         cfg["consensus_mode"] = "standard"
         save_council_config(cfg)
 
-        mock_trader_return = ("BUY_LONG 82% 动能良好，建议 HOLD 现有 BTC 持仓", "", {}, 120)
+        mock_trader_return = ("BUY_LONG 82% 动能良好，建议 HOLD 现有 BTC 持仓", "", {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}, 120)
         mock_cio_json = (
             '{"macro_assessment": "资金充裕，采纳稳健顺势方案", '
             '"position_management": [{"instId": "BTC-USDT-SWAP", "action": "HOLD", "reasoning": "波段顺畅"}], '
@@ -78,7 +78,7 @@ class TestCouncilManager(unittest.TestCase):
             '  "SOL-USDT-SWAP": {"action": "WAIT", "confidence": 50, "reasoning": "全员驳回观望"}'
             '}}',
             "",
-            {},
+            {"total_tokens": 18},
             250
         )
 
@@ -109,6 +109,8 @@ class TestCouncilManager(unittest.TestCase):
                 self.assertEqual(advisor["proposal_id"], f"{role_id}_prop")
 
             self.assertEqual(transcript["consensus_mode"], "standard")
+            self.assertEqual(transcript["arbitrator"]["total_tokens"], 18)
+            self.assertEqual(transcript["advisors"]["trader_trend"]["usage"]["total_tokens"], 18)
             self.assertEqual(transcript.get("cross_examinations"), {})
 
     def test_adopted_role_inferred_from_reasoning_fallback(self):
@@ -152,7 +154,7 @@ class TestCouncilManager(unittest.TestCase):
         save_council_config(cfg)
 
         mock_proposal = ("【方案汇报】建议回踩买多，防守位明确", "", {}, 100)
-        mock_critique = ("【同行质询】指出同行方案追高、且止损未达到 2.0x ATR 隐患", "", {}, 110)
+        mock_critique = ("【同行质询】指出同行方案追高、且止损未达到 2.0x ATR 隐患", "", {"input_tokens": 13, "output_tokens": 5}, 110)
         mock_cio_json = (
             '{"macro_assessment": "综合交叉质询，动能交易员方案获胜", '
             '"position_management": [], '
@@ -186,6 +188,7 @@ class TestCouncilManager(unittest.TestCase):
             for k, crit in transcript["cross_examinations"].items():
                 self.assertEqual(crit["status"], "ok")
                 self.assertIn("同行质询", crit["content"])
+                self.assertEqual(crit["usage"]["input_tokens"] + crit["usage"]["output_tokens"], 18)
 
             self.assertEqual(brain_output["decisions"]["BTC-USDT-SWAP"]["adopted_role"], "trader_momentum")
 
