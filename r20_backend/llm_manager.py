@@ -1546,7 +1546,7 @@ def _response_chunks(resp, deadline: float, progress: Dict[str, Any]):
             return  # non-socket test transports / file-like wrappers: read() reads all
 
 
-def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict[str, Any]) -> Dict[str, Any]:
+def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict[str, Any], effective_timeout: float) -> Dict[str, Any]:
     """Accept ordinary JSON or Chat Completions SSE, preserving usage and reasoning."""
     content_parts: List[str] = []
     reasoning_parts: List[str] = []
@@ -1591,17 +1591,20 @@ def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict
             if reasoning:
                 reasoning_parts.append(reasoning)
                 progress["reasoning_chars"] = progress.get("reasoning_chars", 0) + len(reasoning)
+                # A long explicit model budget must not be silently shortened
+                # by the legacy fixed thinking watchdog.
+                watchdog = REASONING_ONLY_TIMEOUT_SECONDS if effective_timeout <= 60.0 else 0.0
                 if (
                     reasoning_deadline is None
-                    and REASONING_ONLY_TIMEOUT_SECONDS > 0
+                    and watchdog > 0
                     and not content_parts
                 ):
                     reasoning_deadline = min(
                         deadline,
-                        time.perf_counter() + REASONING_ONLY_TIMEOUT_SECONDS,
+                        time.perf_counter() + watchdog,
                     )
                     progress["read_deadline"] = reasoning_deadline
-                    progress["reasoning_watchdog_seconds"] = REASONING_ONLY_TIMEOUT_SECONDS
+                    progress["reasoning_watchdog_seconds"] = watchdog
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
 
@@ -1826,7 +1829,7 @@ def _attempt_llm_call(
 
             with resp_handle as resp:
                 progress["stage"] = "response_body"
-                res_json = _read_llm_response(resp, target_format, deadline, progress)
+                res_json = _read_llm_response(resp, target_format, deadline, progress, effective_timeout)
             latency_ms = int((time.perf_counter() - t0) * 1000)
             analysis_capture.emit("llm.response", {"response": res_json, "latency_ms": latency_ms}, "received")
             content, reasoning, usage = _parse_llm_response(target_format, res_json)

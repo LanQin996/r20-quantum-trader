@@ -313,6 +313,18 @@ class LLMWatchdogTests(unittest.TestCase):
         self.assertEqual(json.loads(result[0]), {"action": "WAIT"})
         self.assertGreater(self.clock.now, 5)
 
+    def test_long_explicit_budget_is_not_cut_by_fixed_watchdog(self):
+        body = sse({"choices": [{"delta": {"reasoning_content": "thinking"}}]}, done=False)
+        stream = ChunkResponse(body, self.clock, delay=61, chunk_size=len(body))
+        with patch.object(lm, "RESPONSE_START_TIMEOUT_SECONDS", 0), patch.object(
+            lm, "REASONING_ONLY_TIMEOUT_SECONDS", 60
+        ), patch.object(lm.urllib.request, "urlopen", return_value=stream):
+            with self.assertRaisesRegex(RuntimeError, "流式响应中断"):
+                self.call(timeout=150, allow_fallback=False)
+        # The fixture ends after 2 x 61s; a 60s thinking watchdog would have
+        # failed on the first read instead.
+        self.assertGreaterEqual(self.clock.now, 122)
+
 
 if __name__ == "__main__":
     unittest.main()
