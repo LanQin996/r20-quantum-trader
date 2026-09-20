@@ -68,6 +68,8 @@ export const analysis = {
   "noData": "No analyzable records yet. Refresh after collection runs; missing historical evidence stays unknown.",
   "sampleNote": "Metrics use cost-complete closed lifecycles; breakeven trades count in the win-rate denominator. Small samples have wide intervals; group differences do not establish causality.",
   "curve": "Cumulative realized P&L and drawdown",
+  "curveDrawdown": "Drawdown amount",
+  "curveKeyboard": "Use arrow keys to inspect settlements, Home / End to jump to the first / last.",
   "curveNote": "Drawdown is an absolute amount, not account NAV drawdown. Hover to inspect settlements.",
   "group": "Group by",
   "confidence": "Model confidence",

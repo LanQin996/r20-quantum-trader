@@ -68,6 +68,8 @@ export const analysis = {
   "noData": "暂无可分析数据。运行采集后刷新；旧记录缺失的证据会保持未知。",
   "sampleNote": "统计只使用成本完整的已平仓生命周期；保本计入胜率分母。小样本区间较宽，分组差异不直接证明因果。",
   "curve": "累计已实现收益与回撤",
+  "curveDrawdown": "回撤金额",
+  "curveKeyboard": "使用左右方向键查看逐笔结算，Home / End 跳转首尾。",
   "curveNote": "回撤为绝对金额，不代表账户净值回撤；悬停查看每笔结算。",
   "group": "分组维度",
   "confidence": "模型置信度",

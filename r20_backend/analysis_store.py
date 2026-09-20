@@ -101,13 +101,15 @@ def sensitive_values() -> set[str]:
             pass
     return values
 
-def sanitize(value: Any, secrets: set[str] | None = None) -> Any:
+def sanitize(value: Any, secrets: set[str] | None = None, *, _text_sanitizer=None) -> Any:
     secrets = sensitive_values() if secrets is None else secrets
     if isinstance(value, dict):
-        return {str(k): REDACTED if SECRET_KEY.search(str(k)) else sanitize(v,secrets) for k,v in value.items()}
+        return {str(k): REDACTED if SECRET_KEY.search(str(k)) else sanitize(v,secrets,_text_sanitizer=_text_sanitizer) for k,v in value.items()}
     if isinstance(value, (list,tuple,set)):
-        return [sanitize(v,secrets) for v in value]
+        return [sanitize(v,secrets,_text_sanitizer=_text_sanitizer) for v in value]
     if isinstance(value, str):
+        if _text_sanitizer is not None:
+            return _text_sanitizer(value)
         for secret in sorted(secrets,key=len,reverse=True): value = value.replace(secret,REDACTED)
         # Long model prompts usually contain none of these patterns. Cheap
         # necessary-condition checks avoid four full regex scans per string.

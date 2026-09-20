@@ -21,10 +21,10 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.background import BackgroundTask
 
 from r20_backend import analysis_service as service
-from r20_backend.analysis_export import write_bundle
+from r20_backend.analysis_export import BundleWriter, write_bundle
 from r20_backend.analysis_export_jobs import ExportJobs, ExportBusy
 from r20_backend.analysis_routes import ExportFileResponse, install_routes
-from r20_backend.analysis_store import Archive
+from r20_backend.analysis_store import Archive, sanitize
 
 
 class ExportJobTests(unittest.TestCase):
@@ -76,6 +76,31 @@ class ExportJobTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(data).hexdigest(), info["sha256"])
         self.assertIn(("events", 128, 261), progress)
         self.assertIn(("facts.fills", 512), progress)
+
+    def test_text_cache_preserves_redaction_and_is_export_scoped(self):
+        secret = "fixture-secret-value"
+        body = {
+            "prompt": ("市场提示 " + secret + " Bearer abcdef password=test ") * 20,
+            "api_key": "must be redacted",
+            "nested": ["ſecret_key=example", "https://user:pass@example.test", float("nan")],
+        }
+        for secrets in ({secret}, set()):
+            writer = BundleWriter(io.BytesIO(), secrets)
+            try:
+                expected = sanitize(body, secrets)
+                self.assertEqual(json.loads(writer.encode(body)), expected)
+                self.assertEqual(json.loads(writer.encode(body)), expected)
+                self.assertGreater(writer._cached_text.cache_info().hits, 0)
+                for index in range(200):
+                    writer.encode(f"unique text {index}")
+                self.assertLessEqual(writer._cached_text.cache_info().currsize, 128)
+                before = writer._cached_text.cache_info()
+                large = secret + "x" * 65537
+                self.assertEqual(json.loads(writer.encode(large)), sanitize(large, secrets))
+                self.assertEqual(writer._cached_text.cache_info(), before)
+            finally:
+                writer.close()
+            self.assertEqual(writer._cached_text.cache_info().currsize, 0)
 
     def test_single_export_deduplication_cancellation_and_partial_cleanup(self):
         entered, proceed = threading.Event(), threading.Event()

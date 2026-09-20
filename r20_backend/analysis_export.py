@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import lru_cache
 import csv
 import hashlib
 import io
@@ -14,9 +15,24 @@ from r20_backend.analysis_store import Archive, now_ms, sanitize, time_text
 
 class BundleWriter:
     def __init__(self, target, secrets):
-        self.zip = zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6)
-        self.secrets = secrets
+        # Export latency matters more than the smallest possible download.
+        self.zip = zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1)
+        self.secrets = set(secrets)
         self.files = {}
+        # Prompts repeat across events. Cache only within this export, using its
+        # fixed secret snapshot; bound both entry count and retained text size.
+        self._cached_text = lru_cache(maxsize=128)(lambda text: sanitize(text, self.secrets))
+
+    def _sanitize_text(self, text):
+        if len(text) > 65536:
+            return sanitize(text, self.secrets)
+        return self._cached_text(text)
+
+    def close(self):
+        try:
+            self.zip.close()
+        finally:
+            self._cached_text.cache_clear()
 
     @contextmanager
     def member(self, name):
@@ -33,7 +49,8 @@ class BundleWriter:
         self.files[name] = {"sha256": checksum.hexdigest(), "bytes": size}
 
     def encode(self, body):
-        return json.dumps(sanitize(body, self.secrets), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        return json.dumps(sanitize(body, self.secrets, _text_sanitizer=self._sanitize_text),
+                          ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
     def json(self, name, body):
         with self.member(name) as write:
@@ -174,4 +191,4 @@ def write_bundle(account, query, target, archive=None, progress=None):
                 "counts": {"trades": len(trades), "events": len(events), "configurations": config_count},
                 "files": dict(writer.files)})
         finally:
-            writer.zip.close()
+            writer.close()

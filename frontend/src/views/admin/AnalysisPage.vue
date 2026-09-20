@@ -255,14 +255,34 @@ type PlotPoint = { time_ms: number; net: number; drawdown: number; trade_id: str
 const hoveredPoint = ref<PlotPoint | null>(null);
 const plot = computed(() => {
   const source: { time_ms: number; net: number; drawdown: number; trade_id: string }[] = stats.value.curve || [];
-  const limit = 300;
-  const rows = source.length <= limit ? source : Array.from({ length: limit }, (_, i) => source[Math.round(i * (source.length - 1) / (limit - 1))]);
+  const rows = source;
   const values = rows.flatMap(p => [p.net, -p.drawdown]);
   const min = values.reduce((a, b) => Math.min(a, b), 0), max = values.reduce((a, b) => Math.max(a, b), 0), span = max - min || 1;
-  const y = (n: number) => 150 - (n - min) / span * 132;
-  const points = rows.map((p, i) => ({ ...p, x: 10 + i / Math.max(1, rows.length - 1) * 780, y: y(p.net), dy: y(-p.drawdown) }));
-  return { points, zero: y(0), min, max, current: rows.at(-1)?.net ?? null, trades: source.length, line: points.map(p => p.x + ',' + p.y).join(' '), drawdown: points.map(p => p.x + ',' + p.dy).join(' ') };
+  const y = (n: number) => 238 - (n - min) / span * 204;
+  const points = rows.map((p, i) => ({ ...p, x: 76 + i / Math.max(1, rows.length - 1) * 888, y: y(p.net), dy: y(-p.drawdown) }));
+  const ticks = Array.from({ length: 5 }, (_, i) => ({ value: min + span * i / 4, y: y(min + span * i / 4) }));
+  const dates = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])].filter(i => i >= 0).map(i => points[i]!);
+  return { points, ticks, dates, zero: y(0), min: rows.reduce((n, p) => Math.min(n, p.net), 0), max: rows.reduce((n, p) => Math.max(n, p.net), 0), current: rows.at(-1)?.net ?? null, trades: source.length, line: points.map(p => p.x + ',' + p.y).join(' '), drawdown: points.map(p => p.x + ',' + p.dy).join(' '), area: points.length ? `76,${y(0)} ${points.map(p => `${p.x},${p.dy}`).join(' ')} ${points.at(-1)!.x},${y(0)}` : '' };
 });
+watch(plot, () => { hoveredPoint.value = null; });
+function hoverCurve(event: MouseEvent) {
+  const svg = event.currentTarget as SVGSVGElement;
+  const matrix = svg.getScreenCTM();
+  if (!matrix) return;
+  const point = svg.createSVGPoint();
+  point.x = event.clientX; point.y = event.clientY;
+  const x = point.matrixTransform(matrix.inverse()).x;
+  const index = Math.round((x - 76) / 888 * Math.max(0, plot.value.points.length - 1));
+  hoveredPoint.value = plot.value.points[Math.max(0, Math.min(plot.value.points.length - 1, index))] ?? null;
+}
+function stepCurve(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const points = plot.value.points;
+  const index = hoveredPoint.value ? points.indexOf(hoveredPoint.value) : -1;
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? points.length - 1 : index + (event.key === 'ArrowLeft' ? -1 : 1);
+  hoveredPoint.value = points[Math.max(0, Math.min(points.length - 1, next))] ?? null;
+}
 watch(groupBy, loadGroups);
 watch([leftId, rightId], () => { if (tab.value === 'configurations') void compare(); });
 watch(tab, value => {
@@ -343,13 +363,27 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
         <h2 class="font-semibold text-sm">{{ tr('curve') }}</h2><p class="text-xs t-faint mt-1">{{ tr('curveNote') }}</p>
         <BaseEmpty v-if="!plot.points.length" :text="tr('noData')" />
         <div v-if="plot.points.length" class="curve-summary grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs"><span><b>{{ tr('minimum') }}</b><strong>{{ format(plot.min) }}</strong></span><span><b>{{ tr('maximum') }}</b><strong>{{ format(plot.max) }}</strong></span><span><b>{{ tr('curveCurrent') }}</b><strong :class="color(plot.current)">{{ format(plot.current) }}</strong></span><span><b>{{ tr('trades') }}</b><strong>{{ format(plot.trades, 0) }}</strong></span></div>
-        <div v-if="plot.points.length" class="curve-wrap mt-3"><svg viewBox="0 0 800 190" class="w-full" role="img" :aria-label="tr('curve')">
-          <line x1="34" x2="790" :y1="plot.zero + 10" :y2="plot.zero + 10" stroke="var(--line-2)" stroke-dasharray="4 4" />
-          <text x="2" y="18" class="curve-label">{{ format(plot.max) }}</text><text x="2" y="158" class="curve-label">{{ format(plot.min) }}</text><text x="2" :y="plot.zero + 7" class="curve-label">0</text>
-          <polyline :points="plot.drawdown" fill="none" stroke="var(--down)" stroke-width="2" opacity=".7" transform="translate(0 10)" />
-          <polyline :points="plot.line" fill="none" stroke="var(--accent)" stroke-width="2.5" transform="translate(0 10)" />
-          <circle v-for="p in plot.points" :key="p.trade_id" :cx="p.x" :cy="p.y + 10" r="4.5" fill="var(--accent)" tabindex="0" role="button" @mouseenter="hoveredPoint = p" @mouseleave="hoveredPoint = null" @focus="hoveredPoint = p" @blur="hoveredPoint = null"><title>{{ time(p.time_ms) }} · {{ tr('net') }} {{ format(p.net) }}</title></circle>
-        </svg><div v-if="hoveredPoint" class="curve-tooltip" role="status">{{ time(hoveredPoint.time_ms) }} · {{ tr('net') }} {{ format(hoveredPoint.net) }} · {{ tr('drawdown') }} {{ format(hoveredPoint.drawdown) }}</div></div>
+        <div v-if="plot.points.length" class="curve-wrap mt-3">
+          <div class="curve-legend"><span><i class="curve-key-net" />{{ tr('curveCurrent') }}</span><span><i class="curve-key-dd" />{{ tr('curveDrawdown') }}</span><span class="curve-unit">USDT</span></div>
+          <svg viewBox="0 0 1000 280" class="curve-svg" role="group" tabindex="0" :aria-label="tr('curve') + '. ' + tr('curveKeyboard')" @mousemove="hoverCurve" @mouseleave="hoveredPoint = null" @keydown="stepCurve" @blur="hoveredPoint = null">
+            <g v-for="tick in plot.ticks" :key="tick.y">
+              <line x1="76" x2="964" :y1="tick.y" :y2="tick.y" class="curve-grid" />
+              <text x="62" :y="tick.y + 4" text-anchor="end" class="curve-label">{{ format(tick.value) }}</text>
+            </g>
+            <line x1="76" x2="964" :y1="plot.zero" :y2="plot.zero" class="curve-baseline" stroke-dasharray="4 5" />
+            <polygon :points="plot.area" fill="var(--curve-dd)" opacity=".07" />
+            <polyline :points="plot.drawdown" class="curve-line curve-dd" />
+            <polyline :points="plot.line" class="curve-line curve-net" />
+            <circle v-if="plot.points.length === 1" :cx="plot.points[0]!.x" :cy="plot.points[0]!.y" r="3" fill="var(--curve-net)" />
+            <g v-if="hoveredPoint" class="curve-active">
+              <line :x1="hoveredPoint.x" :x2="hoveredPoint.x" y1="24" y2="242" class="curve-baseline" stroke-dasharray="3 4" />
+              <circle :cx="hoveredPoint.x" :cy="hoveredPoint.y" r="4" fill="var(--curve-net)" />
+              <circle :cx="hoveredPoint.x" :cy="hoveredPoint.dy" r="3" fill="var(--curve-dd)" />
+            </g>
+            <text v-for="(point, index) in plot.dates" :key="point.x" :x="point.x" y="270" :text-anchor="index === 0 ? 'start' : index === plot.dates.length - 1 ? 'end' : 'middle'" class="curve-label">{{ new Date(point.time_ms).toLocaleDateString(locale, { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' }) }}</text>
+          </svg>
+          <div v-if="hoveredPoint" class="curve-tooltip" role="status"><span>{{ time(hoveredPoint.time_ms) }}</span><strong>{{ tr('curveCurrent') }} <b class="curve-net-value">{{ format(hoveredPoint.net) }}</b></strong><strong>{{ tr('curveDrawdown') }} <b>{{ format(hoveredPoint.drawdown) }}</b></strong></div>
+        </div>
       </div>
     </section>
     <section v-if="tab === 'attribution'" class="space-y-4">
@@ -461,12 +495,28 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
 .config-diff { table-layout: fixed; min-width: 660px; }
 .config-diff td { overflow-wrap: anywhere; vertical-align: top; }
 .config-diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; font-size: 11px; }
-.curve-wrap { position: relative; min-height: 190px; }
-.curve-summary span { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--line-1); border-radius: 6px; }
-.curve-summary b, .curve-label { color: var(--ink-3); font-size: 10px; }
-.curve-summary strong { color: var(--ink-1); font-variant-numeric: tabular-nums; }
-.curve-label { fill: var(--ink-3); }
-.curve-wrap circle { cursor: crosshair; outline: none; }
-.curve-wrap circle:hover, .curve-wrap circle:focus { r: 7px; stroke: var(--ink-1); stroke-width: 2px; }
-.curve-tooltip { position: absolute; top: 4px; right: 4px; padding: 6px 8px; border: 1px solid var(--line-1); border-radius: 6px; background: var(--surface-2); color: var(--ink-1); font-size: 11px; pointer-events: none; }
+.curve-wrap { --curve-net: #22a995; --curve-dd: #d47b78; position: relative; }
+.curve-summary span { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--line-1); border-radius: 10px; }
+.curve-summary b { color: var(--ink-3); font-size: 11px; font-weight: 500; }
+.curve-summary strong { color: var(--ink-1); font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.curve-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding: 12px 6px 4px; font-size: 11px; color: var(--ink-3); }
+.curve-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.curve-legend i { width: 16px; height: 3px; border-radius: 2px; }
+.curve-key-net { background: var(--curve-net); }
+.curve-key-dd { background: var(--curve-dd); }
+.curve-unit { margin-left: auto; }
+.curve-svg { display: block; width: 100%; height: clamp(240px, 26vw, 360px); cursor: crosshair; }
+.curve-svg:focus-visible { outline: 2px solid var(--curve-net); outline-offset: 3px; border-radius: 8px; }
+.curve-label { fill: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.curve-grid { stroke: var(--line-1); stroke-width: 1; }
+.curve-baseline { stroke: var(--ink-3); opacity: .4; }
+.curve-line { fill: none; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.curve-net { stroke: var(--curve-net); stroke-width: 2.2; }
+.curve-dd { stroke: var(--curve-dd); stroke-width: 1.5; opacity: .85; }
+.curve-active { pointer-events: none; }
+.curve-active circle { stroke: var(--surface-2); stroke-width: 2; }
+.curve-tooltip { position: absolute; top: 42px; right: 12px; display: grid; gap: 8px; max-width: calc(100% - 24px); padding: 12px 14px; border: 1px solid var(--line-1); border-radius: 10px; background: var(--surface-2); box-shadow: 0 8px 24px #00000010; color: var(--ink-3); font-size: 11px; pointer-events: none; }
+.curve-tooltip strong { display: flex; justify-content: space-between; gap: 20px; font-weight: 400; }
+.curve-tooltip b { color: var(--curve-dd); font-variant-numeric: tabular-nums; }
+.curve-tooltip .curve-net-value { color: var(--curve-net); }
 </style>
