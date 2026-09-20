@@ -861,7 +861,7 @@ onUnmounted(() => {
     class="dsh-card select-none"
     :class="[
       isFullscreen ? 'fixed inset-0 z-[100] !bg-[var(--surface-0,#090d16)] !bg-none rounded-none flex flex-col' : '',
-      fill ? 'h-full flex flex-col' : '',
+      fill ? 'h-full flex flex-col min-h-0' : '',
     ]"
   >
     <!-- 工具条：行情信息 + 工作站工具 -->
@@ -1063,9 +1063,9 @@ onUnmounted(() => {
          （非 fill 用法在全屏下同样铺满，短视口不会被 `min-h-[340px]` 顶出裁切）。 -->
     <div
       ref="chartContainer"
-      class="relative w-full"
-      :class="isFullscreen ? 'flex-1 min-h-0' : ''"
-      :style="{ height: isFullscreen ? undefined : (props.chartHeight || 'clamp(340px, 60vw, 560px)') }"
+      class="relative w-full overflow-hidden"
+      :class="isFullscreen ? 'flex-1 min-h-0' : props.chartHeight === '100%' ? 'flex-1 min-h-[340px] xl:min-h-0' : 'min-h-0'"
+      :style="{ height: isFullscreen ? undefined : (props.chartHeight === '100%' ? undefined : (props.chartHeight || 'clamp(340px, 60vw, 560px)')) }"
     ></div>
 
     <!-- 试算控制台 -->

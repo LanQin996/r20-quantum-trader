@@ -41,6 +41,20 @@ def close_order(ord_id="c1", cl_ord_id="", algo_id="", ord_type="market", px="11
 
 
 class PositionBindingTests(unittest.TestCase):
+    def test_external_venue_events_do_not_share_okx_account(self):
+        from r20_backend.analysis_capture import venue_identity
+        with patch("r20_backend.exchanges.registry.venue_credentials", return_value=("fixture-key", "")):
+            account = venue_identity("binance", "demo")
+        self.assertTrue(account.startswith("binance:demo:"))
+        self.assertNotIn("fixture-key", account)
+
+    def test_capture_uses_the_frozen_cycle_identity(self):
+        from types import SimpleNamespace
+        from r20_backend.analysis_capture import resolve_identity
+        with patch("scripts.okx_runtime.current_environment",
+                   return_value=SimpleNamespace(identity="okx:demo:frozen")):
+            self.assertEqual(resolve_identity(), "okx:demo:frozen")
+
     def test_live_position_binds_trade_id(self):
         meta = position_meta(LIVE_POSITION)
         self.assertEqual(meta["trade_id"], lifecycle_id(LIVE_POSITION))

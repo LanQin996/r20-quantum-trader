@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from r20_backend.version import __version__, APP_NAME
+from r20_backend.version import __version__, APP_NAME, get_version
 from r20_backend.config import settings, refresh_settings
 from r20_backend.settings_store import update_env
 from r20_backend.account_baseline import load_account_baseline
@@ -133,7 +133,7 @@ def runtime_overview() -> dict[str, Any]:
     }
     positions_payload = read_json("position_trackers.json", {})
     return {
-        "service": {"version": __version__, "pid": os.getpid(), "uptime_seconds": int(time.time() - STARTED_AT)},
+        "service": {"version": get_version(), "pid": os.getpid(), "uptime_seconds": int(time.time() - STARTED_AT)},
         "credentials": {"okx": bool(settings.okx_api_key and settings.okx_secret_key and settings.okx_passphrase), "llm": bool(settings.llm_api_key)},
         "configuration": get_admin_configuration(),
         "data_health": health_payload,
@@ -186,7 +186,7 @@ def health() -> dict[str, Any]:
         _host = ""
     return {
         "service": "r20-standalone-backend",
-        "version": __version__,
+        "version": get_version(),
         "status": "ok",
         "timestamp": int(time.time()),
         "credentials": {
@@ -207,7 +207,7 @@ def status() -> dict[str, Any]:
     # （全套止损/止盈/云端OCO参数）与 last_decisions，匿名 curl 即可读仓位底牌。
     # 前端/脚本零消费者实证后仅保留无害外壳；决策与tracker走各自的鉴权admin面。
     return {
-        "version": __version__,
+        "version": get_version(),
         "mode": "read_only_control_plane",
         "scripts": [
             script_state("ai_factor_trader.py"),
@@ -417,10 +417,10 @@ def admin_about(
     store = GatewayStore(GATEWAY_DB_PATH)
     gw_status = {"version": GATEWAY_VERSION, "running": gw_running, "pid": pid or None, "stats": store.stats(), "event_health": store.event_health(), "scheduler": scheduler_snapshot(store)}
     return {
-        "product": {"name": APP_NAME, "version": __version__, "control_plane": "R20 Gateway Runtime", "gateway_version": GATEWAY_VERSION},
+        "product": {"name": APP_NAME, "version": get_version(), "control_plane": "R20 Gateway Runtime", "gateway_version": GATEWAY_VERSION},
         "runtime": {"python": platform.python_version(), "platform": platform.platform(), "backend_pid": os.getpid(), "gateway": gw_status},
         "components": [
-            {"name": "FastAPI Control Plane", "version": __version__},
+            {"name": "FastAPI Control Plane", "version": get_version()},
             {"name": "Gateway Event Runtime", "version": GATEWAY_VERSION},
             {"name": "SQLite", "version": __import__("sqlite3").sqlite_version},
         ],
@@ -467,6 +467,11 @@ def update_application(
         raise HTTPException(status_code=502, detail=f"更新失败：{exc}") from exc
     status_after = fn_status()
     updated = status_before["local"] != status_after.get("local")
+    if updated:
+        try:
+            subprocess.run(["npm.cmd" if os.name == "nt" else "npm", "run", "build"], cwd=str(ROOT / "frontend"), timeout=60, check=False)
+        except Exception:
+            pass
     rec_audit = app_attr("audit_record", audit_record)
     rec_audit("application.update", "success", {"actor": actor.get("username", "admin"), "before": status_before.get("local"), "after": status_after.get("local")})
     return {

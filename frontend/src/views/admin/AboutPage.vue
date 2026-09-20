@@ -61,6 +61,7 @@ const { run: checkUpdate, busy: updateChecking } = useAsyncAction(async () => {
   if (about.value) {
     about.value.update = res
   }
+  await load()
   updateResult.value = res.error
     // 模板以 .error 键判红（审计①#8）：git 失败回 HTTP 200+error 字段，必须走红分支
     ? { error: t('admin.about.updateCheckFailed', undefined, { msg: res.error }), data: res }
@@ -96,6 +97,7 @@ const { run: executeUpdate, busy: updateRunning } = useAsyncAction(async () => {
   if (about.value && res.after) {
     about.value.update = res.after
   }
+  await load()
 }, { onError: (e) => { updateResult.value = { error: e.message } } })
 
 const phaseOk = computed(() => confirmPhrase.value.trim().toUpperCase() === 'UPDATE R20');

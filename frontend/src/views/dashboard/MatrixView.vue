@@ -87,7 +87,7 @@ function pick(instId: string) {
            两个 `h-full` 子项一个溢出 140px、另一个塌成 **0 高度并被推到 y=900**
            —— 即「持仓面板整个消失」。改为 xl 限定后，窄屏回归自然文档流。 -->
       <div v-if="isFocusMode" class="grid grid-cols-1 gap-3 xl:grid-cols-12 xl:h-[calc(100vh-140px)]">
-        <div class="xl:col-span-8 h-full">
+        <div class="xl:col-span-8 h-full min-h-0">
           <ChartWorkstation
             ref="chart"
             :initial-symbol="initialSymbol"
@@ -95,7 +95,7 @@ function pick(instId: string) {
             chart-height="100%"
           />
         </div>
-        <div class="xl:col-span-4 h-full overflow-hidden">
+        <div class="xl:col-span-4 h-full min-h-0 overflow-hidden">
           <PositionsOrdersPanel @pick-symbol="pick" />
         </div>
       </div>

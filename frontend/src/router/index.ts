@@ -76,12 +76,26 @@ const router = createRouter({
 })
 
 router.onError((error) => {
-  if (/Failed to fetch dynamically imported module|Importing a module script failed/i.test(error?.message || '')) {
+  const msg = error?.message || ''
+  const isChunkOrModuleError =
+    /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Load failed|Unable to preload CSS|Failed to resolve module specifier/i.test(
+      msg,
+    )
+  if (isChunkOrModuleError) {
     const key = 'r20_chunk_reload_lock'
+    const attemptsKey = 'r20_chunk_reload_attempts'
     const lastReload = parseInt(sessionStorage.getItem(key) || '0', 10)
-    if (Date.now() - lastReload > 10000) {
-      sessionStorage.setItem(key, String(Date.now()))
-      window.location.reload()
+    const attempts = parseInt(sessionStorage.getItem(attemptsKey) || '0', 10)
+    const now = Date.now()
+
+    if (now - lastReload > 3000 && attempts < 2) {
+      sessionStorage.setItem(key, String(now))
+      sessionStorage.setItem(attemptsKey, String(attempts + 1))
+      const url = new URL(window.location.href)
+      url.searchParams.set('_v', String(now))
+      window.location.href = url.toString()
+    } else {
+      sessionStorage.removeItem(attemptsKey)
     }
   }
 })
@@ -155,6 +169,11 @@ export function updateDocumentTitle(to = router.currentRoute.value) {
 
 router.afterEach((to) => {
   updateDocumentTitle(to)
+  try {
+    sessionStorage.removeItem('r20_chunk_reload_attempts')
+  } catch {
+    // ignore
+  }
 })
 
 if (typeof window !== 'undefined') {

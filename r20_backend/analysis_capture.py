@@ -50,7 +50,6 @@ def identity() -> str:
 
 def resolve_identity(env=None) -> str:
     """Bind each cycle to the frozen static credential profile."""
-    from scripts.okx_runtime import selected_environment
     from scripts.okx_runtime import current_environment
     env = env or current_environment()
     return env.identity

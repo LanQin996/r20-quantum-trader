@@ -246,14 +246,14 @@ def docs_images(img_name: str):
 def serve_vue_spa_subroutes(subpath: str = "") -> Response:
     vue_index = VUE_DIST / "index.html"
     if vue_index.is_file():
-        return FileResponse(str(vue_index), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        return serve_vue_spa(str(vue_index), is_public=True)
     fallback_index = ROOT / "frontend" / "index.html"
-    return FileResponse(str(fallback_index), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+    return serve_vue_spa(str(fallback_index), is_public=True)
 
 
 @router.get("/admin", include_in_schema=False)
 @router.get("/admin/{subpath:path}", include_in_schema=False)
-def admin_page(subpath: str = "") -> FileResponse:
+def admin_page(subpath: str = "") -> Response:
     # 审计⑤#6(2026-09-13)：旧实现对一切 /admin/* 无脑回 Vue 壳，把 mount 副本里
     # 「真实文件优先」分支压死——LegacyRedirect.vue 专门跳转的 /admin/legacy.html
     # （磁盘真实 126KB 文件）永远打不开且无 404 信号。现真实文件优先（含路径逃逸
@@ -268,9 +268,9 @@ def admin_page(subpath: str = "") -> FileResponse:
             pass
     vue_index = VUE_DIST / "index.html"
     if vue_index.is_file():
-        return FileResponse(str(vue_index), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        return serve_vue_spa(str(vue_index), is_public=False)
     fallback_index = ROOT / "frontend" / "index.html"
-    return FileResponse(str(fallback_index), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+    return serve_vue_spa(str(fallback_index), is_public=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

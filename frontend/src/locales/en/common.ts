@@ -43,6 +43,12 @@ export const enCommon = {
     loginFailed: 'Sign-in failed',
     dashboardScanning: 'Scanning the whole-market multi-timeframe factor matrix...',
     dashboardLoadFailed: 'Failed to load data',
+    errorBoundary: {
+      title: 'UI Interrupted or System Updated',
+      desc: 'Frontend asset mismatch detected, usually caused by a new deployment. Please refresh to load the latest build.',
+      reload: 'Refresh to Latest Version',
+      backHome: 'Back to Dashboard',
+    },
     pageInfo: 'Page {page} / {pages} · {total} items',
     pageNav: 'Pagination',
     prevPage: 'Previous',

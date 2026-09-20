@@ -44,6 +44,12 @@ export const zhCommon = {
     loginFailed: '登录失败',
     dashboardScanning: '全市场宏观多周期多因子矩阵扫描中...',
     dashboardLoadFailed: '获取数据失败',
+    errorBoundary: {
+      title: '界面加载中断或系统已更新',
+      desc: '检测到前端切片或组件异常，通常由发版后旧缓存与新版本错位引起。',
+      reload: '立即刷新加载最新版本',
+      backHome: '返回实盘大屏',
+    },
     pageInfo: '第 {page} / {pages} 页 · 共 {total} 条',
     pageNav: '分页导航',
     prevPage: '上一页',
