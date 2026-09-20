@@ -1,13 +1,34 @@
 """Analysis API; all endpoints require the existing administrator session."""
 from __future__ import annotations
-from fastapi import Depends, Header, HTTPException, Query
-from fastapi.responses import Response
+import os
+import tempfile
+from pathlib import Path
+from fastapi import Depends, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 from r20_backend import analysis_service as service
-from r20_backend.analysis_store import Archive, sanitize
+from r20_backend.analysis_store import Archive
 from r20_backend.analysis_capture import identity
 from r20_backend.analysis_metrics import breakdown
+from r20_backend.analysis_export import write_bundle
+from r20_backend.analysis_export_jobs import ExportJobs, ExportBusy
+
+
+class ExportFileResponse(FileResponse):
+    """Release the download lease even when the client disconnects mid-file."""
+    async def __call__(self, scope, receive, send):
+        cleanup, self.background = self.background, None
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if cleanup:
+                await cleanup()
+
 
 def install_routes(app, require_admin):
+    jobs = ExportJobs()
+    app.state.analysis_export_jobs = jobs
+
     def authenticate(x_r20_session: str | None = Header(default=None,alias="X-R20-Session")):
         return require_admin(x_r20_session=x_r20_session)
 
@@ -70,7 +91,69 @@ def install_routes(app, require_admin):
 
     @app.get(prefix+"/export",dependencies=dependencies)
     def export(selected=Depends(selection)):
+        # Retain the old URL for API clients, but avoid holding the ZIP in RAM.
         account,query=selected
-        body=service.export_bundle(account,query)
-        return Response(body,media_type="application/zip",
-            headers={"Content-Disposition":'attachment; filename="r20-analysis.zip"',"Cache-Control":"private, no-store"})
+        archive = Archive()
+        directory = archive.path.parent / "analysis_exports"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, filename = tempfile.mkstemp(prefix="download-", suffix=".zip", dir=directory)
+        path = Path(filename)
+        try:
+            with os.fdopen(fd, "wb") as target:
+                write_bundle(account, query, target, archive)
+            return ExportFileResponse(path, media_type="application/zip", filename="r20-analysis.zip",
+                headers={"Cache-Control":"private, no-store", "Content-Encoding":"identity"},
+                background=BackgroundTask(path.unlink, missing_ok=True))
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    def session(x_r20_session: str | None = Header(default=None, alias="X-R20-Session")):
+        require_admin(x_r20_session=x_r20_session)
+        return x_r20_session or ""
+
+    @app.post(prefix+"/exports", status_code=202)
+    def start_export(selected=Depends(selection), token=Depends(session)):
+        try:
+            return jobs.start(token, *selected)
+        except ExportBusy:
+            raise HTTPException(status_code=409, detail="已有分析包正在导出，请等待完成后重试")
+
+    def job_or_404(action, *args):
+        try:
+            return action(*args)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="导出任务不存在或已过期，请重新导出")
+
+    @app.get(prefix+"/exports/{job_id}")
+    def export_status(job_id: str, token=Depends(session)):
+        return JSONResponse(job_or_404(jobs.get, token, job_id), headers={"Cache-Control":"private, no-store"})
+
+    @app.delete(prefix+"/exports/{job_id}")
+    def cancel_export(job_id: str, token=Depends(session)):
+        return job_or_404(jobs.cancel, token, job_id)
+
+    @app.post(prefix+"/exports/{job_id}/download")
+    def prepare_download(job_id: str, request: Request, token=Depends(session)):
+        job = job_or_404(jobs.get, token, job_id)
+        if job["state"] != "ready":
+            raise HTTPException(status_code=409, detail="分析包尚未生成")
+        path = prefix + "/exports/" + job_id + "/file"
+        response = JSONResponse({"url": path}, headers={"Cache-Control":"private, no-store"})
+        # A narrowly scoped HttpOnly cookie allows the browser's native downloader
+        # to authenticate, without buffering a Blob or placing credentials in URLs.
+        response.set_cookie("r20_analysis_download", token, max_age=120, path=path,
+                            httponly=True, secure=request.url.scheme == "https", samesite="strict")
+        return response
+
+    @app.get(prefix+"/exports/{job_id}/file")
+    def export_file(job_id: str, request: Request):
+        token = request.headers.get("X-R20-Session") or request.cookies.get("r20_analysis_download") or ""
+        require_admin(x_r20_session=token)
+        try:
+            path = job_or_404(jobs.acquire_file, token, job_id)
+        except ExportBusy:
+            raise HTTPException(status_code=409, detail="分析包尚未生成")
+        return ExportFileResponse(path, media_type="application/zip", filename="r20-analysis.zip",
+            headers={"Cache-Control":"private, no-store", "Content-Encoding":"identity"},
+            background=BackgroundTask(jobs.release_file, token, job_id))

@@ -12,6 +12,8 @@
 - 实盘与模拟盘按环境、凭证组隔离，采集使用本轮冻结的静态 V5 凭证身份。外所执行事件单独按场所、环境和凭证指纹归档，不混入 OKX 成交。
 - OKX 历史通过原生 V5 API 分页增量回补并保存断点。上游 v8.1.0 的 Binance/Gate 台账仍沿用其独立同步流程，复盘中心暂不宣称已覆盖这些场所的完整成交历史。
 - 下载 ZIP 包包含中文说明、汇总、CSV/JSON 交易、JSONL 事件、历史与当前配置、交易所事实和 SHA-256 校验清单。导出不受页面分页限制，并携带关联的区间外证据。
+- 大数据量导出在后台生成，页面显示当前阶段与已处理记录数，支持取消；刷新或返回本页会恢复同一浏览器会话内的任务进度。生成后交给浏览器原生下载，文件保留 1 小时，下载中断可重新下载，无需重新打包。
+- 导出复用同一次数据库快照内的事件索引，仅为最新运行状态解压所需快照；正文分批读取、逐条解压并直接写入数据目录下的 ZIP，交易所事实按标的和持仓时间索引匹配。事件正文、交易所记录和压缩包不再全部堆积在内存中。JSON 使用紧凑格式，保留原有压缩强度以控制下载体积，导出范围、统计口径、脱敏和逐文件 SHA-256 校验保持一致。
 - 原始请求和交易证据属于只读资料，查看或导出不执行其中的代码、提示词或指令。
 
 模型调用按每个模型配置的等待上限执行，连接、响应读取、重试和参数兼容请求共享该模型的预算；超时后直接切换备用模型。配置 300 秒、两个模型时，每个模型各有最多 300 秒，不再静默平分成 150 秒。整轮最长等待时间默认为各模型预算之和，可通过 `LLM_FAILOVER_MAX_WAIT_SECONDS` 显式设置整链硬上限（默认 0，不额外限制）；上限耗尽导致备用模型未执行时会单独注明。
@@ -33,6 +35,8 @@ Chat Completions 调用优先使用流式响应，兼容返回普通 JSON 的网
 - 采集错误进入日志和 analysis_capture_fault.json；故障不阻断原有平仓、保护和风控判断。页面展示故障时间及缺口，不能把缺失样本解读为没有交易。
 - 旧 JSON 与旧 SQLite 留存归入 legacy:unknown，不能未经核验绑定当前账户或推定已包含资金费。
 - 后台分析 API 前缀为 /api/v1/admin/analysis，沿用 X-R20-Session 鉴权；包含 summary、breakdown、trades、events、configurations 和 export。正文按需读取。
+- 大包使用 `POST /exports` 创建任务、`GET /exports/{id}` 读取进度、`DELETE /exports/{id}` 取消。`POST /exports/{id}/download` 在验证管理员会话与任务归属后签发仅适用于该文件路径的短时 HttpOnly Cookie，再由浏览器请求 `/exports/{id}/file`；会话不出现在下载 URL 中。旧 `/export` 接口仍兼容，并改用磁盘文件发送。
+- 后台任务与当前默认部署一样使用单个 Web 进程，同一时刻只生成一个分析包，重复点击会复用正在生成的同一任务。临时包位于归档数据库旁的 `analysis_exports`，需要足够的磁盘空间；任务取消或失败会清理未完成文件，过期文件自动清理。后端重启后任务需要重新创建。
 - 不自动调用额外分析模型或调整实盘策略。下载分析包后，再根据证据制定和验证策略修改。
 
-验证：python -X utf8 -m unittest tests.test_analysis_archive tests.test_analysis_capture -v；前端执行 npm run typecheck 和 npm run build。交易所与模型回放测试均使用隔离数据，不实际下单。
+验证：python -X utf8 -m unittest tests.test_analysis_archive tests.test_analysis_capture tests.test_analysis_export_jobs -v；前端执行 npm run typecheck 和 npm run build，浏览器回归执行 python -X utf8 frontend/tests/analysis-page.browser.py。交易所与模型回放测试均使用隔离数据，不实际下单。

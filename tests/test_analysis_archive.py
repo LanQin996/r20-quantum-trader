@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -176,6 +177,7 @@ class AnalysisTests(unittest.TestCase):
             manifest=json.loads(z.read("manifest.json"))
             for filename,info in manifest["files"].items():
                 self.assertEqual(hashlib.sha256(z.read(filename)).hexdigest(),info["sha256"])
+                self.assertEqual(len(z.read(filename)),info["bytes"])
             events=[json.loads(line) for line in z.read("events.jsonl").decode("utf-8").splitlines()]
             self.assertIn("request",{e["id"] for e in events})
             config=json.loads(z.read("configurations.json"))
@@ -183,6 +185,99 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(json.loads(z.read("summary.json"))["statistics"]["net_pnl"],1.7)
             self.assertEqual(manifest["counts"]["trades"],1)
             self.assertIn("历史实际行情",z.read("events.jsonl").decode("utf-8"))
+
+    def test_export_reads_event_index_once_and_decodes_only_latest_runtime(self):
+        old_cfg=self.archive.configuration(ACCOUNT,{"prompt":"old"},"runtime","brain",1)
+        new_cfg=self.archive.configuration(ACCOUNT,{"prompt":"new"},"runtime","brain",2)
+        for i in range(12):
+            for kind in ("account.snapshot","execution.cycle_state","cycle.start"):
+                self.archive.event(ACCOUNT,kind,{"index":i},id=f"{kind}-{i}",
+                    occurred_ms=START+i,config_id=old_cfg if i<11 else new_cfg)
+        self.archive.event("other-account","account.snapshot",{"index":"foreign"},
+            id="foreign-snapshot",occurred_ms=START+100)
+        # Snapshots outside the requested window still describe the latest state.
+        query={"start_ms":START+1000,"end_ms":START+2000,"status":"closed"}
+        with patch.object(self.archive,"events",wraps=self.archive.events) as events, \
+             patch.object(self.archive,"read_blob",wraps=self.archive.read_blob) as read:
+            bundle=service.export_bundle(ACCOUNT,query,self.archive)
+        self.assertEqual(events.call_count,1)
+        self.assertEqual(read.call_count,3)  # Two latest bodies and their single configuration.
+        with zipfile.ZipFile(io.BytesIO(bundle)) as z:
+            latest=json.loads(z.read("latest_runtime_state.json"))["observations"]
+            self.assertEqual(set(latest),{"account.snapshot","execution.cycle_state"})
+            self.assertTrue(all(e["body"]=={"index":11} for e in latest.values()))
+            configs=json.loads(z.read("configurations.json"))
+            self.assertEqual([c["id"] for c in configs],[new_cfg])
+            runtime=json.loads(z.read("summary.json"))["runtime_observations"]
+            self.assertEqual(runtime["brain"]["config_id"],new_cfg)
+            self.assertEqual(runtime["brain"]["pid"],2)
+            self.assertEqual(z.read("events.jsonl"),b"")
+            info=json.loads(z.read("manifest.json"))["files"]["events.jsonl"]
+            self.assertEqual(info,{"sha256":hashlib.sha256(b"").hexdigest(),"bytes":0})
+
+    def test_export_resolves_redaction_once_and_refreshes_between_exports(self):
+        secret="export-test-private-value"
+        for i in range(4):
+            self.archive.event(ACCOUNT,"llm.request",{"prompt":f"中文内容 {secret}"},
+                occurred_ms=START+i,id=f"redact-{i}")
+        query={"start_ms":START,"end_ms":START+100,"status":"closed"}
+        for secrets in ({secret},set()):
+            with patch.object(service,"sensitive_values",return_value=secrets) as resolve:
+                bundle=service.export_bundle(ACCOUNT,query,self.archive)
+            resolve.assert_called_once_with()
+            with zipfile.ZipFile(io.BytesIO(bundle)) as z:
+                payload=z.read("events.jsonl")
+                self.assertEqual(secret in payload.decode("utf-8"),not bool(secrets))
+                self.assertEqual(len(payload.decode("utf-8").splitlines()),4)
+                self.assertTrue(payload.endswith(b"\n"))
+                manifest=json.loads(z.read("manifest.json"))
+                for name,info in manifest["files"].items():
+                    self.assertEqual(hashlib.sha256(z.read(name)).hexdigest(),info["sha256"])
+                    self.assertEqual(len(z.read(name)),info["bytes"])
+
+    def test_export_empty_archive_is_valid_and_does_not_create_database(self):
+        query={"start_ms":START,"end_ms":START+100,"status":"closed"}
+        bundle=service.export_bundle(ACCOUNT,query,self.archive)
+        self.assertFalse(self.path.exists())
+        with zipfile.ZipFile(io.BytesIO(bundle)) as z:
+            self.assertIsNone(z.testzip())
+            self.assertEqual(json.loads(z.read("trades.json")),[])
+            self.assertEqual(json.loads(z.read("manifest.json"))["counts"],
+                {"trades":0,"events":0,"configurations":0})
+            self.assertEqual(z.read("events.jsonl"),b"")
+
+    def test_exchange_fact_selection_preserves_nested_windows_gaps_and_boundaries(self):
+        trades=[
+            {"id":"outer","inst_id":"BTC-USDT-SWAP","open_ms":START+10,"close_ms":START+100,"order_ids":["exact"]},
+            {"id":"nested","inst_id":"BTC-USDT-SWAP","open_ms":START+20,"close_ms":START+30},
+            {"id":"later","inst_id":"BTC-USDT-SWAP","open_ms":START+200,"close_ms":START+300},
+            {"id":"holding","inst_id":"ETH-USDT-SWAP","open_ms":START+400,"close_ms":None},
+            {"id":"missing-open","inst_id":"SOL-USDT-SWAP","open_ms":None,"close_ms":START+50},
+        ]
+        historical_position=position(99)
+        trades.append({"id":lifecycle_id(historical_position),"inst_id":"BTC-USDT-SWAP",
+                       "open_ms":START+700,"close_ms":START+800})
+        query={"start_ms":START+1000,"end_ms":START+2000,"inst":"BTC"}
+        matches=service._exchange_fact_selector(trades,[{"order_id":"event-order"}],query,START+500)
+        cases=[
+            ("BTC",9,False),("BTC",10,True),("BTC",30,True),("BTC",90,True),
+            ("BTC",100,True),("BTC",101,False),("BTC",199,False),("BTC",200,True),
+            ("BTC",300,True),("BTC",301,False),("BTC",1000,True),("BTC",1999,True),
+            ("BTC",2000,False),("ETH",399,False),("ETH",400,True),("ETH",500,True),
+            ("ETH",501,False),("ETH",1000,False),("SOL",0,True),("SOL",51,False),
+        ]
+        for inst,offset,expected in cases:
+            with self.subTest(inst=inst,offset=offset):
+                row={"instId":inst+"-USDT-SWAP","ts":str(START+offset)}
+                self.assertEqual(matches("fills",row),expected)
+        self.assertTrue(matches("orders",{"ordId":"exact","instId":"OTHER","ts":"invalid"}))
+        self.assertTrue(matches("fills",{"ordId":"event-order","instId":"OTHER"}))
+        self.assertTrue(matches("positions-history",historical_position))
+        self.assertFalse(matches("fills",historical_position))
+        self.assertTrue(matches("bills",{"instId":"BTC-USDT-SWAP","uTime":str(START+90)}))
+        self.assertFalse(matches("bills",{"instId":"BTC-USDT-SWAP","ts":"invalid"}))
+        # A present ts takes precedence over uTime, matching the original export.
+        self.assertFalse(matches("bills",{"instId":"BTC-USDT-SWAP","ts":str(START+101),"uTime":str(START+90)}))
 
     def test_nearby_order_without_fill_is_not_misrepresented_as_exact(self):
         self.archive.raw(ACCOUNT,"positions-history",[position()])
@@ -207,6 +302,30 @@ class AnalysisTests(unittest.TestCase):
         self.assertNotIn("abc-secret-123",text)
         self.assertNotIn("sk-abcdefghijklm1234",text)
         self.assertEqual(out["max_tokens"],4096)
+
+    def test_redaction_prefilters_preserve_regex_results_in_unicode_prompts(self):
+        samples = [
+            "行情分析：" + "价格=100，成交量:500；" * 2000,
+            "Authorization: Bearer value-123; next",
+            "api-key = 'value-123'\nsecret_key: value-456",
+            "APİ_KEY=value-123 apıkey=value-456",
+            "ſecret_key=value-123 paſſword=value-456",
+            "ACCESS_TOKEN: value-123 refresh_token=value-456 session_token:value-789",
+            "HTTPS://user:password@example.com/path httpſ://user:pass@example.com",
+            "model=sk-1234567890abcdef short=sk-tiny",
+            "Bearer abc@example.com api_key='Bearer value'",
+            "password='sk-1234567890abcdef' https://user:pass@example.com",
+            "不含凭证的中文、emoji 📈 和 İ ı ſ K",
+        ]
+        for text in samples:
+            expected = re.sub(r"(?i)(Bearer\s+)[^\s\"'<>]+", r"\1[REDACTED]", text)
+            expected = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}", "[REDACTED]", expected)
+            expected = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[REDACTED]@", expected)
+            expected = re.sub(
+                r"(?i)((?:api[_-]?key|secret[_-]?key|passphrase|authorization|password|access_token|refresh_token|session_token)[\"']?\s*[:=]\s*[\"']?)[^\s,\"'\n}]+",
+                r"\1[REDACTED]", expected)
+            with self.subTest(prefix=text[:50]):
+                self.assertEqual(sanitize(text,secrets=set()),expected)
 
     def test_old_sqlite_history_is_preserved_without_claiming_current_account(self):
         import sqlite3

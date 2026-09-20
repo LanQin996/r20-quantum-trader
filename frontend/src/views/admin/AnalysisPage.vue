@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Download, RefreshCw, GitCompareArrows } from 'lucide-vue-next';
-import { get, download } from '../../api/http';
+import { get, post, del, HttpError } from '../../api/http';
 import { useI18n } from '../../composables/useI18n';
 import { useToast } from '../../composables/useToast';
 import PageHeader from '../../components/admin/PageHeader.vue';
@@ -22,6 +22,13 @@ const toast = useToast();
 const api = '/api/v1/admin/analysis';
 const summary = ref<RecordData | null>(null);
 const loading = ref(false), exporting = ref(false), error = ref('');
+interface ExportJob {
+  id: string; state: 'running' | 'cancelling' | 'ready' | 'failed' | 'cancelled';
+  stage: string; completed: number; total: number; bytes: number; error: string;
+}
+const exportJob = ref<ExportJob | null>(null), exportError = ref(''), downloading = ref(false);
+const exportStorageKey = 'r20.analysis.export';
+let exportTimer: ReturnType<typeof setTimeout> | undefined, disposed = false;
 const tab = ref('overview');
 const bjToday = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
 const startDate = ref(new Date(Date.parse(bjToday) - 29 * 86400000).toISOString().slice(0, 10));
@@ -164,11 +171,85 @@ const differences = computed(() => {
   const a = flatten(leftConfig.value.body), b = flatten(rightConfig.value.body);
   return Array.from(new Set([...Object.keys(a), ...Object.keys(b)])).sort().filter(k => a[k] !== b[k]).map(key => ({ key, before: a[key] ?? '—', after: b[key] ?? '—' }));
 });
+function rememberExport(id: string | null) {
+  try {
+    if (id) sessionStorage.setItem(exportStorageKey, id);
+    else sessionStorage.removeItem(exportStorageKey);
+  } catch { /* Storage may be unavailable in private browsing. */ }
+}
+const exportProgress = computed(() => {
+  const job = exportJob.value;
+  if (!job) return '';
+  const stage = job.stage.startsWith('facts.') ? 'facts' : job.stage;
+  const label = tr('exportStage_' + stage);
+  return label + (job.total ? ` · ${job.completed.toLocaleString()} / ${job.total.toLocaleString()}`
+    : job.completed ? ` · ${job.completed.toLocaleString()}` : '');
+});
+async function downloadExport() {
+  if (!exportJob.value || downloading.value) return;
+  downloading.value = true;
+  try {
+    const result = await post<{ url: string }>(api + '/exports/' + exportJob.value.id + '/download');
+    if (disposed) return;
+    const link = document.createElement('a');
+    link.href = result.url;
+    link.download = 'r20-analysis-' + bjToday + '.zip';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    try { sessionStorage.setItem(exportStorageKey + '.downloaded', exportJob.value.id); } catch { /* optional */ }
+    exportError.value = '';
+    toast.ok(tr('downloadStarted'));
+  } catch (e) { exportError.value = e instanceof Error ? e.message : String(e); }
+  finally { downloading.value = false; }
+}
+function scheduleExportPoll(id: string) {
+  if (!disposed) exportTimer = setTimeout(() => { void pollExport(id); }, 1500);
+}
+async function pollExport(id: string) {
+  try {
+    const job = await get<ExportJob>(api + '/exports/' + id);
+    if (disposed || exportJob.value?.id !== id) return;
+    exportJob.value = job;
+    exportError.value = '';
+    exporting.value = job.state === 'running' || job.state === 'cancelling';
+    if (exporting.value) scheduleExportPoll(id);
+    else if (job.state === 'ready') {
+      let downloaded = false;
+      try { downloaded = sessionStorage.getItem(exportStorageKey + '.downloaded') === job.id; } catch { /* optional */ }
+      if (!downloaded) await downloadExport();
+    }
+    else if (job.state === 'failed') exportError.value = tr(job.error === 'disk_full' ? 'exportDiskFull' : 'exportFailed');
+  } catch (e) {
+    if (disposed) return;
+    exportError.value = e instanceof Error ? e.message : String(e);
+    if (e instanceof HttpError && [401, 403, 404].includes(e.status)) {
+      exporting.value = false;
+      exportJob.value = null;
+      rememberExport(null);
+    } else scheduleExportPoll(id);
+  }
+}
 async function exportAll() {
-  if (!applied.value) return;
+  if (!applied.value || exporting.value) return;
+  clearTimeout(exportTimer);
   exporting.value = true;
-  try { await download(api + '/export?' + applied.value, 'r20-analysis-' + bjToday + '.zip'); toast.ok(tr('exported')); }
-  catch (e) { toast.err(String(e)); } finally { exporting.value = false; }
+  exportError.value = '';
+  try {
+    const job = await post<ExportJob>(api + '/exports?' + applied.value);
+    rememberExport(job.id);
+    if (disposed) return;
+    exportJob.value = job;
+    await pollExport(job.id);
+  } catch (e) {
+    exporting.value = false;
+    exportError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+async function cancelExport() {
+  if (!exportJob.value || exportJob.value.state !== 'running') return;
+  try { exportJob.value = await del<ExportJob>(api + '/exports/' + exportJob.value.id); }
+  catch (e) { exportError.value = e instanceof Error ? e.message : String(e); }
 }
 type PlotPoint = { time_ms: number; net: number; drawdown: number; trade_id: string; x: number; y: number; dy: number };
 const hoveredPoint = ref<PlotPoint | null>(null);
@@ -189,7 +270,18 @@ watch(tab, value => {
   if (value === 'attribution') void loadGroups();
   if (value === 'execution') void changePage('event', eventPage.value);
 });
-onMounted(() => apply());
+onMounted(() => {
+  void apply();
+  try {
+    const id = sessionStorage.getItem(exportStorageKey);
+    if (id) {
+      exportJob.value = { id, state: 'running', stage: 'reading', completed: 0, total: 0, bytes: 0, error: '' };
+      exporting.value = true;
+      void pollExport(id);
+    }
+  } catch { /* The export remains usable without browser storage. */ }
+});
+onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
 </script>
 
 <template>
@@ -200,6 +292,18 @@ onMounted(() => apply());
         <button class="btn btn-primary btn-sm" :disabled="exporting || loading || !applied" @click="exportAll"><Download />{{ exporting ? tr('exporting') : tr('export') }}</button>
       </template>
     </PageHeader>
+    <div v-if="exportJob || exportError" class="card p-3 space-y-2" role="status" aria-live="polite">
+      <div class="flex flex-wrap items-center gap-3 text-sm">
+        <span v-if="exporting">{{ exportJob?.state === 'cancelling' ? tr('exportCancelling') : exportProgress }}</span>
+        <span v-else-if="exportJob?.state === 'ready'">{{ tr('exportReady') }} · {{ format(exportJob.bytes / 1048576) }} MB</span>
+        <span v-else-if="exportJob?.state === 'cancelled'">{{ tr('exportCancelled') }}</span>
+        <button v-if="exportJob?.state === 'running'" class="btn btn-ghost btn-sm" @click="cancelExport">{{ tr('exportCancel') }}</button>
+        <button v-if="exportJob?.state === 'ready'" class="btn btn-primary btn-sm" :disabled="downloading" @click="downloadExport">{{ tr('exportDownloadAgain') }}</button>
+      </div>
+      <p v-if="exporting" class="text-xs t-faint">{{ tr('exportBackgroundHint') }}</p>
+      <p v-if="exportJob?.state === 'ready'" class="text-xs t-faint">{{ tr('exportReadyHint') }}</p>
+      <p v-if="exportError" class="text-xs down">{{ exportError }}</p>
+    </div>
     <form class="card analysis-filters" :aria-label="tr('apply')" :aria-busy="loading" @submit.prevent="apply()">
       <label class="analysis-account">{{ tr('account') }}<select v-model="account" class="field" :aria-label="tr('account')"><option v-if="!account" value="">{{ tr('currentAccount') }}</option><option v-for="a in accounts" :key="a" :value="a">{{ a }}</option></select></label>
       <label>{{ tr('start') }}<input v-model="startDate" type="date" required class="field" /></label>

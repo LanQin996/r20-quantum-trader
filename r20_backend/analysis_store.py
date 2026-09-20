@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS analysis_raw (
  account TEXT NOT NULL, source TEXT NOT NULL, id TEXT NOT NULL, occurred_ms INTEGER NOT NULL,
  body_hash TEXT NOT NULL, PRIMARY KEY(account,source,id)
 );
+CREATE INDEX IF NOT EXISTS analysis_raw_time ON analysis_raw(account, source, occurred_ms);
 CREATE TABLE IF NOT EXISTS analysis_sync (
  account TEXT NOT NULL, source TEXT NOT NULL, body_json TEXT NOT NULL,
  PRIMARY KEY(account,source)
@@ -108,10 +109,21 @@ def sanitize(value: Any, secrets: set[str] | None = None) -> Any:
         return [sanitize(v,secrets) for v in value]
     if isinstance(value, str):
         for secret in sorted(secrets,key=len,reverse=True): value = value.replace(secret,REDACTED)
-        value = re.sub(r"(?i)(Bearer\s+)[^\s\"'<>]+",r"\1[REDACTED]",value)
-        value = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}",REDACTED,value)
-        value = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[REDACTED]@", value)
-        value = re.sub(r"(?i)((?:api[_-]?key|secret[_-]?key|passphrase|authorization|password|access_token|refresh_token|session_token)[\"']?\s*[:=]\s*[\"']?)[^\s,\"'\n}]+",r"\1[REDACTED]",value)
+        # Long model prompts usually contain none of these patterns. Cheap
+        # necessary-condition checks avoid four full regex scans per string.
+        # Python IGNORECASE also matches dotted/dotless I and long S; preserve
+        # those matches in the prefilter instead of assuming ASCII text.
+        folded = value.casefold().replace("\u0131","i").replace("i\u0307","i")
+        if "bearer" in folded:
+            value = re.sub(r"(?i)(Bearer\s+)[^\s\"'<>]+",r"\1[REDACTED]",value)
+        if "sk-" in value:
+            value = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}",REDACTED,value)
+        if "://" in value and "@" in value:
+            value = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[REDACTED]@", value)
+        if (":" in value or "=" in value) and any(marker in folded for marker in (
+            "api", "secret", "passphrase", "authorization", "password", "access_token", "refresh_token", "session_token"
+        )):
+            value = re.sub(r"(?i)((?:api[_-]?key|secret[_-]?key|passphrase|authorization|password|access_token|refresh_token|session_token)[\"']?\s*[:=]\s*[\"']?)[^\s,\"'\n}]+",r"\1[REDACTED]",value)
         return value
     if isinstance(value,float) and (value != value or abs(value)==float("inf")): return None
     if isinstance(value,(int,float,bool)) or value is None: return value
@@ -203,6 +215,33 @@ class Archive:
             with self.connect() as reader:
                 return self.raw_rows(account,source,reader) if reader else []
         return [self.read_blob(con,r[0]) for r in con.execute("SELECT body_hash FROM analysis_raw WHERE account=? AND source=? ORDER BY occurred_ms",(account,source))]
+
+    def iter_raw_rows(self, account: str, source: str, con):
+        """Decode one exchange record at a time, with no per-record SQL lookup."""
+        if con is None:
+            return
+        rows = con.execute("""SELECT b.content FROM analysis_raw r
+            LEFT JOIN analysis_blobs b ON b.hash=r.body_hash
+            WHERE r.account=? AND r.source=? ORDER BY r.occurred_ms""", (account,source))
+        for row in rows:
+            if row[0] is None:
+                raise ValueError("分析归档正文缺失")
+            yield json.loads(zlib.decompress(row[0]))
+
+    def iter_event_bodies(self, events: list[dict], con):
+        """Batch compressed blob reads; retain only one decoded event body."""
+        for offset in range(0,len(events),128):
+            batch = events[offset:offset+128]
+            keys = list({e["body_hash"] for e in batch})
+            placeholders = ",".join("?" for _ in keys)
+            blobs = {r[0]:r[1] for r in con.execute(
+                f"SELECT hash,content FROM analysis_blobs WHERE hash IN ({placeholders})", keys)}
+            for event in batch:
+                data = blobs.get(event["body_hash"])
+                if data is None:
+                    raise ValueError("分析归档正文缺失")
+                yield {**{k:v for k,v in event.items() if k!="body_hash"},
+                       "body":json.loads(zlib.decompress(data))}
 
     def sync_state(self, account: str, source: str, value: dict | None = None) -> dict:
         with self.connect(value is not None) as con:

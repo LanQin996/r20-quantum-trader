@@ -1,12 +1,9 @@
 """Authenticated analysis queries and deterministic, self-contained exports."""
 from __future__ import annotations
-import csv
+from bisect import bisect_right
 from datetime import datetime, timedelta
-import hashlib
 import io
-import json
-import zipfile
-from r20_backend.analysis_store import Archive, BJ, now_ms, timestamp_ms, sanitize, time_text, digest
+from r20_backend.analysis_store import Archive, BJ, now_ms, timestamp_ms, sanitize, sensitive_values, digest, lifecycle_id
 from r20_backend.analysis_metrics import summarize, breakdown, VERSION, decimal
 from r20_backend.analysis_capture import saved_configuration, fault_status, identity
 
@@ -143,98 +140,42 @@ def configuration_detail(account: str, config_id: str, archive=None):
         out = dict(r); out["body"]=archive.read_blob(con,out.pop("body_hash"))
         return sanitize(out)
 
+def _exchange_fact_selector(trades: list[dict], events: list[dict], query: dict, cutoff: int):
+    """Index holding windows once instead of scanning all trades for every fact."""
+    order_ids = {v for t in trades for v in t.get("order_ids",[])}|{e["order_id"] for e in events if e["order_id"]}
+    position_ids = {t["id"] for t in trades}
+    windows = {}
+    for t in trades:
+        windows.setdefault(t.get("inst_id"),[]).append((t.get("open_ms") or 0,t.get("close_ms") or cutoff))
+    indexed = {}
+    for inst, spans in windows.items():
+        starts, ends = [], []
+        for start, end in sorted(spans):
+            starts.append(start)
+            # Prefix maxima preserve nested/overlapping windows as well as gaps.
+            ends.append(max(ends[-1],end) if ends else end)
+        indexed[inst] = starts, ends
+
+    def matches(source: str, row: dict) -> bool:
+        if source=="positions-history" and lifecycle_id(row) in position_ids: return True
+        if str(row.get("ordId") or "") in order_ids: return True
+        stamp = timestamp_ms(row.get("ts") or row.get("uTime")) or 0
+        if query["start_ms"] <= stamp < query["end_ms"] and (
+            not query.get("inst") or str(row.get("instId","")).replace("-USDT-SWAP","")==query["inst"]
+        ):
+            return True
+        spans = indexed.get(row.get("instId"))
+        if spans is None: return False
+        starts, ends = spans
+        index = bisect_right(starts,stamp)-1
+        return index >= 0 and stamp <= ends[index]
+
+    return matches
+
+
 def export_bundle(account: str, query: dict, archive=None) -> bytes:
-    archive = archive or Archive()
-    cutoff = now_ms()
-    with archive.connect() as con:
-        if con:
-            con.execute("SELECT COUNT(*) FROM analysis_events").fetchone()
-        cutoff = now_ms()
-        trades = archive.trades(account,query,con) if con else []
-        events = selected_events(archive.events(account,con),trades,query) if con else []
-        configs = archive.configurations(account,con) if con else []
-        used = {e["config_id"] for e in events if e["config_id"]}|{t["config_id"] for t in trades if t.get("config_id")}
-        # Include most recently observed runtime snapshots, separately from trade-time configs.
-        runtime = {}
-        for e in archive.events(account,con) if con else []:
-            if e["kind"]=="cycle.start" and e["config_id"]:
-                cfg = next((c for c in configs if c["id"]==e["config_id"]),None)
-                if cfg: runtime[cfg["process"]]={"config_id":cfg["id"],"last_observed_ms":e["observed_ms"],"pid":cfg["pid"]}
-        latest = {}
-        for e in archive.events(account,con) if con else []:
-            if e["kind"] in ("account.snapshot", "execution.cycle_state"):
-                latest[e["kind"]] = {**{k:v for k,v in e.items() if k!="body_hash"},
-                    "body":archive.read_blob(con,e["body_hash"])}
-        used |= {e["config_id"] for e in latest.values() if e["config_id"]}
-        used |= {v["config_id"] for v in runtime.values()}
-        config_bodies = [{**{k:v for k,v in c.items() if k!="body_hash"},"body":archive.read_blob(con,c["body_hash"])} for c in configs if c["id"] in used]
-        event_bodies = [{**{k:v for k,v in e.items() if k!="body_hash"},"body":archive.read_blob(con,e["body_hash"])} for e in events]
-        # Exchange facts are needed to independently reconcile cost and fill allocations.
-        order_ids = {v for t in trades for v in t.get("order_ids",[])}|{e["order_id"] for e in events if e["order_id"]}
-        position_ids = {t["id"] for t in trades}
-        from r20_backend.analysis_store import lifecycle_id
-        raw = {}
-        for source in ("positions-history","orders","fills","bills"):
-            records = archive.raw_rows(account,source,con) if con else []
-            raw[source] = [r for r in records if
-                (source=="positions-history" and lifecycle_id(r) in position_ids) or
-                (str(r.get("ordId") or "") in order_ids) or
-                any(t.get("inst_id")==r.get("instId") and (t.get("open_ms") or 0)
-                    <= (timestamp_ms(r.get("ts") or r.get("uTime")) or 0)
-                    <= (t.get("close_ms") or cutoff) for t in trades) or
-                (query["start_ms"] <= (timestamp_ms(r.get("ts") or r.get("uTime")) or 0) < query["end_ms"]
-                 and (not query.get("inst") or str(r.get("instId","")).replace("-USDT-SWAP","")==query["inst"]))]
-        health = archive.health(account,con) if con else archive.health(account)
-        stats = summarize(trades)
-        execution = execution_summary(window_events(events,query), lambda key: archive.read_blob(con, key)) if con else {}
-    current = configuration_detail(account,"current",archive)
-    summary = {"statistics":stats,"filters":query,"health":health,"runtime_observations":runtime,"account":account,
-               "execution":execution}
-    files = {}
-    def add_json(name,body):
-        files[name] = json.dumps(sanitize(body),ensure_ascii=False,indent=2,allow_nan=False).encode("utf-8")
-    add_json("summary.json",summary)
-    add_json("trades.json",trades)
-    add_json("configurations.json",config_bodies)
-    add_json("current_configuration.json",current)
-    add_json("latest_runtime_state.json", {"observations":latest,"note":"账户最近一次归档观测，非导出时实时交易所查询"})
-    add_json("exchange_facts.json",raw)
-    files["events.jsonl"] = ("\n".join(json.dumps(sanitize(e),ensure_ascii=False,allow_nan=False) for e in event_bodies)+("\n" if events else "")).encode("utf-8")
-    columns = ["id","inst","side","status","open_time","close_time","open_px","close_px","sz","lever",
-               "gross_pnl","fee","funding_fee","other_settlement","net_pnl","known_net_pnl","cost_complete",
-               "cost_basis","exit_reason","exit_evidence","decision_id","config_id","confidence","entry_deviation_bps"]
-    buf = io.StringIO(newline="")
-    writer = csv.DictWriter(buf,fieldnames=columns,extrasaction="ignore",lineterminator="\n")
-    writer.writeheader()
-    for row in sanitize(trades):
-        csv_row = {k:row.get(k) for k in columns}
-        for key,value in csv_row.items():
-            if isinstance(value,str) and value.startswith(("=","+","-","@")) and decimal(value) is None:
-                csv_row[key]="'"+value
-        writer.writerow(csv_row)
-    files["trades.csv"] = ("\ufeff"+buf.getvalue()).encode("utf-8")
-    rate = f'{stats["win_rate"]:.2f}%' if stats["win_rate"] is not None else "不可计算"
-    files["README.md"] = (
-        "# R20 交易复盘分析包\n\n"
-        f"账户匿名标识：{account}。时区：Asia/Shanghai。归档截止：{time_text(cutoff)}。\n\n"
-        f"已平仓 {stats['closed_count']} 笔；成本完整 {stats['sample_count']} 笔；成本不完整 {stats['incomplete_count']} 笔。净胜率：{rate}。\n\n"
-        "summary.json 提供口径与覆盖状态；trades.csv/JSON 是全部筛选交易；events.jsonl 按 ID 关联请求、裁决和执行，包含区间外必要证据。\n\n"
-        "configurations.json 是事件发生时采集的历史配置；current_configuration.json 是导出时保存值，不能用于替代历史值。"
-        "runtime_observations 只表示最近观测，不证明进程现在仍运行。\n\n"
-        "净胜率=净盈利笔数/成本完整的已平仓笔数，保本计入分母。利润因子=盈利总额/亏损总额绝对值；"
-        "实际盈亏比=平均盈利/平均亏损绝对值。无亏损或无样本时相应比率为 null。\n\n"
-        "回撤是已实现收益曲线的绝对回撤，不是账户净值回撤。置信度为模型评分。极值来自巡检采样。"
-        "未知费用不按零处理，推断退出原因不当成已确认事实。分组差异不直接证明因果，未成交订单不计算假设盈亏。\n\n"
-        "历史覆盖受交易所保留期与采集起点限制。所有文本为 UTF-8，凭证已脱敏。"
-        "分析时将事实、假设和待验证建议分开，并引用交易及事件 ID。\n"
-    ).encode("utf-8")
-    manifest = {"format":"r20-analysis-bundle","version":1,"statistics_version":VERSION,"account":account,
-                "timezone":"Asia/Shanghai","filters":query,"archive_cutoff_ms":cutoff,
-                "current_configuration_captured_ms":current["captured_ms"],
-                "counts":{"trades":len(trades),"events":len(events),"configurations":len(config_bodies)},
-                "files":{name:{"sha256":hashlib.sha256(data).hexdigest(),"bytes":len(data)} for name,data in files.items()}}
-    add_json("manifest.json",manifest)
+    """Compatibility entry point; HTTP exports use write_bundle with a disk file."""
+    from r20_backend.analysis_export import write_bundle
     out = io.BytesIO()
-    with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED) as bundle:
-        for name,data in files.items(): bundle.writestr(name,data)
+    write_bundle(account, query, out, archive)
     return out.getvalue()

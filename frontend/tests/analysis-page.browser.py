@@ -41,6 +41,7 @@ def run():
     )
     requests = []
     errors = []
+    export_state = {"starts": 0, "ready": False, "cancelled": False}
     def mock_api(route):
         url = urlparse(route.request.url)
         query = parse_qs(url.query)
@@ -92,9 +93,24 @@ def run():
             current = url.path.endswith("/current")
             data = {**CONFIG, "id": "current" if current else CONFIG["id"],
                     "body": {"risk_limit": 20 if current else 10}}
-        elif url.path == root + "/export":
-            route.fulfill(status=200, content_type="application/zip", body=b"PK\x05\x06" + b"\0" * 18)
+        elif url.path == root + "/exports":
+            export_state["starts"] += 1
+            export_state.update(ready=False, cancelled=False)
+            data = {"id": f"fixture-export-{export_state['starts']}", "state": "running",
+                    "stage": "events", "completed": 128, "total": 50000, "bytes": 1000, "error": ""}
+        elif url.path.endswith("/download") and "/exports/" in url.path:
+            data = {"url": url.path.removesuffix("/download") + "/file"}
+        elif url.path.endswith("/file") and "/exports/" in url.path:
+            route.fulfill(status=200, content_type="application/zip",
+                          headers={"Content-Disposition": 'attachment; filename="r20-analysis.zip"'},
+                          body=b"PK\x05\x06" + b"\0" * 18)
             return
+        elif "/exports/" in url.path:
+            if route.request.method == "DELETE":
+                export_state["cancelled"] = True
+            state = "cancelled" if export_state["cancelled"] else "ready" if export_state["ready"] else "running"
+            data = {"id": url.path.rsplit("/", 1)[1], "state": state, "stage": "events",
+                    "completed": 128, "total": 50000, "bytes": 1234567, "error": ""}
         else:
             data = {}
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
@@ -161,9 +177,21 @@ def run():
             expect(form).to_have_attribute("aria-busy", "false")
             assert any(path.endswith("/summary") and query.get("account") == ["okx:demo:browser-fixture"]
                        and query.get("inst") == ["SOL"] for path, query in requests)
+            page.get_by_role("button", name="导出完整分析包").click()
+            expect(page.get_by_text("正在写入事件证据", exact=False)).to_be_visible()
+            page.reload()
+            expect(page.get_by_text("正在写入事件证据", exact=False)).to_be_visible()
+            assert export_state["starts"] == 1
             with page.expect_download() as downloaded:
-                page.get_by_role("button", name="导出完整分析包").click()
+                export_state["ready"] = True
+                page.get_by_role("button", name="重新下载").wait_for()
             assert downloaded.value.suggested_filename.endswith(".zip")
+            with page.expect_download():
+                page.get_by_role("button", name="重新下载").click()
+            assert export_state["starts"] == 1, "Retrying a download must not regenerate the bundle"
+            page.get_by_role("button", name="导出完整分析包").click()
+            page.get_by_role("button", name="取消导出").click()
+            expect(page.get_by_text("导出已取消", exact=True)).to_be_visible()
             page.get_by_role("tab", name="收益总览", exact=True).click()
 
             for width, theme in [(1440, "dark"), (768, "light"), (390, "light")]:
@@ -178,7 +206,8 @@ def run():
             browser.close()
         print(json.dumps({"result": "passed", "checks": [
             "desktop/tablet/mobile layout", "light/dark themes", "lazy attribution/execution tabs",
-            "pagination", "trade/event drawers", "configuration comparison", "filters", "export",
+            "pagination", "trade/event drawers", "configuration comparison", "filters",
+            "background export progress", "resume after reload", "native download and retry", "cancel export",
         ], "screenshots": str(OUTPUT)}, ensure_ascii=False))
     finally:
         server.terminate()
