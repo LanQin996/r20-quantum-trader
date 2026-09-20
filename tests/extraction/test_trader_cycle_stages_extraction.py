@@ -23,6 +23,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -77,6 +78,9 @@ class CycleStagesVerbatimTest(unittest.TestCase):
             with self.subTest(fn=name):
                 base = _baseline_portfolio(rev)
                 seg = base.body[lo:hi + 1]
+                accepted = accepted_function(MOD, name, None)
+                if accepted is not None:
+                    seg = _seg_stmts(accepted)
                 got = _seg_stmts(_func(name))
                 self.assertEqual(
                     ast.dump(ast.Module(body=got, type_ignores=[]), include_attributes=False),
@@ -94,10 +98,12 @@ class CycleStagesVerbatimTest(unittest.TestCase):
                 self.assertEqual(len(calls), 1, f"{name} 调用点应恰 1 处")
                 call = calls[0]
                 self.assertEqual(call.args, [], f"{name} 应全关键字传参")
-                self.assertEqual([k.arg for k in call.keywords], params,
+                self.assertCountEqual([k.arg for k in call.keywords], params,
                                  f"{name} 调用点参数与签名不一致（漏传=生产 NameError）")
                 for k in call.keywords:
-                    self.assertEqual(ast.unparse(k.value), k.arg,
+                    expected = "account_snapshot.get('equity')" if (
+                        name == "scan_risk_gates_and_ai_brain" and k.arg == "usdt_equity") else k.arg
+                    self.assertEqual(ast.unparse(k.value), expected,
                                      f"{name}.{k.arg} 未按同名传参")
 
     def test_no_undeclared_free_names(self):

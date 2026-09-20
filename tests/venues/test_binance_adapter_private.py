@@ -276,6 +276,11 @@ class BinanceExecutionAndProtectionTests(unittest.TestCase):
 
     def setUp(self):
         self.adapter = BinanceAdapter(environment="live")
+        pool = patch("r20_backend.execution_router._load_venue_pool_soft", return_value={
+            "assets": ["BTC"], "dry_run": False,
+        })
+        pool.start()
+        self.addCleanup(pool.stop)
 
     def test_place_order_limit_and_market(self):
         api_key = "ak"

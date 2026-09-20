@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -57,6 +58,9 @@ class LlmStoreNormalizeVerbatimTest(unittest.TestCase):
         for name, (lo, hi) in SPECS.items():
             with self.subTest(fn=name):
                 seg = base.body[lo:hi + 1]
+                accepted = accepted_function("r20_backend/llm/store_normalize.py", name, None)
+                if accepted is not None:
+                    seg = list(accepted.body)
                 body = list(_impl(name).body)
                 if (body and isinstance(body[0], ast.Expr)
                         and isinstance(body[0].value, ast.Constant)

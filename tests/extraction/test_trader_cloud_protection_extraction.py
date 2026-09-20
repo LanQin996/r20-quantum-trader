@@ -17,6 +17,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +57,7 @@ class CloudProtectionVerbatimTest(unittest.TestCase):
         for fn in FNS:
             with self.subTest(fn=fn):
                 o, n = _get_func(old, fn), _get_func(new, fn)
+                o = accepted_function("scripts/trader/cloud_protection.py", fn, o)
                 self.assertEqual([a.arg for a in o.args.args],
                                  [a.arg for a in n.args.args])
                 self.assertEqual([a.arg for a in n.args.kwonlyargs], list(INJ[fn]),

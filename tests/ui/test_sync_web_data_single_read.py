@@ -176,75 +176,47 @@ class SingleReadPerCallTest(unittest.TestCase):
 
 
 class EndToEndSingleReadTest(unittest.TestCase):
-    """⚠️ 端到端证明：一次 `generate_trading_data()` 调用里，
-    两个数据文件各只被读 **一次**。
-
-    ⚠️ 安全设计：**放行读、硬拦写**。
-
-    本环境里 `tests/config_sandbox.isolate_config()` **不覆盖**
-    `scripts/sync_web_data`（它只重定向白名单模块的大写路径常量），
-    所以直接调用会写**生产** `data/trading_data.json`。
-    故本用例不用隔离目录，而是把 `open` 换成"读放行、写一律抛
-    `PermissionError`"的守卫 —— 既拿到结论，又保证绝不触碰生产数据。
-
-    探针实测（2026-09-15）：`snapshots.json` 1 次、`trading_ledger.json` 1 次，
-    被拦下的写入只有 `trading_data.json.tmp`（即函数跑到了最后一步才被拦）。
-    """
+    """Exercise a complete cache generation using only explicit temporary fixtures."""
 
     def test_generate_reads_each_data_file_exactly_once(self):
-        # ⚠️ 第七十九刀：本用例原先**隐式依赖真实凭证** —— 非离线时
-        # `env.configured=True` ⇒ generate **拿 .env 真 key 打 www.okx.com
-        # ×4/次**（探针实测），真实失败才 fail-soft 走到文件读取；
-        # 离线时 NotConfigured 提前 raise ⇒ 读 0（上轮的 skip 是权宜）。
-        # 现在把 fetch 层显式压成 None：fail-soft 语义下流程**确定地**
-        # 抵达 L215/L221 的读取点 ⇒ 非离线零外呼、离线也从 skip 变真测。
-        prod = pathlib.Path(sync_web_data.DATA_DIR).resolve()
-        snaps = str(pathlib.Path(sync_web_data.SNAPSHOTS_JSON_FILE))
-        led = str(pathlib.Path(sync_web_data.LEDGER_JSON_FILE))
-        # 先确认"我们面对的是生产目录"—— 若哪天它变成临时目录，本用例的安全
-        # 假设就不再成立，应当显式知道（而不是静默地继续）。
-        self.assertTrue(str(prod).endswith("/data/dsh/home/r20/data"),
-                        f"DATA_DIR 不是预期中的生产目录: {prod}")
-
-        real_open, seen, blocked = open, {}, []
-
-        def guard_open(f, mode="r", *a, **k):
-            fs = str(f)
-            if fs in (snaps, led):
-                seen[fs] = seen.get(fs, 0) + 1
-            if any(c in str(mode) for c in ("w", "a", "x", "+")):
-                blocked.append(fs)
-                raise PermissionError("单读测试拦截写入: " + fs)
-            return real_open(f, mode, *a, **k)
-
-        sync_web_data._JSON_CACHE.clear()
-        self.addCleanup(sync_web_data._JSON_CACHE.clear)
-        # fetch 层压成 None（fail-soft 语义下继续走到文件读取），
-        # 环境标成 configured（不走 NotConfigured 提前 raise）——零外呼。
         import types
-        _env = types.SimpleNamespace(configured=True)
-        with patch.object(sync_web_data, "open", guard_open, create=True), \
-             patch.object(sync_web_data.okx_runtime, "current_environment", lambda: _env), \
-             patch.object(sync_web_data.okx_rest, "balances", lambda *a, **k: None), \
-             patch.object(sync_web_data.okx_rest, "positions", lambda *a, **k: None), \
-             patch.object(sync_web_data.okx_rest, "pending_orders", lambda *a, **k: None), \
-             patch.object(sync_web_data.okx_rest, "bills", lambda *a, **k: None), \
-             patch.object(sync_web_data, "fetch_tickers_bulk", lambda *a, **k: []):
-            try:
-                sync_web_data.generate_trading_data()
-            except PermissionError:
-                pass      # 走到写盘那一步被我们拦下，属预期
-            except Exception:
-                pass      # 凭证未配置等 fail-closed，同样不影响读取次数结论
+        from r20_backend.analysis_store import Archive
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snaps, ledger = root / "snapshots.json", root / "trading_ledger.json"
+            output = root / "trading_data.json"
+            snaps.write_text('[{"total_eq": 100}]', encoding="utf-8")
+            ledger.write_text('[]', encoding="utf-8")
+            seen = {}
+            real_open = open
 
-        self.assertNotIn(str(prod / "trading_data.json"), blocked,
-                         "本用例绝不允许写生产 trading_data.json")
-        for path in (snaps, led):
-            if os.path.exists(path):
-                with self.subTest(f=os.path.basename(path)):
-                    self.assertEqual(seen.get(path, 0), 1,
-                                     f"{os.path.basename(path)} 被读了 "
-                                     f"{seen.get(path, 0)} 次，应为 1")
+            def count_open(file, mode="r", *args, **kwargs):
+                path = Path(file)
+                if path in (snaps, ledger) and mode == "r":
+                    seen[path] = seen.get(path, 0) + 1
+                return real_open(file, mode, *args, **kwargs)
+
+            sync_web_data._JSON_CACHE.clear()
+            self.addCleanup(sync_web_data._JSON_CACHE.clear)
+            env = types.SimpleNamespace(configured=True, mode="demo", fingerprint="fixture")
+            with patch.multiple(sync_web_data, DATA_DIR=str(root), DATA_JSON_PATH=str(output),
+                                SNAPSHOTS_JSON_FILE=str(snaps), LEDGER_JSON_FILE=str(ledger),
+                                LOG_FILE=str(root / "absent.log"), TARGET_INSTRUMENTS=[]), \
+                 patch.object(sync_web_data, "open", count_open, create=True), \
+                 patch.object(sync_web_data.okx_runtime, "current_environment", return_value=env), \
+                 patch.object(sync_web_data.okx_rest, "balances", return_value=None), \
+                 patch.object(sync_web_data.okx_rest, "positions", return_value=None), \
+                 patch.object(sync_web_data.okx_rest, "pending_orders", return_value=None), \
+                 patch.object(sync_web_data.okx_rest, "bills", return_value=None), \
+                 patch.object(sync_web_data, "fetch_tickers_bulk", return_value={}), \
+                 patch.object(Archive, "trades", return_value=[]), \
+                 patch("r20_backend.analysis_capture.identity", return_value="fixture"):
+                sync_web_data.generate_trading_data()
+            self.assertTrue(output.exists(), "The generator must reach its final atomic write")
+            self.assertEqual(seen, {snaps: 1, ledger: 1})
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(result["snapshots"], [{"total_eq": 100}])
+            self.assertEqual(result["trades"], [])
 
 
 class NoRawDualReadTest(unittest.TestCase):

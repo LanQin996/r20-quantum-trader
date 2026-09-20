@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -210,7 +211,7 @@ class RiskConfigApiTests(unittest.TestCase):
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum", 5.0, 7.0), 6)
 
         sandbox_pool = Path(self.temp.name) / "instrument_pool.json"
-        sandbox_pool.write_text((ROOT / "data" / "instrument_pool.json").read_text(encoding="utf-8"), encoding="utf-8")
+        sandbox_pool.write_text(json.dumps(ip.DEFAULT_INSTRUMENTS, ensure_ascii=False), encoding="utf-8")
 
         with patch.object(ip, "POOL_FILE", sandbox_pool):
             headers = self.login("admin", "InitialAdmin123456")

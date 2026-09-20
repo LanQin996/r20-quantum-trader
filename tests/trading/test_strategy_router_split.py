@@ -36,6 +36,11 @@ PRE = "386f24b"                      # 本刀动工前最后提交（第九十�
 BASELINE = "r20_backend/routers/strategy.py"
 PKG = ROOT / "r20_backend" / "routers" / "strategy"
 INCLUDE_ORDER = ("council", "interceptors", "policy", "prompts")
+# Added by the v8.1 merge after the original route extraction.
+ADDED_ROUTES = [
+    ("/api/v1/admin/evolution/config", "GET", "get_evolution_config"),
+    ("/api/v1/admin/evolution/config", "PUT", "update_evolution_config"),
+]
 
 
 def _routes_in(node_src: str) -> list:
@@ -61,14 +66,15 @@ class StrategyRouterSplitTest(unittest.TestCase):
         got = []
         for name in INCLUDE_ORDER:
             got.extend(_routes_in((PKG / f"{name}.py").read_text(encoding="utf-8")))
-        self.assertEqual(got, want,
+        self.assertEqual(got, want + ADDED_ROUTES,
                          "路由表（路径/方法/处理器名/顺序）与拆分前不一致")
 
     def test_live_openapi_route_surface_unchanged(self):
         from r20_backend.app import app
         spec = app.openapi()
         pref = ("/api/v1/admin/council", "/api/v1/admin/interceptor",
-                "/api/v1/admin/policy", "/api/v1/prompt-library", "/api/v1/admin/prompt")
+                "/api/v1/admin/policy", "/api/v1/prompt-library", "/api/v1/admin/prompt",
+                "/api/v1/admin/evolution/config")
         live, tags = set(), {}
         for path, ops in spec["paths"].items():
             if not any(path.startswith(p) for p in pref):
@@ -79,10 +85,11 @@ class StrategyRouterSplitTest(unittest.TestCase):
                 tags[t] = tags.get(t, 0) + 1
         r = subprocess.run(["git", "show", f"{PRE}:{BASELINE}"],
                            capture_output=True, text=True, cwd=str(ROOT))
-        want = {(p, m) for p, m, _ in _routes_in(r.stdout)}
+        self.assertEqual(r.returncode, 0, f"基线取不到：{r.stderr[:200]}")
+        want = {(p, m) for p, m, _ in _routes_in(r.stdout) + ADDED_ROUTES}
         self.assertEqual(live, want, "线上接口面（路径×方法）与拆分前不一致")
-        self.assertEqual(len(live), 35)
-        self.assertEqual(tags, {("strategy",): 35},
+        self.assertEqual(len(live), 37)
+        self.assertEqual(tags, {("strategy",): 37},
                          "tags 必须恰好一处 ['strategy']（两处都加会重复）")
 
     def test_aggregator_include_order_is_documented_order(self):

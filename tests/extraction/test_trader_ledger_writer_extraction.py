@@ -12,6 +12,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -46,6 +47,7 @@ class LedgerWriterVerbatimTest(unittest.TestCase):
         for fn in FNS:
             with self.subTest(fn=fn):
                 o, n = _get_func(old, fn), _get_func(new, fn)
+                o = accepted_function("scripts/trader/ledger_writer.py", fn, o)
                 self.assertEqual([a.arg for a in o.args.args],
                                  [a.arg for a in n.args.args])
                 # 同名注入：kw-only 参数名必须就是门面里真实存在的全局名

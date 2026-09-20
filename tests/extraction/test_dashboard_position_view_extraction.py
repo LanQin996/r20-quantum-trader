@@ -26,6 +26,8 @@ import ast
 import random
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from r20_backend.dashboard_payload.position_view import collect_position_rows
 
@@ -114,8 +116,12 @@ def _legacy(pos_data, positions, trackers, *, load_instruments):
 def _both(pos_data, trackers=None):
     trackers = trackers if trackers is not None else {}
     a, b = [], []
-    ga = collect_position_rows(pos_data, a, trackers, load_instruments=lambda: INSTRUMENTS)
+    with patch("scripts.okx_runtime.current_environment",
+               return_value=SimpleNamespace(simulated=True, mode="demo")):
+        ga = collect_position_rows(pos_data, a, trackers, load_instruments=lambda: INSTRUMENTS)
     gb = _legacy(pos_data, b, trackers, load_instruments=lambda: INSTRUMENTS)
+    for row in b:
+        row.update(account_mode="DEMO", environment="demo")
     return a, ga, b, gb
 
 

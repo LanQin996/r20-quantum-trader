@@ -39,7 +39,7 @@ SUBMODULE = ROOT / "scripts" / "brain" / "prompt.py"
 
 # 只在子模块里存在、门面不应再有的实现体特征行
 _IMPL_ONLY_MARKERS = (
-    '- 15M K线(倒序12根 [O,H,L,C,V])',
+    '- 15M K线(已收盘，倒序12根 [O,H,L,C,V])',
     '严禁无差别照抄',
 )
 

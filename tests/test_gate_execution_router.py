@@ -43,6 +43,13 @@ def setUpModule():
                            ok=True, reason=None, checked_at="", source="cache"))
     _lp.start()
     _LISTING_PATCHES.append(_lp)
+    # These tests exercise mocked execution, independently of the host's
+    # fail-closed venue_routing.json defaults.
+    pool = patch.object(router, "_load_venue_pool_soft", return_value={
+        "assets": ["BTC"], "dry_run": False,
+    })
+    pool.start()
+    _LISTING_PATCHES.append(pool)
 
 
 _RESTORE_FN = None

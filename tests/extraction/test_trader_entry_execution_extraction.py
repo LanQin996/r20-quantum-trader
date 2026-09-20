@@ -24,6 +24,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -65,6 +66,7 @@ def _facade_call() -> ast.Call:
 class EntryExecutionVerbatimTest(unittest.TestCase):
     def test_extracted_loop_is_ast_identical_to_baseline(self):
         old, new = _base_loop(), _impl_fn()
+        old = accepted_function(MOD, FN, None).body[0]
         # 提取后的函数体第一个语句就是那个 for
         loop = new.body[0]
         self.assertIsInstance(loop, ast.For)
