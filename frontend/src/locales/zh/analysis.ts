@@ -1,4 +1,10 @@
 export const analysis = {
+  "minimum": "最低累计收益",
+  "maximum": "最高累计收益",
+  "trades": "交易笔数",
+  "curveCurrent": "当前累计收益",
+  "currentAccount": "当前账户",
+
 "modelRequest": "实际模型请求",
 "modelResponse": "模型返回",
 "riskDecision": "风控裁决",

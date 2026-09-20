@@ -33,6 +33,7 @@ const tradeDetail = ref<{ trade: Trade; events: Event[]; config_ids: string[] } 
 const evidence = ref<Event | null>(null), drawerOpen = ref(false), detailBusy = ref(false);
 const leftId = ref(''), rightId = ref('current'), leftConfig = ref<Config | null>(null), rightConfig = ref<Config | null>(null);
 let sequence = 0, detailSequence = 0, configSequence = 0;
+let tradeSequence = 0, eventSequence = 0, groupSequence = 0;
 const tabs = computed(() => ['overview', 'attribution', 'configurations', 'execution'].map(key => ({ key, label: tr(key) })));
 const dimensions = ['inst', 'side', 'config_id', 'confidence', 'duration', 'exit_reason'];
 const eventLabel = (kind: string) => {
@@ -67,6 +68,12 @@ function params() {
 }
 async function apply(reset = true) {
   const id = ++sequence;
+  const requestedTab = tab.value;
+  const requestedGroup = groupBy.value;
+  ++tradeSequence; ++eventSequence; ++groupSequence; ++detailSequence; ++configSequence;
+  drawerOpen.value = false;
+  tradeDetail.value = null; evidence.value = null;
+  leftConfig.value = null; rightConfig.value = null;
   loading.value = true; error.value = '';
   try {
     const query = params();
@@ -74,8 +81,8 @@ async function apply(reset = true) {
     const [s, rows, grouped, history] = await Promise.all([
       get<RecordData>(api + '/summary?' + query),
       get<{ items: Trade[]; total: number }>(api + '/trades?' + query + '&page=' + tradePage.value),
-      tab.value === 'attribution' ? get<{ items: RecordData[] }>(api + '/breakdown?' + query + '&by=' + groupBy.value) : Promise.resolve({ items: [] }),
-      tab.value === 'execution' ? get<{ items: Event[]; total: number }>(api + '/events?' + query + '&page=' + eventPage.value) : Promise.resolve({ items: [], total: 0 }),
+      requestedTab === 'attribution' ? get<{ items: RecordData[] }>(api + '/breakdown?' + query + '&by=' + requestedGroup) : Promise.resolve({ items: [] }),
+      requestedTab === 'execution' ? get<{ items: Event[]; total: number }>(api + '/events?' + query + '&page=' + eventPage.value) : Promise.resolve({ items: [], total: 0 }),
     ]);
     if (id !== sequence) return;
     summary.value = s; account.value = s.account;
@@ -83,30 +90,40 @@ async function apply(reset = true) {
     trades.value = rows.items; tradeTotal.value = rows.total; groups.value = grouped.items;
     events.value = history.items; eventTotal.value = history.total;
     if (!configOptions.value.some(c => c.id === leftId.value)) leftId.value = configOptions.value[0]?.id || '';
+    if (tab.value === 'configurations') void compare();
   } catch (e) { if (id === sequence) error.value = e instanceof Error ? e.message : String(e); }
-  finally { if (id === sequence) loading.value = false; }
+  finally {
+    if (id === sequence) {
+      loading.value = false;
+      if (!error.value) {
+        if (tab.value === 'attribution' && (requestedTab !== tab.value || requestedGroup !== groupBy.value)) void loadGroups();
+        if (tab.value === 'execution' && requestedTab !== tab.value) void changePage('event', eventPage.value);
+      }
+    }
+  }
 }
 async function changePage(kind: 'trade' | 'event', page: number) {
   if (!applied.value || loading.value) return;
-  const query = applied.value;
+  const query = applied.value, revision = sequence;
+  const request = kind === 'trade' ? ++tradeSequence : ++eventSequence;
   try {
     if (kind === 'trade') {
       const r = await get<{ items: Trade[]; total: number }>(api + '/trades?' + query + '&page=' + page);
-      if (query !== applied.value) return;
+      if (query !== applied.value || revision !== sequence || request !== tradeSequence) return;
       trades.value = r.items; tradeTotal.value = r.total; tradePage.value = page;
     } else {
       const r = await get<{ items: Event[]; total: number }>(api + '/events?' + query + '&page=' + page);
-      if (query !== applied.value) return;
+      if (query !== applied.value || revision !== sequence || request !== eventSequence) return;
       events.value = r.items; eventTotal.value = r.total; eventPage.value = page;
     }
   } catch (e) { toast.err(String(e)); }
 }
 async function loadGroups() {
-  if (!applied.value) return;
-  const query = applied.value, by = groupBy.value;
+  if (!applied.value || loading.value) return;
+  const query = applied.value, by = groupBy.value, revision = sequence, request = ++groupSequence;
   try {
     const r = await get<{ items: RecordData[] }>(api + '/breakdown?' + query + '&by=' + by);
-    if (query === applied.value && by === groupBy.value) groups.value = r.items;
+    if (query === applied.value && by === groupBy.value && revision === sequence && request === groupSequence) groups.value = r.items;
   } catch (e) { toast.err(String(e)); }
 }
 async function inspectTrade(id: string) {
@@ -166,8 +183,12 @@ const plot = computed(() => {
   return { points, zero: y(0), min, max, current: rows.at(-1)?.net ?? null, trades: source.length, line: points.map(p => p.x + ',' + p.y).join(' '), drawdown: points.map(p => p.x + ',' + p.dy).join(' ') };
 });
 watch(groupBy, loadGroups);
-watch([leftId, rightId], compare);
-watch(tab, value => { if (value === 'configurations') compare(); });
+watch([leftId, rightId], () => { if (tab.value === 'configurations') void compare(); });
+watch(tab, value => {
+  if (value === 'configurations') void compare();
+  if (value === 'attribution') void loadGroups();
+  if (value === 'execution') void changePage('event', eventPage.value);
+});
 onMounted(() => apply());
 </script>
 
@@ -179,15 +200,15 @@ onMounted(() => apply());
         <button class="btn btn-primary btn-sm" :disabled="exporting || loading || !applied" @click="exportAll"><Download />{{ exporting ? tr('exporting') : tr('export') }}</button>
       </template>
     </PageHeader>
-    <form class="card p-3 flex flex-wrap gap-3 items-end" @submit.prevent="apply()">
-      <label>{{ tr('account') }}<select v-model="account" class="field"><option v-if="!account" value="">{{ tr('current') }}</option><option v-for="a in accounts" :key="a" :value="a">{{ a }}</option></select></label>
+    <form class="card analysis-filters" :aria-label="tr('apply')" :aria-busy="loading" @submit.prevent="apply()">
+      <label class="analysis-account">{{ tr('account') }}<select v-model="account" class="field" :aria-label="tr('account')"><option v-if="!account" value="">{{ tr('currentAccount') }}</option><option v-for="a in accounts" :key="a" :value="a">{{ a }}</option></select></label>
       <label>{{ tr('start') }}<input v-model="startDate" type="date" required class="field" /></label>
       <label>{{ tr('end') }}<input v-model="endDate" type="date" required class="field" /></label>
-      <label>{{ tr('inst') }}<select v-model="inst" class="field"><option value="">{{ tr('all') }}</option><option v-for="i in summary?.instruments" :key="i" :value="i">{{ i }}</option></select></label>
-      <label>{{ tr('side') }}<select v-model="side" class="field"><option value="">{{ tr('all') }}</option><option value="long">{{ tr('long') }}</option><option value="short">{{ tr('short') }}</option></select></label>
-      <label>{{ tr('outcome') }}<select v-model="outcome" class="field"><option value="">{{ tr('all') }}</option><option value="win">{{ tr('win') }}</option><option value="loss">{{ tr('loss') }}</option><option value="breakeven">{{ tr('breakeven') }}</option></select></label>
-      <label class="max-w-64">{{ tr('config') }}<select v-model="configuration" class="field"><option value="">{{ tr('all') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }}</option></select></label>
-      <button class="btn btn-secondary" type="submit" :disabled="loading">{{ tr('apply') }}</button>
+      <label>{{ tr('inst') }}<select v-model="inst" class="field" :aria-label="tr('inst')"><option value="">{{ tr('all') }}</option><option v-for="i in summary?.instruments" :key="i" :value="i">{{ i }}</option></select></label>
+      <label>{{ tr('side') }}<select v-model="side" class="field" :aria-label="tr('side')"><option value="">{{ tr('all') }}</option><option value="long">{{ tr('long') }}</option><option value="short">{{ tr('short') }}</option></select></label>
+      <label class="analysis-outcome">{{ tr('outcome') }}<select v-model="outcome" class="field" :aria-label="tr('outcome')"><option value="">{{ tr('all') }}</option><option value="win">{{ tr('win') }}</option><option value="loss">{{ tr('loss') }}</option><option value="breakeven">{{ tr('breakeven') }}</option></select></label>
+      <label class="analysis-configuration">{{ tr('config') }}<select v-model="configuration" class="field" :aria-label="tr('config')"><option value="">{{ tr('all') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }}</option></select></label>
+      <button class="btn btn-primary analysis-apply" type="submit" :disabled="loading">{{ tr('apply') }}</button>
     </form>
     <p v-if="error" role="alert" class="card p-3 down">{{ error }}</p>
     <div class="card p-3 space-y-2">
@@ -206,18 +227,18 @@ onMounted(() => apply());
     <BaseTabs v-model="tab" :items="tabs" :label="tr('title')" />
     <p v-if="loading" role="status" class="text-sm t-faint">{{ tr('refresh') }}…</p>
     <section v-if="tab === 'overview'" class="space-y-4">
-      <div class="card grid grid-cols-2 lg:grid-cols-4">
+      <div class="card analysis-stats analysis-stats-summary">
         <BaseStat :label="tr('closed')" :value="format(stats.closed_count, 0)" :delta="tr('incomplete') + ': ' + format(stats.incomplete_count, 0)" />
         <BaseStat :label="tr('complete')" :value="format(stats.sample_count, 0)" :delta="[tr('win') + ' ' + format(stats.wins, 0), tr('loss') + ' ' + format(stats.losses, 0), tr('breakeven') + ' ' + format(stats.breakeven, 0)].join(' / ')" />
         <BaseStat :label="tr('winRate')" :value="pct(stats.win_rate)" />
         <BaseStat :label="tr('confidenceInterval')" :value="stats.win_rate_ci95 ? stats.win_rate_ci95.map(pct).join(' ~ ') : '—'" />
       </div>
       <p class="text-xs t-faint">{{ tr('sampleNote') }}</p>
-      <div class="card grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5"><BaseStat v-for="[key, value] in metrics" :key="key" :label="tr(key)" :value="format(value, key === 'streak' ? 0 : 2)" /></div>
+      <div class="card analysis-stats analysis-stats-metrics"><BaseStat v-for="[key, value] in metrics" :key="key" :label="tr(key)" :value="format(value, key === 'streak' ? 0 : 2)" /></div>
       <div class="card p-4">
         <h2 class="font-semibold text-sm">{{ tr('curve') }}</h2><p class="text-xs t-faint mt-1">{{ tr('curveNote') }}</p>
         <BaseEmpty v-if="!plot.points.length" :text="tr('noData')" />
-        <div v-if="plot.points.length" class="curve-summary grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs"><span><b>{{ tr('minimum') }}</b><strong>{{ format(plot.min) }}</strong></span><span><b>{{ tr('maximum') }}</b><strong>{{ format(plot.max) }}</strong></span><span><b>{{ tr('current') }}</b><strong :class="color(plot.current)">{{ format(plot.current) }}</strong></span><span><b>{{ tr('trades') }}</b><strong>{{ format(plot.trades, 0) }}</strong></span></div>
+        <div v-if="plot.points.length" class="curve-summary grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs"><span><b>{{ tr('minimum') }}</b><strong>{{ format(plot.min) }}</strong></span><span><b>{{ tr('maximum') }}</b><strong>{{ format(plot.max) }}</strong></span><span><b>{{ tr('curveCurrent') }}</b><strong :class="color(plot.current)">{{ format(plot.current) }}</strong></span><span><b>{{ tr('trades') }}</b><strong>{{ format(plot.trades, 0) }}</strong></span></div>
         <div v-if="plot.points.length" class="curve-wrap mt-3"><svg viewBox="0 0 800 190" class="w-full" role="img" :aria-label="tr('curve')">
           <line x1="34" x2="790" :y1="plot.zero + 10" :y2="plot.zero + 10" stroke="var(--line-2)" stroke-dasharray="4 4" />
           <text x="2" y="18" class="curve-label">{{ format(plot.max) }}</text><text x="2" y="158" class="curve-label">{{ format(plot.min) }}</text><text x="2" :y="plot.zero + 7" class="curve-label">0</text>
@@ -229,7 +250,7 @@ onMounted(() => apply());
     </section>
     <section v-if="tab === 'attribution'" class="space-y-4">
       <div class="card p-3">
-        <div class="flex flex-wrap items-center gap-3 mb-3"><label>{{ tr('group') }}<select v-model="groupBy" class="field"><option v-for="d in dimensions" :key="d" :value="d">{{ dimensionLabel(d) }}</option></select></label><p class="text-xs t-faint">{{ tr('modelNote') }}</p></div>
+        <div class="flex flex-wrap items-center gap-3 mb-3"><label>{{ tr('group') }}<select v-model="groupBy" class="field" :aria-label="tr('group')"><option v-for="d in dimensions" :key="d" :value="d">{{ dimensionLabel(d) }}</option></select></label><p class="text-xs t-faint">{{ tr('modelNote') }}</p></div>
         <div class="overflow-x-auto"><table class="table"><thead><tr><th>{{ tr('group') }}</th><th>{{ tr('samples') }}</th><th>{{ tr('incomplete') }}</th><th>{{ tr('winRate') }}</th><th>{{ tr('net') }}</th><th>{{ tr('pf') }}</th><th>{{ tr('expectancy') }}</th></tr></thead>
           <tbody><tr v-for="g in groups" :key="g.key"><td class="max-w-60 break-all">{{ g.key }}</td><td>{{ g.sample_count }}</td><td>{{ g.incomplete_count }}</td><td>{{ pct(g.win_rate) }}</td><td :class="color(g.net_pnl)">{{ format(g.net_pnl) }}</td><td>{{ format(g.profit_factor) }}</td><td>{{ format(g.expectancy) }}</td></tr></tbody></table></div>
       </div>
@@ -243,10 +264,10 @@ onMounted(() => apply());
 
     <section v-if="tab === 'configurations'" class="space-y-4">
       <p class="text-xs t-faint">{{ tr('configurationNote') }}</p>
-      <div class="card p-3 flex flex-wrap gap-3 items-end">
-        <label class="flex-1 min-w-48">{{ tr('historical') }}<select v-model="leftId" class="field"><option value="">{{ tr('selectConfig') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }} · {{ time(c.captured_ms) }}</option></select></label>
-        <label class="flex-1 min-w-48">{{ tr('compare') }}<select v-model="rightId" class="field"><option value="current">{{ tr('current') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }}</option></select></label>
-        <button class="btn btn-secondary" :disabled="!leftId" @click="compare"><GitCompareArrows />{{ tr('compare') }}</button>
+      <div class="card analysis-compare">
+        <label>{{ tr('historical') }}<select v-model="leftId" class="field" :aria-label="tr('historical')"><option value="">{{ tr('selectConfig') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }} · {{ time(c.captured_ms) }}</option></select></label>
+        <label>{{ tr('compare') }}<select v-model="rightId" class="field" :aria-label="tr('compare')"><option value="current">{{ tr('current') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }}</option></select></label>
+        <button class="btn btn-ghost" :disabled="!leftId" @click="compare"><GitCompareArrows />{{ tr('compare') }}</button>
       </div>
       <BaseEmpty v-if="!leftId" :text="tr('selectConfig')" />
       <template v-if="leftConfig && rightConfig">
@@ -258,7 +279,7 @@ onMounted(() => apply());
       </template>
     </section>
     <section v-if="tab === 'execution'" class="space-y-4">
-      <div class="card grid grid-cols-2 md:grid-cols-4">
+      <div class="card analysis-stats analysis-stats-summary">
         <BaseStat :label="tr('proposed')" :value="format(execution.proposed_decisions, 0)" />
         <BaseStat :label="tr('passed')" :value="format(execution.passed_decisions, 0)" />
         <BaseStat :label="tr('submitted')" :value="format(execution.submitted_orders, 0)" />
@@ -297,8 +318,41 @@ onMounted(() => apply());
   </div>
 </template>
 <style scoped>
-.analysis-page { color: var(--ink-1); }
-.analysis-page label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--ink-2); }
+.analysis-page { color: var(--ink-1); min-width: 0; }
+.analysis-page label { display: flex; flex-direction: column; min-width: 0; gap: 5px; font-size: var(--text-3xs); color: var(--ink-2); }
+.analysis-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: end;
+  gap: 14px 16px;
+  padding: 16px;
+}
+.analysis-account { grid-column: span 2; }
+.analysis-filters .field, .analysis-compare .field { min-width: 0; max-width: 100%; }
+.analysis-apply { width: 100%; }
+.analysis-compare {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 14px 16px;
+  padding: 16px;
+}
+.analysis-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 1200px) {
+  .analysis-filters { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .analysis-configuration { grid-column: span 3; }
+  .analysis-apply { grid-column: span 2; }
+  .analysis-stats-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .analysis-stats-metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+@media (max-width: 1099px) {
+  .analysis-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
+  .analysis-outcome, .analysis-configuration, .analysis-apply { grid-column: span 2; }
+  .analysis-compare { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+}
+@media (max-width: 479px) {
+  .analysis-stats { grid-template-columns: minmax(0, 1fr); }
+}
 .analysis-page summary { cursor: pointer; font-size: 12px; padding: 6px 0; }
 .config-diff { table-layout: fixed; min-width: 660px; }
 .config-diff td { overflow-wrap: anywhere; vertical-align: top; }

@@ -1,4 +1,10 @@
 export const analysis = {
+  "minimum": "Lowest cumulative P&L",
+  "maximum": "Highest cumulative P&L",
+  "trades": "Trades",
+  "curveCurrent": "Current cumulative P&L",
+  "currentAccount": "Current account",
+
 "modelRequest": "Actual model request",
 "modelResponse": "Model response",
 "riskDecision": "Risk decision",
