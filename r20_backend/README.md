@@ -77,7 +77,7 @@
 | 风控与安全 | `risk_config.py`、`net_security.py`、`login_guard.py`、`client_ip.py`、`admin_auth.py`、`interceptor_manager.py`、`redact.py` |
 | 通知与外部通道 | `notifications.py`、`qq_bind.py`、`qq_gateway_daemon.py` |
 | 审计与备份 | `audit.py`、`backup_store.py`、`backup_secrets.py`、`file_locks.py` |
-| 交易复盘 | `analysis_capture.py`、`analysis_metrics.py`、`analysis_routes.py`、`analysis_service.py`、`analysis_store.py`、`analysis_sync.py` |
+| 交易复盘 | `analysis_capture.py`、`analysis_export.py`、`analysis_export_jobs.py`、`analysis_metrics.py`、`analysis_routes.py`、`analysis_service.py`、`analysis_store.py`、`analysis_sync.py` |
 | 组合与账户 | `portfolio_aggregator.py`、`account_baseline.py` |
 | 提示词 | `prompt_views.py`、`dashboard_payload/prompts*` |
 | 通用 | `time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py` |

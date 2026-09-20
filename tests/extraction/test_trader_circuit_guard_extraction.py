@@ -20,6 +20,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -70,6 +71,7 @@ class CircuitGuardVerbatimTest(unittest.TestCase):
             with self.subTest(fn=fn):
                 # 原有**位置参数**必须原样（新函数只允许追加 kw-only 注入参数）
                 o, n = _get_func(old, fn), _get_func(new, fn)
+                o = accepted_function("scripts/trader/circuit_guard.py", fn, o)
                 self.assertEqual([a.arg for a in o.args.args],
                                  [a.arg for a in n.args.args],
                                  f"{fn} 原有位置参数被改动")

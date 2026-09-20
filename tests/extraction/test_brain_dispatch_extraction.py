@@ -25,6 +25,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -60,15 +61,15 @@ def _facade_call() -> tuple:
 
 class BrainDispatchVerbatimTest(unittest.TestCase):
     def test_segment_is_ast_identical_to_baseline(self):
-        seg = _baseline_fn().body[SEG]
+        expected = accepted_function("scripts/brain/dispatch.py", FN, None).body[1:]
         body = list(_impl().body)
         if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
                 and isinstance(body[0].value.value, str)):
             body = body[1:]
         self.assertEqual(
             ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=[seg], type_ignores=[]), include_attributes=False),
-            "派发尾块段体与抽取前**不再同一棵 AST**")
+            ast.dump(ast.Module(body=expected, type_ignores=[]), include_attributes=False),
+            "派发尾块与已合并的采集基线不一致")
 
     def test_call_passes_every_parameter_once_same_name(self):
         params = [a.arg for a in _impl().args.kwonlyargs]

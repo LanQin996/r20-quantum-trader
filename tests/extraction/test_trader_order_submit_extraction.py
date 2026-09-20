@@ -16,6 +16,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +50,7 @@ def _body_dump(fn: ast.FunctionDef) -> str:
 class OrderSubmitVerbatimTest(unittest.TestCase):
     def test_moved_body_matches_pre_extraction_verbatim(self):
         o = _get_func(ast.parse(_base_text()), FN)
+        o = accepted_function("scripts/trader/order_submit.py", FN, o)
         n = _get_func(ast.parse(
             (ROOT / "scripts/trader/order_submit.py").read_text(encoding="utf-8")), FN)
         self.assertEqual([a.arg for a in o.args.args], [a.arg for a in n.args.args])

@@ -10,7 +10,7 @@
 | 组件 | 引用者数 | 说明 |
 | --- | --- | --- |
 | `DataTable.vue` | **1** | F1 之前只有 `AuditPage` 1 个消费者（"假共享"）。已升级为真原语。**批 7–8 计数下降**：`PluginsPage` / `AgentsPage` / `AboutPage` 的登记表先后改为行式清单，故 8 → 1（`SecurityPage`/`AuditPage`/`AdminSysPage`/`BackupPage` 的登记表先后改为行式清单，现仅剩 `GatewayPage`） |
-| `PageHeader.vue` | **18** | 一直是共享的 |
+| `PageHeader.vue` | **19** | 包含交易复盘页 `AnalysisPage` |
 
 ## `page-parts/` = 单页专用
 
@@ -50,12 +50,12 @@ F7 的另一种解法（推广）对这三个组件目前**不成立**，理由�
 
 | 组件 | 消费者数 | 消费者 |
 | --- | --- | --- |
-| `base/BaseDrawer` | 4 | `dashboard/` 的 FactorDrawer · LedgerDrawer · PeekDrawer · RadarDrawer |
+| `base/BaseDrawer` | 5 | `dashboard/` 的 FactorDrawer · LedgerDrawer · PeekDrawer · RadarDrawer · `views/admin/AnalysisPage` |
 | `base/CopyButton` | 5 | `base/BaseCodeBlock` · `dashboard/AboutModal` · `dashboard/PeekDrawer` · `views/admin/DecisionsPage` · `views/admin/PromptStudioPage` |
 | `base/BaseDialog` | 15 | `base/ConfirmHost` · `dashboard/AboutModal` · `views/admin/GatewayPage` · `views/admin/CouncilPage` · `views/admin/PromptStudioPage` · `views/admin/PolicySnapshotPage` · `views/admin/EvolutionPage` · `views/admin/InterceptorsPage` · `views/admin/NotifyPage` · `views/admin/AboutPage` · `views/admin/llm/ModelEditDialog` · `views/admin/llm/RemoteFetchDialog` · `views/admin/SecurityPage` · `views/admin/BackupPage` |
 | `base/BaseSwitch` | 11 | `dashboard/SettingsPopover` · `views/admin/CouncilPage` · `views/admin/PromptStudioPage` · `views/admin/EvolutionPage` · `views/admin/InterceptorsPage` · `views/admin/NotifyPage` · `views/admin/llm/ProviderListView` · `views/admin/llm/ProviderDetailView` · `views/admin/SecurityPage` · `views/admin/RiskPage` |
 | `base/BaseSparkline` | 1 | `dashboard/KpiRibbon` |
-| `base/BaseTabs` | 1 | `dashboard/RadarDrawer` |
+| `base/BaseTabs` | 2 | `dashboard/RadarDrawer` · `views/admin/AnalysisPage` |
 | `dashboard/VenueAccountCard` | 1 | `dashboard/VenueAccountsPanel` |
 | `dashboard/DataStatus` | 1 | `dashboard/KpiRibbon` |
 | `dashboard/SettingsPopover` | 1 | `dashboard/TopBar` |

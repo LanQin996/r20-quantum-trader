@@ -123,11 +123,12 @@ class SubprocessDataWritesRedirectedTest(unittest.TestCase):
         self.assertTrue(expected, "isolate_config 未设置 R20_DATA_DIR")
 
         probe = (
-            "import sys; sys.path.insert(0, 'scripts');"
-            "import factor_library; print(factor_library.DATA_DIR)"
+            "import sys, contextlib; sys.path.insert(0, 'scripts');"
+            "\nwith contextlib.redirect_stdout(sys.stderr):\n import factor_library\n"
+            "print(factor_library.DATA_DIR)"
         )
-        cp = subprocess.run([sys.executable, "-c", probe],
-                            capture_output=True, text=True,
+        cp = subprocess.run([sys.executable, "-X", "utf8", "-c", probe],
+                            capture_output=True, text=True, encoding="utf-8",
                             cwd=str(ROOT), timeout=90)
         self.assertEqual(cp.returncode, 0,
                          f"子进程探针失败：{cp.stderr[-300:]}")

@@ -23,6 +23,7 @@ import re
 import unittest
 import urllib.request
 from pathlib import Path
+from tests.extraction.accepted_baselines import accepted_function, source as accepted_source
 from unittest.mock import patch
 
 import scripts.ai_brain_trader as abt
@@ -72,10 +73,12 @@ class MoveIsLosslessTest(unittest.TestCase):
         return out
 
     def test_body_is_line_identical_to_pre_move_source(self):
-        original = PRE_MOVE_SOURCE.read_text(encoding="utf-8").splitlines()
+        # Closed-candle/quality and latency fixes supersede the raw-candle snapshot.
+        baseline = accepted_function("scripts/brain/packages.py", "fetch_single_instrument_package", None)
+        original = accepted_source("scripts/brain/packages.py").splitlines()[baseline.lineno - 1:baseline.end_lineno]
         moved = _submodule_function_lines()
         # 允许的差异只有两处：签名展开（1 行 → 3 行）与新增 docstring（1 行）
-        original_body = [ln for ln in original if not ln.startswith("def fetch_single_instrument_package")]
+        original_body = original[4:]
         moved_body = moved[4:]
         a_norm, b_norm = self._normalise(original_body), self._normalise(moved_body)
         self.assertEqual(len(a_norm), len(b_norm),

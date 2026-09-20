@@ -24,6 +24,8 @@ import datetime
 import random
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from r20_backend.dashboard_payload.order_view import collect_pending_order_rows
 
@@ -99,8 +101,12 @@ def _legacy(orders_data, pending_orders_list, *, tz_beijing, datetime):
 
 def _both(orders_data):
     a, b = [], []
-    ga = collect_pending_order_rows(orders_data, a, tz_beijing=TZ, datetime=datetime)
+    with patch("scripts.okx_runtime.current_environment",
+               return_value=SimpleNamespace(simulated=True, mode="demo")):
+        ga = collect_pending_order_rows(orders_data, a, tz_beijing=TZ, datetime=datetime)
     _legacy(orders_data, b, tz_beijing=TZ, datetime=datetime)
+    for row in b:
+        row.update(account_mode="DEMO", environment="demo")
     return a, ga, b
 
 

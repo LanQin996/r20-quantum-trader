@@ -66,9 +66,22 @@ class MatchSnapshotIronRulesTests(unittest.TestCase):
         self.assertEqual(snap["velocity"], 3.3)
 
     def test_load_closed_trades_filters_prior_history(self):
-        # 传入较新的起始时间，早于该时间的交易应全部被过滤
-        future_trades = sie.load_closed_trades(start_time_override="2099-01-01 00:00:00")
-        self.assertEqual(len(future_trades), 0)
+        # Do not depend on the host ledger or on fixtures left by other suites.
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.json"
+            rows = [
+                {"inst": "BTC", "status": "closed", "close_time": "2026-09-09 12:00:00", "pnl": 1},
+                {"inst": "BTC", "status": "closed", "close_time": "2026-09-10 12:00:00", "pnl": 2},
+            ]
+            ledger.write_text(json.dumps(rows), encoding="utf-8")
+            with patch.object(sie, "DATA_DIR", directory), \
+                 patch.object(sie, "LEDGER_JSON_FILE", str(ledger)), \
+                 patch.object(sie, "TARGET_INSTRUMENTS", ["BTC"]), \
+                 patch.object(sie, "load_signal_journal", return_value={}), \
+                 patch("r20_backend.analysis_capture.enabled", return_value=False):
+                selected = sie.load_closed_trades(start_time_override="2026-09-10 00:00:00")
+                self.assertEqual([t["net_pnl"] for t in selected], [2])
+                self.assertEqual(sie.load_closed_trades(start_time_override="2099-01-01 00:00:00"), [])
 
     def test_rejects_stale_snapshot_beyond_window(self):
         journal = {"Y": [{"side": "long", "entryTime": "2026-08-01 10:00:00", "snapshot": _dyn(velocity=2)}]}
