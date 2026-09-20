@@ -19,6 +19,8 @@ export const enCommon = {
     search: 'Search',
     filter: 'Filter',
     all: 'All',
+    expandAll: 'Expand All',
+    collapseAll: 'Collapse All',
     retry: 'Retry',
     back: 'Back',
     more: 'More',
@@ -36,9 +38,26 @@ export const enCommon = {
     noRecords: 'No records',
     networkError: 'Network error, please retry',
     sessionExpired: 'Session expired, please sign in again',
+    requestFailed: 'Request failed',
+    networkRetry: 'Network error, please retry later',
+    loginFailed: 'Sign-in failed',
+    dashboardScanning: 'Scanning the whole-market multi-timeframe factor matrix...',
+    dashboardLoadFailed: 'Failed to load data',
     pageInfo: 'Page {page} / {pages} · {total} items',
+    pageNav: 'Pagination',
     prevPage: 'Previous',
     nextPage: 'Next',
+    remove: 'Remove',
+    restore: 'Restore',
+    load: 'Load',
+    execute: 'Run',
+    rollback: 'Roll back',
+    unlock: 'Unlock',
+    overwriteRestore: 'Restore over',
+    rollbackRun: 'Run rollback',
+    confirmWrite: 'Confirm write',
+    resetBaseline: 'Reset baseline',
+    switchLive: 'Switch to live',
     confirmPhraseHint: 'This is irreversible. Type {phrase} to confirm:',
     usdt: 'USDT',
     times: 'times',
@@ -57,6 +76,30 @@ export const enCommon = {
     dir: { long: 'Long', short: 'Short', flat: 'Wait' },
     conf: { high: 'High conf.', mid: 'Mid conf.', low: 'Low conf.' },
     side: { all: 'All sides', long: 'Long only', short: 'Short only' },
+    // batch 39: fullwidth punctuation used to be hardcoded in templates and
+    // leaked into the English UI. Values now come per language; the English
+    // colon carries its own trailing space because the template adds none.
+    punct: {
+      colon: ': ',
+      parenOpen: '(',
+      parenClose: ')',
+      semicolon: '; ',
+    },
+    // batch 44: accessible name for the language picker group
+    language: 'Interface language',
+    // batch 45: 404 fallback page
+    // batch 45: bypass repeated nav blocks (WCAG 2.4.1)
+    skipToContent: 'Skip to main content',
+    notFound: {
+      title: 'Page not found',
+      desc: 'Nothing lives at {path}. The address may be mistyped, or the page was removed.',
+      home: 'Back to the workstation',
+      docs: 'Read the docs',
+    },
+    // ── batch 68: external links silently open a new tab; screen reader and
+    //    keyboard users could not tell before activating. Adds a visually
+    //    hidden hint (sr-only) without changing the visual layout.
+    opensInNewTab: '(opens in a new tab)',
   },
   status: {
     normal: 'Normal',
@@ -80,6 +123,8 @@ export const enCommon = {
     hoursAgo: '{n}h ago',
     daysAgo: '{n}d ago',
     inSeconds: 'in {n}s',
+    beijingTime: 'Beijing Time UTC+8',
+    siteTimeTip: 'Site time: Asia/Shanghai (UTC+8)',
   },
   brand: {
     name: 'R20 Quantum Trader',
@@ -88,4 +133,8 @@ export const enCommon = {
     official: 'Official',
     license: 'MIT License',
   },
+  // batch 39: fullwidth punctuation used to be hardcoded in templates
+  // (`}}：{{`, `（{{ ... }}）`), which leaked into the English UI. Values now
+  // come per language: CJK uses fullwidth, English uses ASCII with a trailing
+  // space after the colon (the template adds none).,
 };

@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -131,15 +132,23 @@ class AdminAuthStore:
 
     def login(self, username: str, password: str) -> dict[str, Any]:
         now_epoch = int(time.time())
+        # 审计D(2026-09-13)·枚举面收口：旧实现四种失败各发不同文案（停用/锁定倒计时/
+        # 剩余次数/通用）——计时侧信道做了哑元哈希，**文案侧信道却直接标出「该账号
+        # 存在」**，等于送攻击者一份账号名单。现对外一律同一句话；真实原因只进
+        # stderr（IP 级 login_guard 与审计日志不受影响，锁定机制照旧执行）。
+        generic = "账号或密码错误"
+        reason = generic
         failure_message = ""
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM admin_users WHERE username=? COLLATE NOCASE", (username.strip(),)).fetchone()
             if row and not row["enabled"]:
-                failure_message = "管理员账号已停用，请联系超级管理员"
+                reason = "管理员账号已停用"
+                failure_message = generic
             elif row and int(row["locked_until"]) > now_epoch:
                 remaining = max(1, int(row["locked_until"]) - now_epoch)
                 minutes = (remaining + 59) // 60
-                failure_message = f"登录失败次数过多，账号已临时锁定，请约 {minutes} 分钟后重试"
+                reason = f"账号锁定中，约 {minutes} 分钟后解锁"
+                failure_message = generic
             valid = False
             if row and not failure_message:
                 digest, _, _ = _hash_password(password, bytes.fromhex(row["salt"]), int(row["iterations"]))
@@ -152,11 +161,15 @@ class AdminAuthStore:
                     failures = int(row["failed_attempts"]) + 1
                     locked_until = now_epoch + 15 * 60 if failures >= 5 else 0
                     connection.execute("UPDATE admin_users SET failed_attempts=?,locked_until=?,updated_at=? WHERE id=?", (failures, locked_until, _now_text(), row["id"]))
-                    failure_message = "账号或密码错误，账号已锁定 15 分钟" if locked_until else f"账号或密码错误，还可尝试 {5 - failures} 次"
+                    # max(0,…) 夹紧：计数漂移/锁定过期后残余计数曾可算出「还可尝试 -1 次」
+                    reason = ("触发 15 分钟锁定" if locked_until
+                              else f"密码错误，剩余尝试 {max(0, 5 - failures)} 次")
                 else:
-                    failure_message = "账号或密码错误"
+                    reason = "账号不存在"
+                failure_message = generic
             if failure_message:
                 connection.commit()
+                print(f"[admin_auth] login_denied user={username.strip()!r} reason={reason}", file=sys.stderr)
             else:
                 token = secrets.token_urlsafe(48)
                 expires = now_epoch + SESSION_SECONDS

@@ -1,0 +1,57 @@
+"""限价单的三价顺序钳制（B3 抽取第十三块）。
+
+## 这块在解决什么
+
+开仓挂单要同时给出 `limit_px` / `tp_px` / `sl_px`，而 OKX（以及各所）对三者的
+**大小顺序有硬性要求**，顺序错了直接拒单：
+
+| 方向 | 必须满足 |
+|---|---|
+| 做多 | `sl_px < limit_px < tp_px` |
+| 做空 | `tp_px < limit_px < sl_px` |
+
+AI 可以自己给这三个价（`entry_price` / `take_profit_price` / `stop_loss_price`），
+它给出**越界或相等**的组合是常事（例如把止损填在入场价上方做多）。原实现在
+长/空两个分支里各写一段"越界就用兜底距离掰回来"的修正 —— 两段逻辑同构、
+方向相反，且**各自独立演化**。抽成一处后：
+
+- 顺序不变量只有一份权威实现，不会出现"多头修了、空头忘了"；
+- 兜底距离（`max(实际距离, 现价×比例)`）也只有一个来源。
+
+## 兜底比例为什么是 1.2% / 2.4%
+
+原实现：止损兜底 `现价 × 0.012`，止盈兜底 `现价 × 0.024`。止盈的系数更大，
+因为止盈被摆错时通常需要比止损更宽的空间才拉得开盈亏比。这两个数字是
+**原样搬来的字面量**，本次搬运不改其值（重构不得改业务阈值）。
+
+## 为什么"相等"也算越界
+
+原实现用的是 `>=` / `<=`（不是 `>` / `<`）：`sl_px == limit_px` 同样会被掰开。
+`tests/` 里对拍用旧实现副本逐点覆盖等值情形，避免把 `>=` 顺手改成 `>`。
+"""
+
+
+def normalize_bracket_prices(*, is_long, limit_px, tp_px, sl_px, sl_dist, tp_dist,
+                             price, prec):
+    """把三价掰成交易所可接受的顺序，返回 `(sl_px, tp_px)`。
+
+    语义与搬走前的两段内联实现逐字一致：
+
+    - 做多：`sl_px >= limit_px` → `limit_px - max(sl_dist, price*0.012)`；
+            `tp_px <= limit_px` → `limit_px + max(tp_dist, price*0.024)`；
+    - 做空：`sl_px <= limit_px` → `limit_px + max(sl_dist, price*0.012)`；
+            `tp_px >= limit_px` → `limit_px - max(tp_dist, price*0.024)`。
+
+    两次修正都是 `round(..., prec)`，`prec` 由调用方按标的精度传入。
+    """
+    if is_long:
+        if sl_px >= limit_px:
+            sl_px = round(limit_px - max(sl_dist, price * 0.012), prec)
+        if tp_px <= limit_px:
+            tp_px = round(limit_px + max(tp_dist, price * 0.024), prec)
+    else:
+        if sl_px <= limit_px:
+            sl_px = round(limit_px + max(sl_dist, price * 0.012), prec)
+        if tp_px >= limit_px:
+            tp_px = round(limit_px - max(tp_dist, price * 0.024), prec)
+    return sl_px, tp_px

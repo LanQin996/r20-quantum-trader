@@ -28,36 +28,52 @@ function onConfirm() {
 <template>
   <BaseDialog
     :open="state.open"
+    :title="state.title"
+    :desc="state.desc"
     :size="'sm'"
     :tone="state.danger ? 'danger' : 'default'"
     :show-close="false"
+    initial-focus="input"
     @close="settle(false)"
   >
-    <div class="flex items-start gap-3">
-      <div
-        v-if="state.danger"
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-        style="background-color: var(--down-bg); border: 1px solid var(--down-line)"
-      >
-        <AlertTriangle class="h-4.5 w-4.5" style="color: var(--down)" />
-      </div>
-      <div class="min-w-0">
-        <h3 class="text-base font-semibold" style="color: var(--ink-strong)">{{ state.title }}</h3>
-        <p v-if="state.desc" class="mt-1 text-sm leading-relaxed" style="color: var(--ink-2)">{{ state.desc }}</p>
-        <p v-if="state.detail" class="mono mt-2 break-all text-xs" style="color: var(--ink-3)">{{ state.detail }}</p>
-      </div>
+    <template #title>
+      <span class="flex items-center gap-2">
+        <span
+          v-if="state.danger"
+          class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
+          style="background-color: var(--down-bg); border: 1px solid var(--down-line)"
+        >
+          <AlertTriangle class="h-3 w-3" style="color: var(--down)" />
+        </span>
+        <span>{{ state.title }}</span>
+      </span>
+    </template>
+
+    <div v-if="state.detail" class="mb-3">
+      <p class="mono break-all text-xs" style="color: var(--ink-3)">{{ state.detail }}</p>
     </div>
 
-    <div v-if="state.confirmPhrase" class="mt-4">
+    <div v-if="state.confirmPhrase" class="mt-2">
       <label class="form-label">
         {{ t('common.confirmPhraseHint', undefined, { phrase: state.confirmPhrase }) }}
       </label>
-      <input v-model="phraseInput" class="field mono" :placeholder="state.confirmPhrase" @keyup.enter="onConfirm" />
+      <input
+        v-model="phraseInput"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        class="field mono"
+        :aria-label="t('common.confirmPhraseHint', undefined, { phrase: state.confirmPhrase })"
+        :aria-invalid="phraseInput.length > 0 && !phraseOk"
+        :placeholder="state.confirmPhrase"
+        @keyup.enter="onConfirm"
+      />
     </div>
 
     <template #footer>
-      <button class="btn btn-ghost" @click="settle(false)">{{ state.cancelText || t('common.cancel') }}</button>
+      <button type="button" class="btn btn-ghost" @click="settle(false)">{{ state.cancelText || t('common.cancel') }}</button>
       <button
+        type="button"
         class="btn"
         :class="state.danger ? 'btn-danger' : 'btn-primary'"
         :disabled="!phraseOk"

@@ -1,34 +1,160 @@
 /* =========================================================================
-   R20 Design Tokens · "Quant Ops Console" 视觉语言基座
-   命名规范：--surface-* 表面台阶 / --line-* 描边 / --ink-* 文字层级 /
-            --accent 品牌 / --up --down --warn --info 语义 / --chart-* 图表序列
-   运行时切换：:root[data-theme="light"] 与 :root[data-cvd="true"] 覆写
+   R20 Design Tokens · DeepSeek Harness 开发者工作台视觉基座
+   -------------------------------------------------------------------------
+   来源：https://www.deepseek.com/harness/ 的 --ds-* 令牌体系，逐条对照抄录。
+
+   本文件是**唯一视觉事实源**。页面与组件只允许消费令牌，禁止硬编码色值。
+
+   结构：
+     1. 与主题无关的令牌（字体 / 间距 / 圆角 / 层级 / 动效）
+     2. --ds-* 规范令牌（暗色 :root 为默认，浅色 :root[data-theme=light]）
+     3. --r20-* 自有扩展（DSH 无金融语义色与数据密集尺度）
+     4. 兼容别名层（旧变量名 → 令牌，页面零改动即可继承新外观）
+
+   与 DSH 的两处**有意偏离**（均为数据密集工作台的必然取舍，已于 5/6 节标注）：
+     · 圆角：DSH --ds-radius-card:24px（营销页亲和感）→ 卡片 10px（仪器感）
+     · 字阶：DSH 正文 16px/160%（滚动叙事）→ 控制台正文 13px（信息密度）
    ========================================================================= */
 
+/* =========================================================================
+   1 · 与主题无关
+   ========================================================================= */
 :root {
-  /* —— 字体 —— */
-  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* —— 字体（DSH --ds-font-display / body / mono）——
+     已由 index.html 正确加载 Inter 与 JetBrains Mono */
+  --ds-font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'PingFang SC', 'Noto Sans SC', sans-serif;
+  --ds-font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --ds-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
+    'PingFang SC', 'Microsoft YaHei', monospace;
 
-  /* —— 字阶（行高随附 1.45~1.6）—— */
-  --text-2xs: 11px;
+  /* —— 间距（DSH --ds-space-1..13 原值）——
+     控制台只消费 1..7；8..13 属营销页滚动节奏，保留以备文档页使用 */
+  --ds-space-1: 4px;
+  --ds-space-2: 8px;
+  --ds-space-3: 12px;
+  --ds-space-4: 16px;
+  --ds-space-5: 24px;
+  --ds-space-6: 32px;
+  --ds-space-7: 40px;
+  --ds-space-8: 56px;
+  --ds-space-9: 80px;
+  --ds-space-10: 120px;
+  --ds-space-11: 160px;
+  --ds-space-12: 200px;
+  --ds-space-13: 240px;
+
+  /* =========================================================================
+     —— 密集尺度（2px 网格，1–12px）——
+     用途：数据台内部的一切 gap / 内边距。
+
+     为什么必须单独有一档：`--ds-space-*` 从 **4px** 起步、按 4 递增，
+     **4px 以下没有台阶**。而本应用正文 13px、标签 9.5px，内部间距天然需要
+     2/6/10px —— 刻度里没有，于是这些值被**就地手写**。
+
+     实测：归一前全仓用了 1/2/3/4/5/6/7/8/9/10/11 共 11 种取值、约 300 处，
+     其中 3/5/7/9 这些**离格值约 115 处**。每个元素疏密都差一点，
+     整页因此没有共同网格 —— 这是"不精致"的物理成因。
+
+     规则：**1–12px 一律走本节；16px 以上继续用 `--ds-space-4` 及以上。**
+           `1px` 是刻意保留的发丝档（与 1px 描边同宽，用于紧贴堆叠）。
+     ========================================================================= */
+  --sp-hair: 1px;
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 16px;
+  --sp-8: 20px;
+  --sp-9: 24px;
+  --sp-10: 32px;
+
+  /* —— 圆角（DSH 原值，card 见第 5 节偏离说明）——
+
+     半径阶梯（刻意只有 5 档，越少越统一）：
+       4  微件：徽章 / 芯片 / logo 方块 / 滚动条
+       8  控件：按钮 / 输入框 / 小面板        (--r-ctl)
+       10 卡片                                (--r-card)
+       16 面板 / 浮层
+       100 胶囊                               (--r-pill)
+
+     ⚠️ 刻度原本最小是 8px，微件没有台阶 → 4/5/6px 被手写十余处，
+        同一个界面里出现三种几乎相同的微圆角。故补 `--r-xs`，并把
+        4/5/6px 统一归到它。 */
+  --r-xs: 6px;
+  --ds-radius-sm: 10px;
+  --ds-radius-input: 10px;
+  --ds-radius-media: 12px;
+  --ds-radius-panel: 18px;
+  --ds-radius-card: 14px;
+  --ds-radius-pill: 100px;
+
+  /* —— 玻璃（DSH --ds-blur-glass）—— */
+  --ds-blur-glass: 12px;
+
+  /* —— 字阶 · 控制台尺度（对应 DSH heading1 28/36 · subtitle 20 · title 18 · body 16 · caption 14）——
+     控制台整体下移两档，字距沿用 DSH 的负字距梯度。
+
+     批 28：地板从 9.5px 抬到 11px（方案 §3.2 的目标下限）。
+     起因是实测发现：`text-3xs / text-4xs / text-2xs` 三个 Tailwind 工具类
+     **根本没被生成**（@theme 里没声明这三个档位），于是 385 个带该类的节点
+     不是按 10.5px 渲染，而是继承父级 12px —— 这正是"同一类小字在不同页
+     大小不一"的真凶之一。抬地板与修工具类必须同批做：
+     工具类一旦生效，那些节点会从 12px 掉到档位值，所以档位值不能低于 11px。 */
+  /* 批 89：并掉亚像素档位（用户确认）。
+     实测全站只渲染出 7 种字号，且 11/11.5/12/12.5 四档挤在 1.5px 内 ——
+     三对相邻档只差 **0.5px**：11→11.5、11.5→12、12→12.5。
+     0.5px 在屏幕上不可辨，等于"同一视觉档位有四个名字"：维护时只能靠猜，
+     收口说明行时就撞上过（`.card-sub`/`.panel-desc` 用 11.5px、`.ph-desc` 用 12px）。
+     实测占比：11px 19.7% / 11.5px 17.7% / 12px 59.6% / 12.5px 仅 1.7%。
+
+     → `--text-3xs` 11.5px 与 `--text-sm` 12.5px 都并入 **12px**。
+     生效字阶（去重后）只有 8 档：**11 / 12 / 13 / 14 / 15 / 18 / 22 / 26**。
+
+     ⚠️ `3xs` / `2xs` / `xs` / `sm` 四个令牌现在**同值 12px**（`2xs` 与 `xs`
+     在批 89 之前就已同值）。保留不删是**有意的**：它们承载语义
+     （密排小字 / 次级小字 / 正文小号 / 略大正文），删名要动大量模板。
+     若将来要给其中某个单独改值，`tests/typeScale.test.mjs` 的
+     「同值别名组」断言会先翻红，提醒这可能破坏刚统一好的字阶。 */
+  --text-4xs: 11px;
+  --text-3xs: 12px;
+  --text-2xs: 12px;
   --text-xs: 12px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-md: 15px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 26px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 26px;
 
-  /* —— 圆角 / 控件高度 —— */
-  --r-ctl: 6px;
-  --r-card: 10px;
-  --r-float: 14px;
-  --r-pill: 999px;
-  --h-sm: 28px;
-  --h-md: 32px;
+  /* —— 字距梯度（DSH：标题 -0.02em / 副标 -0.01em / 小标签 +0.09em）—— */
+  --track-display: -0.025em;
+  --track-title: -0.01em;
+  --track-body: 0;
+  --track-label: 0.09em;
+
+  --leading-tight: 1.25;
+  --leading-body: 1.6;   /* = DSH 160% */
+  --leading-dense: 1.45; /* 表格行专用 */
+
+  /* —— 控件尺寸 —— */
+  --r-ctl: var(--ds-radius-sm);
+  --r-card: var(--ds-radius-card);
+  --r-float: 16px;
+  --r-pill: var(--ds-radius-pill);
+  --h-sm: 24px;
+  --h-md: 30px;
   --h-lg: 36px;
+  --row-h: 34px;
+
+  /* —— 工作台骨架 —— */
+  --w-sidebar: 236px;
+  --w-sidebar-collapsed: 56px;
+  --h-topbar: 48px;
 
   /* —— 层级 —— */
   --z-header: 40;
@@ -36,177 +162,349 @@
   --z-drawer: 60;
   --z-dialog: 70;
   --z-toast: 80;
-  --z-cmdk: 90;
 
-  /* —— 动效 —— */
+  /* —— 动效（DSH 仅一条 .8s ease-out 入场，此处按控件尺度细分）—— */
   --dur-fast: 120ms;
   --dur-base: 180ms;
   --dur-slow: 240ms;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-
-  /* —— 暗色（默认）：Binance 实测台阶值，边框=再上一级表面 —— */
-  --surface-0: #0b0e11; /* canvas */
-  --surface-header: rgba(11, 14, 17, 0.96);
-  --surface-1: #171b21; /* card-subtle */
-  --surface-2: #1e2329; /* card */
-  --surface-3: #2b3139; /* elevated / hover */
-  --surface-input: #0b0e11;
-  --overlay-scrim: rgba(2, 4, 6, 0.72);
-
-  --line-1: #2b3139;
-  --line-2: #39404b;
-  --line-3: #4a5262;
-
-  --ink-1: #eaecef; /* 正文 */
-  --ink-2: #929aa5; /* 辅助 */
-  --ink-3: #707a8a; /* 列头/微标签，禁用于正文 */
-  --ink-strong: #ffffff; /* 仅限关键数字/标题 */
-
-  --accent: #f7931a; /* BTC 橙 */
-  --accent-ink: #0b0e11;
-  --accent-bg: rgba(247, 147, 26, 0.13);
-  --accent-line: rgba(247, 147, 26, 0.34);
-  --accent-hover: #ffab2e;
-
-  --up: #0ecb81;
-  --up-bg: rgba(14, 203, 129, 0.12);
-  --up-line: rgba(14, 203, 129, 0.28);
-  --down: #f6465d;
-  --down-bg: rgba(246, 70, 93, 0.12);
-  --down-line: rgba(246, 70, 93, 0.28);
-  --warn: #f0b90b;
-  --warn-bg: rgba(240, 185, 11, 0.12);
-  --warn-line: rgba(240, 185, 11, 0.28);
-  --info: #4c8fff;
-  --info-bg: rgba(76, 143, 255, 0.12);
-  --info-line: rgba(76, 143, 255, 0.28);
-
-  --chart-1: #0ecb81;
-  --chart-2: #f6465d;
-  --chart-3: #f0b90b;
-  --chart-4: #4c8fff;
-  --chart-5: #a78bfa;
-
-  /* 暗色禁投影分层，浮层例外 */
-  --shadow-float: 0 20px 35px -8px rgba(0, 0, 0, 0.7);
-  --shadow-dialog: 0 24px 64px -12px rgba(0, 0, 0, 0.8);
-  --ring-accent: 0 0 0 3px rgba(247, 147, 26, 0.22);
-}
-
-/* —— 色盲友好（Wong 板 / Bloomberg 蓝朱先例；方向永远另带 ▲▼）—— */
-:root[data-cvd='true'] {
-  --up: #56b4e9;
-  --up-bg: rgba(86, 180, 233, 0.14);
-  --up-line: rgba(86, 180, 233, 0.32);
-  --down: #d55e00;
-  --down-bg: rgba(213, 94, 0, 0.14);
-  --down-line: rgba(213, 94, 0, 0.32);
-  --chart-1: #56b4e9;
-  --chart-2: #d55e00;
-}
-
-/* —— 浅色：语义色加深一档保 AA —— */
-:root[data-theme='light'] {
-  --surface-0: #f4f6f8;
-  --surface-header: rgba(255, 255, 255, 0.94);
-  --surface-1: #ffffff;
-  --surface-2: #ffffff;
-  --surface-3: #eef1f4;
-  --surface-input: #ffffff;
-  --overlay-scrim: rgba(15, 23, 42, 0.45);
-
-  --line-1: #e2e8f0;
-  --line-2: #cbd5e1;
-  --line-3: #94a3b8;
-
-  --ink-1: #14202e;
-  --ink-2: #475569;
-  --ink-3: #5b6472;
-  --ink-strong: #0b1220;
-
-  --accent: #c2600c;
-  --accent-ink: #ffffff;
-  --accent-bg: #fdf0dc;
-  --accent-line: #f3ce9a;
-  --accent-hover: #a95208;
-
-  --up: #059669;
-  --up-bg: rgba(16, 185, 129, 0.08);
-  --up-line: rgba(16, 185, 129, 0.25);
-  --down: #e11d48;
-  --down-bg: rgba(225, 29, 72, 0.08);
-  --down-line: rgba(225, 29, 72, 0.25);
-  --warn: #d97706;
-  --warn-bg: rgba(217, 119, 6, 0.08);
-  --warn-line: rgba(217, 119, 6, 0.25);
-  --info: #2563eb;
-  --info-bg: rgba(37, 99, 235, 0.08);
-  --info-line: rgba(37, 99, 235, 0.25);
-
-  --chart-1: #059669;
-  --chart-2: #e11d48;
-  --chart-3: #d97706;
-  --chart-4: #2563eb;
-  --chart-5: #7c3aed;
-
-  --shadow-float: 0 10px 25px -5px rgba(15, 23, 42, 0.08);
-  --shadow-dialog: 0 16px 48px -12px rgba(15, 23, 42, 0.18);
-  --ring-accent: 0 0 0 3px rgba(194, 96, 12, 0.18);
-}
-
-:root[data-theme='light'][data-cvd='true'] {
-  --up: #0072b2;
-  --up-bg: rgba(0, 114, 178, 0.08);
-  --up-line: rgba(0, 114, 178, 0.25);
-  --down: #b34700;
-  --down-bg: rgba(179, 71, 0, 0.08);
-  --down-line: rgba(179, 71, 0, 0.25);
 }
 
 /* =========================================================================
-   Tailwind 4 桥接：语义色生成 bg-surface-2 / text-ink-2 / border-line-1 等价utility
+   2 · 规范令牌 · 暗色（默认）
+   —— 与 DSH [data-theme=dark] 逐条一致；仅 --ds-color-bg-surface-card 见第 5 节
    ========================================================================= */
-@theme inline {
-  --font-sans: var(--font-ui);
-  --font-mono: var(--font-mono);
+:root,
+:root[data-theme='dark'] {
+  --ds-color-brand: #3b82f6;
+  --ds-color-brand-deep: #2563eb;
 
-  --color-app: var(--surface-0);
-  --color-surface-1: var(--surface-1);
-  --color-surface-2: var(--surface-2);
-  --color-surface-3: var(--surface-3);
-  --color-line-1: var(--line-1);
-  --color-line-2: var(--line-2);
-  --color-line-3: var(--line-3);
-  --color-ink-1: var(--ink-1);
-  --color-ink-2: var(--ink-2);
-  --color-ink-3: var(--ink-3);
-  --color-ink-strong: var(--ink-strong);
-  --color-accent: var(--accent);
-  --color-accent-ink: var(--accent-ink);
-  --color-accent-bg: var(--accent-bg);
-  --color-up: var(--up);
-  --color-down: var(--down);
-  --color-warn: var(--warn);
-  --color-info: var(--info);
+  --ds-color-text-primary: #f8fafc;
+  --ds-color-text-secondary: #cbd5e1;
+  --ds-color-text-description: #94a3b8;
+  /* 批 19：placeholder 原为 DSH 的 #64748b，但本仓把它当"第三级正文色"在用
+     （表头 / 卡片副标题 / 时间戳 / 表单标签…全站 300+ 处）。实测它在
+     卡片 #151821 上只有 3.73:1、在 surface-2 #212634 上 3.17:1、
+     在选中态 #20293e 上 3.05:1 —— **全站第三级文字都不达 AA(4.5:1)**。
+     改为 #8894a7：在上述全部实测底色上 ≥4.72:1，且与 description
+     (#94a3b8, ≥5.66:1) 仍差 1.2 倍，第三级/第四级层级不塌。 */
+  --ds-color-text-placeholder: #8894a7;
+  --ds-color-text-inverse: #09090b;
 
-  --radius-ctl: var(--r-ctl);
-  --radius-card: var(--r-card);
-  --radius-float: var(--r-float);
+  --ds-color-bg-page: #121214;
+  --ds-color-bg-surface-1: #18181b;
+  --ds-color-bg-surface-2: #202024;
+  --ds-color-bg-surface-3: #27272b;
+  --ds-color-bg-surface-4: #323238;
+  --ds-color-bg-surface-5: #3f3f46;
+  --ds-color-bg-overlay: #141416;
+  --ds-color-bg-surface-raised: #1c1c20;
+  --ds-color-bg-hover: rgba(255, 255, 255, 0.05);
+  --ds-color-bg-input: #141416;
+  --ds-color-bg-input-hover: #1c1c20;
+  --ds-color-bg-code: rgba(0, 0, 0, 0.4);
 
-  --text-2xs: var(--text-2xs);
-  --text-2xs--line-height: 1.5;
-  --text-xs: var(--text-xs);
-  --text-xs--line-height: 1.5;
-  --text-sm: var(--text-sm);
-  --text-sm--line-height: 1.55;
-  --text-base: var(--text-base);
-  --text-base--line-height: 1.55;
-  --text-md: var(--text-md);
-  --text-md--line-height: 1.5;
-  --text-lg: var(--text-lg);
-  --text-lg--line-height: 1.45;
-  --text-xl: var(--text-xl);
-  --text-xl--line-height: 1.35;
-  --text-2xl: var(--text-2xl);
-  --text-2xl--line-height: 1.25;
+  --ds-color-border-subtle: rgba(255, 255, 255, 0.06);
+  --ds-color-border-default: rgba(255, 255, 255, 0.09);
+  --ds-color-border-divider: rgba(255, 255, 255, 0.07);
+  --ds-color-border-hover: rgba(255, 255, 255, 0.18);
+  --ds-color-border-strong: rgba(255, 255, 255, 0.25);
+  --ds-color-border-secondary: rgba(255, 255, 255, 0.08);
+  --ds-color-border-input: rgba(255, 255, 255, 0.1);
+  --ds-color-border-input-focus: #3b82f6;
+
+  --ds-color-scrollbar: rgba(255, 255, 255, 0.15);
+
+  /* 主按钮 = ZCode 反色高对比单色主按钮 */
+  --ds-btn-primary-bg: #ffffff;
+  --ds-btn-primary-text: #09090b;
+  --ds-btn-primary-hover-bg: #f4f4f5;
+  --ds-btn-secondary-bg: rgba(255, 255, 255, 0.05);
+  --ds-btn-secondary-text: #f8fafc;
+  --ds-btn-secondary-border: rgba(255, 255, 255, 0.1);
+  --ds-btn-secondary-hover-bg: rgba(255, 255, 255, 0.09);
+  --ds-btn-secondary-hover-border: rgba(255, 255, 255, 0.2);
+  --ds-btn-ghost-hover-bg: rgba(255, 255, 255, 0.06);
+  --ds-btn-ghost-hover-border: rgba(255, 255, 255, 0.15);
+
+  --ds-shadow-card: 0 1px 0 0 rgba(255, 255, 255, 0.08) inset, 0 12px 32px -4px rgba(0, 0, 0, 0.55);
+  /* 浮层阴影：DSH 暗色未定义，此处为可用性必需扩展（下拉/弹窗需要脱离层叠感） */
+  --r20-shadow-float: 0 1px 0 0 rgba(255, 255, 255, 0.1) inset, 0 20px 48px -8px rgba(0, 0, 0, 0.75);
+  --r20-shadow-dialog: 0 1px 0 0 rgba(255, 255, 255, 0.12) inset, 0 24px 64px -12px rgba(0, 0, 0, 0.85);
+  --r20-overlay-scrim: rgba(0, 0, 0, 0.8);
+}
+
+/* =========================================================================
+   3 · 规范令牌 · 浅色
+   —— 与 DSH :root 逐条一致
+   ========================================================================= */
+:root[data-theme='light'] {
+  --ds-color-brand: #2563eb;
+  --ds-color-brand-deep: #1d4ed8;
+
+  --ds-color-text-primary: #09090b;
+  --ds-color-text-secondary: #27272a;
+  --ds-color-text-description: #52525b;
+  --ds-color-text-placeholder: #71717a;
+  --ds-color-text-inverse: #ffffff;
+
+  --ds-color-bg-page: #f4f4f5;
+  --ds-color-bg-surface-1: #ffffff;
+  --ds-color-bg-surface-2: #eaecef;
+  --ds-color-bg-surface-3: #dfe2e6;
+  --ds-color-bg-surface-4: #cbd5e1;
+  --ds-color-bg-surface-5: #94a3b8;
+  --ds-color-bg-overlay: rgba(255, 255, 255, 0.96);
+  --ds-color-bg-surface-raised: #ffffff;
+  --ds-color-bg-hover: rgba(0, 0, 0, 0.05);
+  --ds-color-bg-input: #ffffff;
+  --ds-color-bg-input-hover: #f8fafc;
+  --ds-color-bg-code: rgba(0, 0, 0, 0.05);
+
+  --ds-color-border-subtle: rgba(0, 0, 0, 0.06);
+  --ds-color-border-default: rgba(0, 0, 0, 0.09);
+  --ds-color-border-divider: rgba(0, 0, 0, 0.07);
+  --ds-color-border-hover: rgba(0, 0, 0, 0.18);
+  --ds-color-border-strong: rgba(0, 0, 0, 0.25);
+  --ds-color-border-secondary: rgba(0, 0, 0, 0.08);
+  --ds-color-border-input: rgba(0, 0, 0, 0.12);
+  --ds-color-border-input-focus: #2563eb;
+
+  --ds-color-scrollbar: rgba(0, 0, 0, 0.15);
+
+  --ds-btn-primary-bg: #09090b;
+  --ds-btn-primary-text: #ffffff;
+  --ds-btn-primary-hover-bg: #27272a;
+  --ds-btn-secondary-bg: #ffffff;
+  --ds-btn-secondary-text: #09090b;
+  --ds-btn-secondary-border: rgba(0, 0, 0, 0.12);
+  --ds-btn-secondary-hover-bg: #f4f4f5;
+  --ds-btn-secondary-hover-border: rgba(0, 0, 0, 0.22);
+  --ds-btn-ghost-hover-bg: rgba(0, 0, 0, 0.05);
+  --ds-btn-ghost-hover-border: rgba(0, 0, 0, 0.12);
+
+  --ds-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px -2px rgba(0, 0, 0, 0.04);
+  --r20-shadow-float: 0 12px 32px -6px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
+  --r20-shadow-dialog: 0 20px 48px -10px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08);
+  --r20-overlay-scrim: rgba(0, 0, 0, 0.35);
+}
+
+/* =========================================================================
+   4 · R20 自有扩展 · 语义色
+   —— DSH 无金融语义色，此为主要色彩扩展，独立 --r20-* 命名空间
+      色相向 DSH 品牌蓝靠拢：低饱和、可长时间注视
+   ========================================================================= */
+:root,
+:root[data-theme='dark'] {
+  --r20-up: #48c78e;
+  --r20-up-bg: rgba(72, 199, 142, 0.13);
+  --r20-up-line: rgba(72, 199, 142, 0.3);
+  --r20-down: #f07178;
+  --r20-down-bg: rgba(240, 113, 120, 0.12);
+  --r20-down-line: rgba(240, 113, 120, 0.3);
+  --r20-warn: #e0b155;
+  --r20-warn-bg: rgba(224, 177, 85, 0.12);
+  --r20-warn-line: rgba(224, 177, 85, 0.3);
+  --r20-brand-bg: rgba(59, 130, 246, 0.12);
+  --r20-brand-line: rgba(59, 130, 246, 0.28);
+}
+:root[data-theme='light'] {
+  --r20-up: #1a7f5a;
+  --r20-up-bg: rgba(26, 127, 90, 0.1);
+  --r20-up-line: rgba(26, 127, 90, 0.28);
+  --r20-down: #c0392b;
+  --r20-down-bg: rgba(192, 57, 43, 0.09);
+  --r20-down-line: rgba(192, 57, 43, 0.26);
+  --r20-warn: #946a16;
+  --r20-warn-bg: rgba(148, 106, 22, 0.11);
+  --r20-warn-line: rgba(148, 106, 22, 0.28);
+  --r20-brand-bg: rgba(77, 107, 254, 0.09);
+  --r20-brand-line: rgba(77, 107, 254, 0.26);
+}
+
+/* =========================================================================
+   —— 图表色板（指标线 / 图例色点 / 十字光标）——
+   归属「分类标识色」，不承载涨跌语义，故与 --r20-* 分开命名。
+
+   ⚠️ 使用方式有硬约束：klinecharts 把指标线与覆盖物画在 <canvas> 上，
+   **canvas 不解析 CSS var()**。因此：
+     · canvas 侧一律由组件在渲染时用 tok('<本表变量名>') 取解析后的具体值；
+     · 只有 DOM 里的图例色点才可以直接绑这些 CSS 变量。
+   （ChartWorkstation 的 tok() 就是干这个的。）
+   ========================================================================= */
+:root,
+:root[data-theme='dark'] {
+  --chart-grid: rgba(255, 255, 255, 0.05);
+  --chart-grid-active: #334155;
+  --chart-crosshair-h: #3b82f6;
+  --chart-crosshair-v: #475569;
+  --chart-vwap: #06b6d4;
+  --chart-ma: #f59e0b;
+  --chart-ema: #38bdf8;
+  --chart-boll: #818cf8;
+  --chart-sar: #ec4899;
+  --chart-vol: #10b981;
+  --chart-macd: #3b82f6;
+  --chart-rsi: #f97316;
+  --chart-kdj: #a855f7;
+  --chart-obv: #eab308;
+  --chart-wr: #6366f1;
+}
+/* 浅色主题：同色相压深，保证白底上仍有足够对比度（与 --r20-up/down 的取舍一致） */
+:root[data-theme='light'] {
+  --chart-grid: rgba(0, 0, 0, 0.05);
+  --chart-grid-active: #cbd5e1;
+  --chart-crosshair-h: #1d4ed8;
+  --chart-crosshair-v: #64748b;
+  --chart-vwap: #0e7490;
+  --chart-ma: #b45309;
+  --chart-ema: #0284c7;
+  --chart-boll: #4f46e5;
+  --chart-sar: #be185d;
+  --chart-vol: #047857;
+  --chart-macd: #1d4ed8;
+  --chart-rsi: #c2410c;
+  --chart-kdj: #7e22ce;
+  --chart-obv: #a16207;
+  --chart-wr: #4338ca;
+}
+
+/* —— 色盲友好模式（红绿对 → 蓝橙对，保留 DSH 品牌蓝作上行色）—— */
+:root[data-cvd='true'] {
+  /* 批 105：全站回归审计抓到 /news 的「做多」小标签只有 **4.40:1**（AA 要 4.5）。
+     根因是色觉辅助的蓝 #6799fe 作为 11px 文字**落在自己的 13% 淡色底上**时不够亮：
+     合成底色 rgb(42,53,78)。提亮到 #7aa6ff 后为 4.96:1（淡色底同步换成新色）。 */
+  --r20-up: #7aa6ff;
+  --r20-up-bg: rgba(122, 166, 255, 0.13);
+  --r20-up-line: rgba(122, 166, 255, 0.3);
+  --r20-down: #e8923f;
+  --r20-down-bg: rgba(232, 146, 63, 0.12);
+  --r20-down-line: rgba(232, 146, 63, 0.3);
+  /* 批 103：开了色觉辅助后，「跌」从红粉挪到橙色 #e8923f，
+     而「警告」仍是琥珀 #e0b155 —— 两者感知距离从 **ΔE 54.7 掉到 20.0**，
+     也就是**为了让人分得清才打开的开关，反而让「跌」和「警告」糊成一色**。
+     把警告改成更亮、更偏黄的金色：与「跌」拉开到 ΔE 31.1，与「涨」112，
+     对卡片底色 10.9:1（当文字用也远超 4.5:1）。色相仍在金色系，语义不变。 */
+  --r20-warn: #f2d16b;
+  --r20-warn-bg: rgba(242, 209, 107, 0.12);
+  --r20-warn-line: rgba(242, 209, 107, 0.3);
+}
+:root[data-cvd='true'][data-theme='light'] {
+  --r20-up: #4d6bfe;
+  --r20-up-bg: rgba(77, 107, 254, 0.1);
+  --r20-up-line: rgba(77, 107, 254, 0.28);
+  --r20-down: #b45309;
+  --r20-down-bg: rgba(180, 83, 9, 0.1);
+  --r20-down-line: rgba(180, 83, 9, 0.28);
+  /* 同暗色：浅色+CVD 的「警告」原本**没有**跟着换（半覆盖），
+     沿用普通浅色的 #946a16 与 CVD 跌色 #b45309 只差 ΔE 27.0。
+     这里显式钉一个更偏黄的金褐 #8a6d1a：与跌 ΔE 33.5、与涨 128、对白底 4.90:1。 */
+  --r20-warn: #8a6d1a;
+  --r20-warn-bg: rgba(138, 109, 26, 0.11);
+  --r20-warn-line: rgba(138, 109, 26, 0.28);
+}
+
+/* =========================================================================
+   5 · 数据密集尺度扩展
+   —— DSH 是营销页尺度（24px 圆角 / 16px 正文 / 大留白）。
+      工作台需要在 1440×900 内承载 60+ 数据点，故：
+        · 卡片圆角 24 → 10（仪器感，非消费级亲和）
+        · 正文 16 → 13（密度）
+        · 卡片表面取 surface-3(.02) 与 surface-1(.06) 之间的中间值
+
+   ⚠️ 批次 16 补：**表面材质渐变 `--grad-surface`**
+
+   这是本设计里唯一**被允许**的渐变，且它不是装饰，是**材质**：
+   模拟"光从上方落在表面"，让每张卡片的顶边自然受光、向下渐隐。
+   没有它，卡片就只剩「底色 + 1px 描边」两件事可用 —— 而靠描边分层
+   正是上一版被判定「糊成一片、深度缺失」的根因。
+
+   它与下面 `.card` 的 `inset 0 1px 0` 顶边高光配合：
+   渐变负责**整面的光**，inset 负责**边缘 1px 的刃光**。
+
+   线上规则（取代此前"一律禁止渐变"的过宽禁令）：
+     ✅ 允许：材质渐变（受光/渐隐），用本令牌统一
+     ❌ 禁止：装饰性渐变（彩色氛围、霓虹、斜纹、点阵）
+   ========================================================================= */
+:root,
+:root[data-theme='dark'] {
+  --ds-color-bg-surface-card: #18181b;
+  --ds-color-bg-surface-inset: #131315;
+  --grad-surface: linear-gradient(180deg, rgba(255, 255, 255, 0.028) 0%, rgba(255, 255, 255, 0) 100%);
+  --ds-shadow-card: 0 1px 0 0 rgba(255, 255, 255, 0.08) inset, 0 12px 32px -4px rgba(0, 0, 0, 0.55);
+}
+:root[data-theme='light'] {
+  --ds-color-bg-surface-card: #ffffff;
+  --ds-color-bg-surface-inset: #f8f9fa;
+  --grad-surface: linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(250, 250, 250, 1) 100%);
+  --ds-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px -2px rgba(0, 0, 0, 0.04);
+}
+
+/* =========================================================================
+   6 · 兼容别名层 · 旧变量名 → 令牌
+   —— 42 个既有消费点零改动继承新外观；逐页重构时逐步迁往 --ds-* / --r20-*
+   ========================================================================= */
+:root {
+  /* 画布与分层：动态映射到 --ds-* 规范令牌，自适应浅色与深色主题 */
+  --surface-0: var(--ds-color-bg-page);
+  --surface-header: var(--ds-color-bg-overlay);
+  --surface-sidebar: var(--ds-color-bg-page);
+  --surface-1: var(--ds-color-bg-surface-card);
+  --surface-2: var(--ds-color-bg-surface-2);
+  --surface-3: var(--ds-color-bg-surface-3);
+  --surface-head: var(--ds-color-bg-surface-inset);
+  --surface-input: var(--ds-color-bg-input);
+  --overlay-scrim: var(--r20-overlay-scrim);
+
+  /* 描边 */
+  --line-1: var(--ds-color-border-default);
+  --line-2: var(--ds-color-border-subtle);
+  --line-3: var(--ds-color-border-secondary);
+
+  /* 文字 */
+  --ink-strong: var(--ds-color-text-primary);
+  --ink-1: var(--ds-color-text-secondary);
+  --ink-2: var(--ds-color-text-description);
+  --ink-3: var(--ds-color-text-placeholder);
+
+  /* 强调 = 反色单色主按钮（DSH 规范）；品牌蓝单独走 --brand */
+  --accent: var(--ds-btn-primary-bg);
+  --accent-ink: var(--ds-btn-primary-text);
+  --accent-hover: var(--ds-btn-primary-hover-bg);
+  --accent-bg: var(--r20-brand-bg);
+  --accent-line: var(--r20-brand-line);
+  --brand: var(--ds-color-brand);
+  --brand-bg: var(--r20-brand-bg);
+
+  /* 语义 */
+  --up: var(--r20-up);
+  --up-bg: var(--r20-up-bg);
+  --up-line: var(--r20-up-line);
+  --down: var(--r20-down);
+  --down-bg: var(--r20-down-bg);
+  --down-line: var(--r20-down-line);
+  --warn: var(--r20-warn);
+  --warn-bg: var(--r20-warn-bg);
+  --warn-line: var(--r20-warn-line);
+  --info: var(--ds-color-brand);
+  --info-bg: var(--r20-brand-bg);
+  --info-line: var(--r20-brand-line);
+
+  /* 图表（库消费，保持序列语义） */
+  --chart-1: var(--r20-up);
+  --chart-2: var(--r20-down);
+  --chart-3: var(--r20-warn);
+  --chart-4: var(--ds-color-brand);
+  --chart-5: #a78bfa;
+
+  /* 阴影与焦点 */
+  --shadow-card: var(--ds-shadow-card);
+  --shadow-float: var(--r20-shadow-float);
+  --shadow-dialog: var(--r20-shadow-dialog);
+  --ring-accent: 0 0 0 2px var(--ds-color-brand);
+
+  /* 字体别名 */
+  --font-ui: var(--ds-font-body);
+  --font-mono: var(--ds-font-mono);
+  --font-display: var(--ds-font-display);
 }

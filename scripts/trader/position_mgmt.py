@@ -1,0 +1,163 @@
+"""AI 持仓指令的执行器（B3 抽取第十二块）。
+
+从 `scripts/ai_factor_trader.py` 搬出 `execute_ai_position_management`（95 行）：
+读取主脑写下的 `ai_position_management.json`，把其中的持仓指令落到交易所。
+
+## 为什么单独成为一块
+
+它是**执行层**里少见的"策略判定 + 云端改单"复合体，且带两条硬安全语义：
+
+1. **CLOSE_MARKET 需置信度 ≥ 85** 才执行（`AI_CLOSE_CONFIDENCE_MIN`）；
+   低于阈值直接拒绝并在 `executed_actions` 里留痕 —— 宁可少平，不可误平。
+2. **UPDATE_SL 必须先过 `ai_tightens_stop`**：只有"确实在收紧"的改单才放行。
+   放松止损 = 账户裸奔，一律拒绝（判定数学见 `scripts/trader/protection.py`）。
+
+另有两条 fail-closed 边界：文件不存在直接返回；指令 **超过 300 秒**视为过期不执行
+（防止用上一轮的陈旧指令操作当前盘面）。
+
+## 注入面（9 项，全部调用期）
+
+| 依赖 | 说明 |
+|---|---|
+| `ai_position_management_file` | 门面 `AI_POSITION_MANAGEMENT_FILE`；测试会 patch 门面属性 |
+| `ai_tightens_stop` | 来自 `scripts/trader/protection.py`，同一份判定 |
+| `close_position_confirmed` / `okx_rest` | OKX 直下路径 |
+| `venue_registry` / `current_environment` / `amend_venue_stop_loss` | 多所路径 |
+
+全部**调用期注入**：门面会被 `pin_baseline_risk_env()` 原地重载，
+import 期绑定会变成过期快照（`r20_backend/README.md` §5）。
+
+> 平仓置信度阈值 **85 是原实现里的字面量**（不是 `risk_constants` 常量，全仓查无
+> `AI_CLOSE_CONFIDENCE_MIN`）。本次搬运**刻意保持字面量不变** —— 重构不得改业务阈值。
+> 若将来要把它配置化，那是独立的行为变更，需单独评审。
+"""
+import json
+import os
+import time
+
+from r20_backend import analysis_capture
+
+
+
+def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions, *,
+                                 ai_position_management_file, ai_tightens_stop,
+                                 close_position_confirmed, okx_rest, venue_registry,
+                                 current_environment, amend_venue_stop_loss, record_trade=None):
+    """Execute only fresh, high-confidence and risk-reducing AI position instructions."""
+    if not os.path.exists(ai_position_management_file):
+        return
+    try:
+        with open(ai_position_management_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if int(time.time()) - int(payload.get("timestamp", 0) or 0) > 300:
+            executed_actions.append("AI持仓指令已过期，未执行")
+            return
+    except Exception as e:
+        executed_actions.append(f"AI持仓指令读取失败: {e}")
+        return
+
+    for instruction in payload.get("instructions", []):
+        inst_id = str(instruction.get("instId", ""))
+        action = str(instruction.get("action", "HOLD")).upper()
+        confidence = float(instruction.get("confidence", 0) or 0)
+        reason = str(instruction.get("reason", "AI持仓管理"))[:120]
+        position = real_pos_dict.get(inst_id)
+        if not position or action == "HOLD":
+            continue
+
+        pos_side = str(position.get("posSide", "net")).lower()
+        pos_venue = str(position.get("venue") or position.get("exchange") or "okx").lower()
+        current_px = float(position.get("markPx", position.get("last", 0)) or 0)
+        name = inst_id.replace("-USDT-SWAP", "")
+
+        if action == "CLOSE_MARKET":
+            if confidence < 85:
+                executed_actions.append(f"[{name}] AI平仓置信度{confidence:.0f}<85，拒绝执行")
+                continue
+            closed, close_detail = close_position_confirmed(inst_id, pos_side, float(position.get("pos", 0) or 0), venue=pos_venue)
+            if closed:
+                executed_actions.append(f"[{name}] AI高置信度整仓退出 ({pos_venue.upper()}): {reason}")
+                closed_sz = abs(float(position.get("pos", 0) or 0))
+                trade_record = {
+                    "venue": pos_venue,
+                    "is_trade": True,
+                    "time": timestamp_full,
+                    "inst": name,
+                    "name": name,
+                    "action": "平仓",
+                    "action_type": "AI裁量整仓退出",
+                    "direction": f"平{'多' if pos_side == 'long' else '空'}",
+                    "side": f"{'多' if pos_side == 'long' else '空'}单AI裁量整仓退出",
+                    "size": closed_sz,
+                    "sz": closed_sz,
+                    "price": current_px,
+                    "pnl": position.get("upl"),
+                    "remark": f"AI高置信度({confidence:.0f}%)整仓退出: {reason}",
+                }
+                if record_trade is not None:
+                    record_trade(trade_record, position=position)
+                else:
+                    analysis_capture.emit("position.exit_reason", {
+                        "reason": trade_record["action_type"], "confirmed": True,
+                        "execution": trade_record,
+                    }, **analysis_capture.position_meta(position))
+                trackers.pop(f"{inst_id}_{pos_side}", None)
+            else:
+                executed_actions.append(f"[{name}] AI平仓请求未获交易所确认，仓位保持不变: {close_detail}")
+
+        elif action == "UPDATE_SL":
+            new_sl = float(instruction.get("suggested_sl_price", 0) or 0)
+            # 反过早收紧判定见 scripts/trader/protection.py::ai_tightens_stop
+            # （判定收紧方向；放松即账户裸奔）。三个阈值常量随函数搬去，值未改。
+            tightens_risk = ai_tightens_stop(instruction, position)
+
+            if not tightens_risk:
+                executed_actions.append(f"[{name}] 浮盈空间不足或与现价缓冲过近({current_px} vs 拟调SL {new_sl})，拒绝过早收紧止损")
+                continue
+
+            amend_ok = False
+            old_sl = 0.0
+            if pos_venue != "okx":
+                try:
+                    from r20_backend.close_intent import adapter_environment as _sl_env
+                    ad = venue_registry.get_adapter(pos_venue,
+                        environment=_sl_env(pos_venue, str(current_environment().mode)))  # 审计 C2+C3
+                    # 审计 C3（后半）：棘轮而非堆单——原生改单优先，回退先挂新再撤旧
+                    _c3_ok, _c3_note = amend_venue_stop_loss(
+                        ad, name, pos_side, float(new_sl), abs(float(position.get("pos", 0) or 0)))
+                    amend_ok = bool(_c3_ok)
+                    if not amend_ok:
+                        executed_actions.append(f"[{name}] {pos_venue.upper()} 云端止损更新失败: {_c3_note}")
+                        continue
+                except Exception as vexc:
+                    executed_actions.append(f"[{name}] {pos_venue.upper()} 云端止损更新失败: {vexc}")
+                    continue
+            else:
+                try:
+                    algo_orders = okx_rest.pending_algo_orders(inst_id)
+                except Exception as exc:
+                    executed_actions.append(f"[{name}] 云端止损收紧失败，原保护单保持不变（查询异常：{exc}）")
+                    continue
+                live_algo = next((o for o in algo_orders if o.get("state") == "live" and o.get("posSide") == pos_side and o.get("slTriggerPx")), None)
+                if not live_algo:
+                    executed_actions.append(f"[{name}] 未找到真实云端止损单，无法更新")
+                    continue
+                old_sl = float(live_algo.get("slTriggerPx", 0) or 0)
+                try:
+                    okx_rest.amend_algo_sl(live_algo["algoId"], new_sl, inst_id=inst_id, new_sl_ord_px="-1")
+                    amend_ok = True
+                except Exception:
+                    amend_ok = False
+
+            if amend_ok:
+                executed_actions.append(f"[{name}] 云端止损收紧至 {new_sl} ({pos_venue.upper()}): {reason}")
+                tracker = trackers.get(f"{inst_id}_{pos_side}")
+                if tracker:
+                    tracker["trailingStopPx"] = new_sl
+                try:
+                    from qq_notifier import notify_sl_updated
+                    notify_sl_updated(name, pos_side, old_sl, new_sl, reason)
+                except Exception:
+                    pass
+            else:
+                executed_actions.append(f"[{name}] 云端止损更新失败，原保护单保持不变")

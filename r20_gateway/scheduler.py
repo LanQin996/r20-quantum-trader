@@ -9,6 +9,7 @@ import subprocess
 import sys
 from typing import Any
 
+from r20_backend.time_utils import parse_beijing
 from r20_backend.schedule_store import load_schedule
 from r20_backend.backup_store import list_jobs as list_backup_jobs
 from r20_gateway.store import GatewayStore
@@ -30,7 +31,9 @@ class JobSpec:
 
 
 JOBS = (
-    JobSpec("trader", "ai_factor_trader.py", 15 * 60, 840),
+    # trader 超时 840→1260s：投委会新预算 240s + 网关故障时单模型内部重试链(~600s)
+    # 最坏 ~1150s，840s 会把整周期腰斩且连降级透明记录都写不出（2026-09-10 05:00 实测）
+    JobSpec("trader", "ai_factor_trader.py", 15 * 60, 1260),
     JobSpec("factor_library", "factor_library.py", 60, 55),
     JobSpec("news", "news_sentiment_harvester.py", 10 * 60, 300, offset_seconds=180),
     JobSpec("daily_briefing", "daily_summary_and_backup.py", None, 600, "briefing_times", ("08:00", "20:00")),
@@ -82,7 +85,7 @@ def scheduler_snapshot(store: GatewayStore, running: dict[str, Future[None]] | N
     for spec in current_jobs():
         raw = store.get_state(f"job.last.{spec.name}")
         try:
-            last = datetime.fromisoformat(raw) if raw else None
+            last = parse_beijing(raw)
         except ValueError:
             last = None
         job: dict[str, Any] = {
@@ -112,7 +115,7 @@ class GatewayScheduler:
     def _last_at(self, name: str) -> datetime | None:
         raw = self.store.get_state(f"job.last.{name}")
         try:
-            return datetime.fromisoformat(raw) if raw else None
+            return parse_beijing(raw)
         except ValueError:
             return None
 

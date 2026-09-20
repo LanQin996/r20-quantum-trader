@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 import uuid
 import zlib
@@ -122,6 +123,9 @@ def canonical(value: Any) -> bytes:
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
+_SCHEMA_LOCK = threading.Lock()
+
+
 class Archive:
     def __init__(self, path: Path | str | None = None):
         self.path = Path(path) if path is not None else db_path()
@@ -134,18 +138,18 @@ class Archive:
         if write:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             con = sqlite3.connect(str(self.path),timeout=5.0)
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA busy_timeout=5000")
-            con.executescript(SCHEMA)
         else:
             con = sqlite3.connect(self.path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5.0)
+        try:
             con.execute("PRAGMA busy_timeout=5000")
-            if not con.execute("SELECT 1 FROM sqlite_master WHERE name='analysis_events'").fetchone():
-                con.close()
+            if write:
+                with _SCHEMA_LOCK:
+                    con.execute("PRAGMA journal_mode=WAL")
+                    con.executescript(SCHEMA)
+            elif not con.execute("SELECT 1 FROM sqlite_master WHERE name='analysis_events'").fetchone():
                 yield None
                 return
-        con.row_factory = sqlite3.Row
-        try:
+            con.row_factory = sqlite3.Row
             con.execute("BEGIN")
             yield con
             if write: con.commit()

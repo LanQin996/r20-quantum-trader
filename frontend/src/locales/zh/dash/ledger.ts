@@ -1,7 +1,7 @@
 /** 交易台账：筛选 + 汇总 + 明细 + 生命周期抽屉 + 巡检日志 */
 export const zhLedger = {
   title: '交易台账',
-  desc: '以交易所官方持仓史为事实源，双源交叉验证出场归因，逐笔可回放',
+  desc: '按笔查看成交、归因与可回放的持仓史',
   summary: {
     total: '累计平仓',
     winRate: '胜率',
@@ -11,9 +11,14 @@ export const zhLedger = {
     best: '最佳一单',
     worst: '最差一单',
     avgHold: '平均持仓',
-    tipPf: '利润因子 = 总盈利 / 总亏损，>1 为正期望',
+    fundingNet: '资金费净收支',
+    fundingNetHint: '累计资金费用净额与收支细分',
+    tipPf: '利润因子 = 总盈利 / 总亏损，>1 为正期望；口径为交易所结算账单（非本页台账行），故笔数可能与台账不同',
+    pfSource: '账单口径 · {n} 笔',
   },
   filters: {
+    venue: '交易场所',
+    mode: '账户模式',
     symbol: '标的',
     dir: '方向',
     result: '结果',
@@ -24,6 +29,8 @@ export const zhLedger = {
     n: '{n} / {total} 笔',
   },
   col: {
+    // 批 44：状态筛选分段组名
+    status: '状态',
     symbol: '标的',
     dir: '方向',
     open: '开仓',
@@ -65,6 +72,13 @@ export const zhLedger = {
     grossPnl: '毛盈亏',
     rR: '实际盈亏比',
     empty: '该笔记录暂无事件明细',
+
+    // 批 75：此前模板里把中文直接贴在 t() 后面 ——
+    // 英文界面渲染成「Gross PnL & 财务指标」；且 `{{ t('common.total') }} 费用合计`
+    // 连中文下都是「合计 费用合计」的重复标签。
+    metricsTitle: '毛盈亏 & 财务指标',
+    totalFees: '费用合计',
+
   },
   logs: {
     title: '引擎巡检日志',
@@ -72,7 +86,59 @@ export const zhLedger = {
     empty: '暂无日志',
     download: '下载完整日志',
   },
+  council: {
+    ran: '投委会裁决',
+    adopted: '投委会裁决 · 采纳席位 {seat}',
+    degraded: '委员会未运行 · 单模型裁决',
+  },
+  observability: {
+    title: '数理快照可观测性',
+    none: '数理快照不可观测',
+    badgeNone: '无快照',
+    priceOnly: '仅价格/普通观测 · 数理快照不可观测',
+    badgePriceOnly: '仅价格',
+    partial: '数理快照部分可观测',
+    badgePartial: '部分动力学',
+    observed: '数理快照完全可观测',
+    badgeObserved: '微积分已记录',
+    tagHint: '该笔成交未记录开仓时刻的动力学链快照，无法作数理因果归因',
+    missingFields: '本笔未记录：v/a/j/I · 能量积分 · 偏离面积积分 · 延续/击穿概率 · VaR/CVaR',
+    noBackfill: '证据纪律：缺失即不可观测。严禁倒推或编造微观数理因果；字段缺失本身不得被解读为任何证据。',
+    auditLine: '开仓时刻数理快照审计：完全可观测 {observed} · 部分 {partial} · 仅价格 {price} · 无快照 {none}（共 {total} 笔）',
+    unobservable: '{n} / {total} 笔数理快照不可观测',
+    observedDesc: '已完整记录开仓时刻的微积分与概率动力学链，可用于真实数理因果归因。',
+    velocity: '速度 v (1H)',
+    acceleration: '加速度 a',
+    jerk: '跃度 jerk',
+    impulse: '冲量 impulse',
+    curvature: '曲率 κ',
+    power: '功率 P',
+    energyIntegral: '能量积分 ∫E',
+    deviationArea: '偏离面积积分',
+    continuationProb: '延续概率',
+    breakdownProb: '击穿概率',
+    var95: '95% VaR',
+    cvar95: '95% CVaR',
+    fatTail: '肥尾分布',
+    fatTailYes: '是',
+    fatTailNo: '否',
+  },
+  truncated: '本页仅含最近 {kept} 笔 / 共 {total} 笔',
+  truncatedHint: '载荷瘦身截断了台账：下方汇总与明细只覆盖被保留的切片，缺失的行绝不用 0 或空值代填。',
+  venue: '执行场所（旧数据无标注则不显示，绝不冒充）',
+  fundingTag: '资:',
   exportCsv: '导出 CSV',
   exported: '台账已导出',
   empty: '暂无平仓记录——AI 还在等待第一笔像样的机会',
+  venueAll: '全部场所',
+  venueOkx: 'OKX 欧易',
+  venueBinance: 'Binance 币安',
+  modeAll: '全部账户',
+  modeLive: '实盘 (Live)',
+  modeDemo: '模拟 (Demo)',
+  countRecords: '{a} / {b} 笔记录',
+  // ── 批 41：本地化写死文案（LedgerDrawer 标题与行标签）──
+  councilSource: 'AI 投委会决策溯源',
+  execStrategy: '执行策略',
+  adoptedSeat: '采纳席位',
 };

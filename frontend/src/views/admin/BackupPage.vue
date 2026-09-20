@@ -1,17 +1,49 @@
 <script setup lang="ts">
+/**
+ * BackupPage.vue · 数据灾备工位
+ * ---------------------------------------------------------------------------
+ * 骨架（推倒重来）：
+ *   旧 = 一行简介 + 蓝色徽章 + 一张大配置卡（4 字段网格 + 内联凭据块）
+ *        + 两张卡（最近一次 / 归档表）+ 4 个内联样式按钮
+ *        + 色相类（blue-400 / cyan-400 / amber-500 / emerald-500 / zinc-500）
+ *   新 = 共享 PageHeader（测试 / 保存 / 立即备份 / 上传 / 刷新）
+ *        → **灾备状态带**（自动灾备 / 保存位置 / 执行时间 / 最近一次）
+ *        → **灾备配置面板**（4 字段 + 远端凭据分区 + 动作页脚）
+ *        → **最近一次灾备** 面板 + **备份归档清单**行式清单
+ *
+ * 后端契约（逐字未改）：
+ *   GET  /api/v1/admin/backups/simple · /api/v1/admin/backup-target-types · /api/v1/admin/backups
+ *   PUT  /api/v1/admin/backups/simple                 ← payload() 七字段逐字保留
+ *   POST /api/v1/admin/backups/simple/test · /api/v1/admin/backups/run
+ *   POST /api/v1/admin/backups/restore · /api/v1/admin/backups/upload
+ *   GET  /api/v1/admin/backups/download/{name}?token=  ← **原生 fetch 双通道下载**，逐字保留
+ *
+ * ⚠️ 高危门禁逐字保留：立即备份需逐字 `BACKUP R20`；恢复需逐字 `RESTORE R20`（覆盖式不可撤销）。
+ * ⚠️ 下载/上传走原生 `fetch`（带 `X-R20-Session` 头、Blob 与降级直链双通道、
+ *    FormData 上传）——这些都不经 `api()` 封装，本批**一字未动**。
+ */
+import { fmtDateTime } from '../../utils/format';
 import { useToast } from '../../composables/useToast'
+import { useConfirm } from '../../composables/useConfirm'
 const toast = useToast()
+const { ask } = useConfirm()
 import { ref, computed, onMounted } from 'vue'
+import PageHeader from '../../components/admin/PageHeader.vue'
+import BaseSwitch from '../../components/base/BaseSwitch.vue'
+import BaseEmpty from '../../components/base/BaseEmpty.vue'
 import { useI18n } from '../../composables/useI18n'
 const { t } = useI18n()
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
-import {HardDrive, RefreshCw, PlugZap, Save, PlayCircle, Archive, Download, Upload, RotateCcw} from 'lucide-vue-next'
+import { HardDrive, RefreshCw, PlugZap, Save, PlayCircle, Archive, Download,
+  Upload, RotateCcw, AlertTriangle, Loader2, MapPin, Clock, CalendarClock, History } from 'lucide-vue-next'
+import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi()
 const auth = useAuthStore()
 
 const loading = ref(true)
+const loadError = ref('')
 const busy = ref<'test' | 'save' | 'run' | 'restore' | 'upload' | ''>('')
 const downloadingArchive = ref<string>('')
 
@@ -21,8 +53,14 @@ const simple = ref<any>(null)
 function fmtBackupTime(latest: any): string {
   const raw = latest?.finished_at || latest?.started_at || latest?.created_at || latest?.time
   if (!raw) return '--'
-  const s = String(raw)
-  return s.replace('T', ' ').slice(0, 19)
+  return fmtDateTime(raw)
+}
+/** 最近一次备份的状态文案（批 27）：查表本地化，未登记枚举原样回退。
+ *  此前徽章直接印后端枚举 `success`，同卡片其它字段却都是中文。 */
+function statusLabelOf(s?: string): string {
+  if (!s) return t('admin.backup.statusSuccess')
+  const key = `admin.backup.status${s.charAt(0).toUpperCase()}${s.slice(1)}`
+  return t(key, s)
 }
 const targetTypes = ref<any[]>([])
 const status = ref<any>(null)
@@ -47,6 +85,7 @@ const credentialFields = computed(() => {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const [s, t, st] = await Promise.all([
       api('/api/v1/admin/backups/simple'),
@@ -63,7 +102,8 @@ async function load() {
     endpoint.value = s.target?.endpoint || ''
     bucket.value = s.target?.bucket || ''
   } catch (e: any) {
-    toast.err(`加载失败：${e.message}`)
+    loadError.value = e.message
+    toast.err(t('admin.backup.loadFailed', undefined, { msg: e.message }))
   } finally {
     loading.value = false
   }
@@ -87,7 +127,7 @@ async function testConnection() {
     const res = await api('/api/v1/admin/backups/simple/test', { method: 'POST', body: JSON.stringify(payload()) })
     toast.ok(`${res.detail}`)
   } catch (e: any) {
-    toast.err(`测试失败：${e.message}`)
+    toast.err(t('admin.backup.testFailed', undefined, { msg: e.message }))
   } finally {
     busy.value = ''
   }
@@ -97,25 +137,33 @@ async function save() {
   busy.value = 'save'
   try {
     await api('/api/v1/admin/backups/simple', { method: 'PUT', body: JSON.stringify(payload()) })
-    toast.ok('灾备配置已保存，每天北京时间 ' + scheduleTime.value + ' 自动执行')
+    toast.ok(t('admin.backup.configSaved', undefined, { time: scheduleTime.value }))
     await load()
   } catch (e: any) {
-    toast.err(`保存失败：${e.message}`)
+    toast.err(t('admin.backup.saveFailed', undefined, { msg: e.message }))
   } finally {
     busy.value = ''
   }
 }
 
 async function runNow() {
-  const phrase = prompt('立即执行完整灾备（打包并按已启用目标上传）需输入确认短语：BACKUP R20')
-  if (!phrase) return
+  // 批C(2026-09-13)：prompt() → 项目确认服务（移动端 prompt 常被浏览器弱化/难用），
+  // 短语仍由用户逐字输入，与后端 `BACKUP R20` 契约一致。
+  const _ok = await ask({
+    title: t('admin.backup.runNowTitle'),
+    desc: t('admin.backup.runNowDesc'),
+    danger: true,
+    confirmPhrase: 'BACKUP R20',
+    okText: t('common.execute'),
+  })
+  if (!_ok) return
   busy.value = 'run'
   try {
-    const res = await api('/api/v1/admin/backups/run', { method: 'POST', body: JSON.stringify({ confirmation: phrase.trim().toUpperCase() }) })
-    toast.ok(`灾备执行完成（${(res.output || '').length} 字符输出已记录）`)
+    const res = await api('/api/v1/admin/backups/run', { method: 'POST', body: JSON.stringify({ confirmation: 'BACKUP R20' }) })
+    toast.ok(t('admin.backup.runOk', undefined, { n: (res.output || '').length }))
     await load()
   } catch (e: any) {
-    toast.err(`灾备失败：${e.message}`)
+    toast.err(t('admin.backup.runFailed', undefined, { msg: e.message }))
   } finally {
     busy.value = ''
   }
@@ -124,7 +172,7 @@ async function runNow() {
 async function downloadArchive(archiveName: string) {
   const clean = archiveName.split('/').pop() || archiveName
   downloadingArchive.value = clean
-  toast.ok(`正在连接并准备下载归档文件 ${clean}...`)
+  toast.ok(t('admin.backup.connecting', undefined, { file: clean }))
 
   const token = auth.token || localStorage.getItem('r20.admin.session.id') || ''
   const directUrl = `/api/v1/admin/backups/download/${encodeURIComponent(clean)}${token ? `?token=${encodeURIComponent(token)}` : ''}`
@@ -158,7 +206,7 @@ async function downloadArchive(archiveName: string) {
       window.URL.revokeObjectURL(blobUrl)
     }, 2000)
 
-    toast.ok(`归档文件 ${clean} 已成功触发下载`)
+    toast.ok(t('admin.backup.downloadTriggered', undefined, { file: clean }))
   } catch (e: any) {
     // 双通道策略 2：若 Blob 或 Fetch 产生跨域或浏览器安全拦截，降级采用原生链接直连触发
     try {
@@ -169,9 +217,9 @@ async function downloadArchive(archiveName: string) {
       document.body.appendChild(fallbackA)
       fallbackA.click()
       setTimeout(() => fallbackA.remove(), 1000)
-      toast.ok(`已切换直接下载通道触发归档 ${clean} 下载`)
+      toast.ok(t('admin.backup.directChannel', undefined, { file: clean }))
     } catch (fallbackErr: any) {
-      toast.err(`下载失败：${e.message}`)
+      toast.err(t('admin.backup.downloadFailed', undefined, { msg: e.message }))
     }
   } finally {
     downloadingArchive.value = ''
@@ -201,12 +249,12 @@ async function onFileSelected(e: Event) {
     })
     const res = await resp.json()
     if (!resp.ok) {
-      throw new Error(res.detail || `上传失败 HTTP ${resp.status}`)
+      throw new Error(res.detail || t('admin.backup.uploadHttp', undefined, { status: resp.status }))
     }
-    toast.ok(`备份包 ${file.name} 上传成功！`)
+    toast.ok(t('admin.backup.uploadOk', undefined, { file: file.name }))
     await load()
   } catch (err: any) {
-    toast.err(`上传备份失败：${err.message}`)
+    toast.err(t('admin.backup.uploadFailed', undefined, { msg: err.message }))
   } finally {
     busy.value = ''
     if (target) target.value = ''
@@ -215,12 +263,16 @@ async function onFileSelected(e: Event) {
 
 async function restoreArchive(archiveName: string) {
   const clean = archiveName.split('/').pop() || archiveName
-  const phrase = prompt(`警告：恢复备份将解压覆盖当前系统配置、历史数据与策略。\n如确认恢复归档【${clean}】，请输入确认短语：RESTORE R20`)
-  if (!phrase) return
-  if (phrase.trim().toUpperCase() !== 'RESTORE R20') {
-    alert('确认短语不正确，已取消恢复！')
-    return
-  }
+  // 批C(2026-09-13)：prompt+alert → 项目确认服务。恢复备份是覆盖式破坏操作
+  // （解压覆盖当前配置/历史数据/策略），短语逐字输入，与后端 `RESTORE R20` 契约一致。
+  const _ok = await ask({
+    title: t('admin.backup.restoreConfirmTitle'),
+    desc: t('admin.backup.restoreConfirmDesc', undefined, { file: clean }),
+    danger: true,
+    confirmPhrase: 'RESTORE R20',
+    okText: t('common.overwriteRestore'),
+  })
+  if (!_ok) return
   busy.value = 'restore'
   try {
     const res = await api('/api/v1/admin/backups/restore', {
@@ -230,10 +282,10 @@ async function restoreArchive(archiveName: string) {
         confirmation: 'RESTORE R20'
       })
     })
-    toast.ok(`备份 ${clean} 恢复成功！共解压 ${res.restored_count} 个核心文件。请重启或刷新服务使新状态接管。`)
+    toast.ok(t('admin.backup.restoreOk', undefined, { file: clean, n: res.restored_count }))
     await load()
   } catch (e: any) {
-    toast.err(`恢复失败：${e.message}`)
+    toast.err(t('admin.backup.restoreFailed', undefined, { msg: e.message }))
   } finally {
     busy.value = ''
   }
@@ -244,163 +296,504 @@ function fmtBytes(n: number) {
   return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB'
 }
 function fmtTime(ts: number) {
-  return new Date(ts * 1000).toLocaleString('sv-SE', { hour12: false, timeZone: 'Asia/Shanghai' })
+  return fmtDateTime(ts * 1000)
 }
+
+const archives = computed<any[]>(() => (status.value?.local_archives || []).slice(0, 10))
+
+/** 保存位置的展示名（旧版 select 里的 option 文案）
+ *  存**完整键路径**并直接 `t(k)`，不使用拼接式键名（拼接键无法被 i18n 静态校验识别）。 */
+const DEST_LABEL_KEY: Record<string, string> = {
+  local: 'admin.backup.destLocal',
+  s3: 'admin.backup.destS3',
+  oss: 'admin.backup.destOss',
+  webdav: 'admin.backup.destWebdav',
+  baidu_oauth: 'admin.backup.destBaidu',
+}
+function destLabel(d: string): string {
+  const k = DEST_LABEL_KEY[d]
+  return k ? t(k) : d
+}
+
+/** 灾备状态带（4 项事实） */
+const bandFacts = computed(() => {
+  const s = simple.value
+  if (!s) return []
+  return [
+    {
+      icon: HardDrive,
+      label: t('admin.backup.bandEnabled'),
+      value: enabled.value ? t('admin.backup.enabledOn') : t('admin.backup.enabledOff'),
+      foot: s.legacy_bypy ? t('admin.backup.legacyTag') : '',
+      tone: enabled.value ? 'is-up' : 'is-off',
+    },
+    {
+      icon: MapPin,
+      label: t('admin.backup.bandLocation'),
+      value: destLabel(destination.value),
+      foot: s.configured ? t('admin.backup.targetConfigured') : t('admin.backup.targetNotConfigured'),
+      tone: s.configured ? 'is-up' : 'is-warn',
+    },
+    {
+      icon: CalendarClock,
+      label: t('admin.backup.bandSchedule'),
+      value: scheduleTime.value || '--',
+      foot: `${t('admin.backup.secRetention')} ${retention.value}${destination.value === 'local' ? t('admin.backup.retentionLocal') : ''}`,
+      tone: '',
+    },
+    {
+      icon: History,
+      label: t('admin.backup.bandLatest'),
+      value: s.latest ? fmtBackupTime(s.latest) : t('admin.backup.noLatest'),
+      foot: s.latest?.status || '',
+      tone: s.latest?.status === 'failed' ? 'is-down' : (s.latest ? 'is-up' : 'is-off'),
+    },
+  ]
+})
 
 onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex items-center justify-between">
-      <p class="text-xs text-[var(--ink-3)]">支持本地/云端全量数据灾备、备份打包直接下载、本地备份上传与一键全量恢复。</p>
-      <span class="text-[11px] text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20">集成与保障 · 2/3</span>
+  <div class="bk">
+    <PageHeader :title="t('nav.admin.backup')" :description="t('admin.backup.intro')">
+      <template #actions>
+        <span class="badge" :class="simple?.configured ? 'badge-up' : 'badge-warn'">
+          {{ simple?.configured ? t('admin.backup.targetConfigured') : t('admin.backup.targetNotConfigured') }}
+        </span>
+        <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="load">
+          <Loader2 v-if="loading && simple" :size="14" class="animate-spin shrink-0" />
+          <RefreshCw v-else :size="14" />
+          <span>{{ t('common.refresh') }}</span>
+        </button>
+      </template>
+    </PageHeader>
+
+    <div v-if="loadError && !simple" role="alert" class="state-block is-error">
+      <span class="state-icon"><AlertTriangle :size="17" /></span>
+      <p class="state-title">{{ t('common.loadFailed') }}</p>
+      <p class="state-desc">{{ loadError }}</p>
+      <button type="button" class="btn btn-ghost btn-sm mt-1" :disabled="loading" @click="load">
+        <RefreshCw :size="14" />
+        <span>{{ t('common.retry') }}</span>
+      </button>
     </div>
-    <div v-if="loading" class="py-12 text-center text-xs" style="color: var(--ink-2);"><RefreshCw class="w-5 h-5 animate-spin inline mr-1.5" style="color: var(--accent);" />正在加载灾备配置...</div>
 
-    <template v-else-if="simple">
-      <!-- Simple Config -->
-      <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors space-y-4" style="background-color: var(--surface-2); border-color: var(--line-1);">
-        <div class="flex items-center justify-between mb-2">
-          <div class="flex items-center space-x-2">
-            <HardDrive class="w-4 h-4" style="color: var(--accent);" />
-            <h2 class="text-sm font-bold" style="color: var(--ink-1);">{{ t('nav.admin.backup') }}</h2>
-        <p class="text-[11px] mt-0.5" style="color: var(--ink-2);"> 自动灾备 </p>
+    <template v-else>
+      <!-- ══ 灾备状态带 ══ -->
+      <section class="card band">
+        <template v-if="loading && !simple">
+          <BaseLoadingAnnounce />
+          <div v-for="i in 4" :key="i" class="fact">
+            <div class="skeleton skeleton-text" style="width: 48%" />
+            <div class="skeleton skeleton-text skeleton-value" style="width: 62%" />
+            <div class="skeleton skeleton-text" style="width: 36%" />
           </div>
-          <label class="flex items-center space-x-2 text-xs cursor-pointer">
-            <input v-model="enabled" type="checkbox" class="accent-blue-500 w-4 h-4" :disabled="!auth.isSuperadmin" />
-            <span :class="enabled ? 'text-emerald-500 font-bold' : 'text-zinc-500'">{{ enabled ? '每日自动灾备已启用' : '已停用' }}</span>
-          </label>
-        </div>
+        </template>
+        <template v-else>
+          <div v-for="f in bandFacts" :key="f.label" class="fact">
+            <span class="fact-label"><component :is="f.icon" :size="12" />{{ f.label }}</span>
+            <span class="fact-value" :class="f.tone">{{ f.value }}</span>
+            <span class="fact-foot truncate" :title="f.foot">{{ f.foot }}</span>
+          </div>
+        </template>
+      </section>
 
-        <div v-if="simple.legacy_bypy" class="p-2.5 rounded-lg border text-[11px]" style="background-color: var(--warn-bg); border-color: var(--warn-line); color: var(--warn);">{{ simple.migration_note }}</div>
-
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          <div>
-            <label class="block text-[11px] mb-1" style="color: var(--ink-2);">1. 备份内容</label>
-            <select disabled class="w-full rounded-lg px-3 py-2 text-xs opacity-70 border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);">
-              <option>R20 系统、策略、配置与运行数据</option>
-            </select>
-          </div>
-          <div>
-            <label class="block text-[11px] mb-1" style="color: var(--ink-2);">2. 保存位置</label>
-            <select v-model="destination" :disabled="!auth.isSuperadmin" class="w-full rounded-lg px-3 py-2 text-xs outline-none border cursor-pointer" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);">
-              <option value="local">本地滚动归档</option>
-              <option value="s3">S3 兼容存储</option>
-              <option value="oss">阿里云 OSS</option>
-              <option value="webdav">WebDAV / OpenList</option>
-              <option value="baidu_oauth">百度网盘（官方 OAuth）</option>
-            </select>
-          </div>
-          <div>
-            <label class="block text-[11px] mb-1" style="color: var(--ink-2);">3. 每天执行时间（北京时间）</label>
-            <input v-model="scheduleTime" type="time" :disabled="!auth.isSuperadmin" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
-          </div>
-          <div>
-            <label class="block text-[11px] mb-1" style="color: var(--ink-2);">4. 保留最近几份{{ destination === 'local' ? '（本地）' : '' }}</label>
-            <input v-model="retention" type="number" min="1" max="365" :disabled="!auth.isSuperadmin" class="w-full rounded-lg px-3 py-2 text-xs outline-none border num" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
-          </div>
-        </div>
-
-        <!-- Remote Credentials -->
-        <div v-if="remoteDest" class="mt-4 p-3.5 rounded-lg border" style="background-color: var(--surface-1); border-color: var(--line-1);">
-          <div class="text-[11px] mb-2" style="color: var(--ink-2);">连接信息（保存进本机加密密文库，不回显明文）</div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div v-if="destination !== 'baidu_oauth'">
-              <label class="block text-[11px] mb-1" style="color: var(--ink-2);">Endpoint</label>
-              <input v-model="endpoint" :disabled="!auth.isSuperadmin" placeholder="https://s3.us-west-004.backblazeb2.com" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
+      <template v-if="simple">
+        <!-- ══ 灾备配置 ══ -->
+        <section class="card">
+          <header class="card-head">
+            <div>
+              <h2 class="card-title"><HardDrive :size="14" />{{ t('admin.backup.configTitle') }}</h2>
+              <p class="card-sub">{{ t('admin.backup.autoBackup') }}</p>
             </div>
-            <div v-if="needsBucket">
-              <label class="block text-[11px] mb-1" style="color: var(--ink-2);">Bucket</label>
-              <input v-model="bucket" :disabled="!auth.isSuperadmin" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
+            <div class="bk-switch">
+              <span class="bk-switch-text" :class="enabled ? 'is-on' : ''">
+                {{ enabled ? t('admin.backup.enabledOn') : t('admin.backup.enabledOff') }}
+              </span>
+              <BaseSwitch v-model="enabled" :disabled="!auth.isSuperadmin" :label="t('admin.backup.configTitle')" />
             </div>
-            <div v-for="f in credentialFields" :key="f">
-              <label class="block text-[11px] mb-1" style="color: var(--ink-2);">{{ f }}</label>
-              <input v-model="credentials[f]" type="password" :disabled="!auth.isSuperadmin" :placeholder="simple.configured ? '留空保持现有值' : ''" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
+          </header>
+
+          <div v-if="simple.legacy_bypy" class="bk-legacy">
+            <AlertTriangle :size="13" />
+            <span>{{ simple.migration_note }}</span>
+          </div>
+
+          <div class="bk-fields">
+            <label class="field-stack">
+              <span class="form-label">{{ t('admin.backup.secContent') }}</span>
+              <select disabled class="field bk-readonly" :aria-label="t('admin.backup.secContent')">
+                <option>{{ t('admin.backup.scopeValue') }}</option>
+              </select>
+            </label>
+
+            <label class="field-stack">
+              <span class="form-label">{{ t('admin.backup.secLocation') }}</span>
+              <select v-model="destination" :disabled="!auth.isSuperadmin" class="field" :aria-label="t('admin.backup.secLocation')">
+                <option value="local">{{ t('admin.backup.destLocal') }}</option>
+                <option value="s3">{{ t('admin.backup.destS3') }}</option>
+                <option value="oss">{{ t('admin.backup.destOss') }}</option>
+                <option value="webdav">{{ t('admin.backup.destWebdav') }}</option>
+                <option value="baidu_oauth">{{ t('admin.backup.destBaidu') }}</option>
+              </select>
+            </label>
+
+            <label class="field-stack">
+              <span class="form-label">{{ t('admin.backup.secSchedule') }}</span>
+              <input v-model="scheduleTime" type="time" :disabled="!auth.isSuperadmin" class="field num" />
+            </label>
+
+            <label class="field-stack">
+              <span class="form-label">
+                {{ t('admin.backup.secRetention') }}{{ destination === 'local' ? t('admin.backup.retentionLocal') : '' }}
+              </span>
+              <input v-model="retention" type="number" inputmode="numeric" min="1" max="365" :disabled="!auth.isSuperadmin" class="field num" />
+            </label>
+          </div>
+
+          <!-- 远端凭据 -->
+          <div v-if="remoteDest" class="bk-creds">
+            <div class="bk-creds-head">
+              <span class="label-caps">{{ t('admin.backup.connInfo') }}</span>
+            </div>
+            <div class="bk-creds-grid">
+              <label v-if="destination !== 'baidu_oauth'" class="field-stack">
+                <span class="form-label">Endpoint</span>
+                <input
+                  v-model="endpoint"
+                  :disabled="!auth.isSuperadmin"
+                  placeholder="https://s3.us-west-004.backblazeb2.com"
+                  class="field mono"
+                />
+              </label>
+              <label v-if="needsBucket" class="field-stack">
+                <span class="form-label">Bucket</span>
+                <input v-model="bucket" :disabled="!auth.isSuperadmin" class="field mono" />
+              </label>
+              <label v-for="f in credentialFields" :key="f" class="field-stack">
+                <span class="form-label mono">{{ f }}</span>
+                <input
+                  v-model="credentials[f]"
+                  type="password"
+                  :disabled="!auth.isSuperadmin"
+                  :placeholder="simple.configured ? t('admin.backup.keepExisting') : ''"
+                  class="field"
+                />
+              </label>
             </div>
           </div>
-        </div>
 
-        <div class="flex flex-wrap items-center gap-2 mt-4">
-          <template v-if="auth.isSuperadmin">
-            <button @click="testConnection" :disabled="busy !== ''" class="flex items-center space-x-1 px-3 py-2 rounded-lg border text-xs cursor-pointer disabled:opacity-40 transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);"><PlugZap class="w-3.5 h-3.5" /><span>{{ busy === 'test' ? '测试中...' : '测试连接' }}</span></button>
-            <button @click="save" :disabled="busy !== ''" class="flex items-center space-x-1 px-3 py-2 rounded-lg text-xs font-bold cursor-pointer disabled:opacity-40 transition-all shadow-xs" style="background-color: var(--accent); color: var(--accent-ink);"><Save class="w-3.5 h-3.5" /><span>{{ busy === 'save' ? '保存中...' : '保存灾备' }}</span></button>
-            <button @click="runNow" :disabled="busy !== ''" class="flex items-center space-x-1 px-3 py-2 rounded-lg text-xs font-bold cursor-pointer disabled:opacity-40 transition-all shadow-xs" style="background-color: var(--down-bg); border-color: var(--down-line); color: var(--down);"><PlayCircle class="w-3.5 h-3.5" /><span>{{ busy === 'run' ? '执行中（最长10分钟）...' : '立即备份' }}</span></button>
+          <footer class="bk-foot">
+            <template v-if="auth.isSuperadmin">
+              <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="testConnection">
+                <Loader2 v-if="busy === 'test'" :size="13" class="animate-spin shrink-0" />
+                <PlugZap v-else :size="13" />
+                <span>{{ busy === 'test' ? t('admin.backup.testing') : t('admin.backup.testConnection') }}</span>
+              </button>
+              <button type="button" class="btn btn-primary btn-sm" :disabled="busy !== ''" @click="save">
+                <Loader2 v-if="busy === 'save'" :size="13" class="animate-spin shrink-0" />
+                <Save v-else :size="13" />
+                <span>{{ busy === 'save' ? t('admin.backup.saving') : t('admin.backup.saveBackup') }}</span>
+              </button>
+              <button type="button" class="btn btn-danger btn-sm" :disabled="busy !== ''" @click="runNow">
+                <Loader2 v-if="busy === 'run'" :size="13" class="animate-spin shrink-0" />
+                <PlayCircle v-else :size="13" />
+                <span>{{ busy === 'run' ? t('admin.backup.running') : t('admin.backup.backupNow') }}</span>
+              </button>
 
-            <!-- Hidden file input for upload -->
-            <input ref="uploadFileInput" type="file" accept=".tar.gz,.tgz" class="hidden" @change="onFileSelected" />
-            <button @click="triggerUpload" :disabled="busy !== ''" class="flex items-center space-x-1 px-3 py-2 rounded-lg border text-xs font-bold cursor-pointer disabled:opacity-40 transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--accent);"><Upload class="w-3.5 h-3.5" /><span>{{ busy === 'upload' ? '正在上传...' : '上传备份包' }}</span></button>
-          </template>
-          <span v-else class="text-[11px]" style="color: var(--ink-3);">只读视图 · 修改需超级管理员登录</span>
-          <span class="ml-auto text-[11px] font-bold" :class="simple.configured ? 'text-emerald-500' : 'text-amber-500'">{{ simple.configured ? '● 目标已配置' : '● 目标未配置' }}</span>
-        </div>
-      </div>
+              <!-- Hidden file input for upload -->
+              <input ref="uploadFileInput" type="file" accept=".tar.gz,.tgz" class="hidden" @change="onFileSelected" />
+              <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="triggerUpload">
+                <Loader2 v-if="busy === 'upload'" :size="13" class="animate-spin shrink-0" />
+                <Upload v-else :size="13" />
+                <span>{{ busy === 'upload' ? t('admin.backup.uploading') : t('admin.backup.uploadPackage') }}</span>
+              </button>
+            </template>
+            <span v-else class="bk-readonly-note">{{ t('admin.backup.readonly') }}</span>
+          </footer>
+        </section>
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <!-- Latest -->
-        <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-          <h2 class="text-xs font-bold uppercase mb-3" style="color: var(--ink-1);">最近一次灾备</h2>
-          <div v-if="simple.latest" class="space-y-1.5 text-xs">
-            <div class="flex justify-between border rounded-lg px-3 py-2" style="background-color: var(--surface-1); border-color: var(--line-1);"><span style="color: var(--ink-2);">时间</span><span class="num" style="color: var(--ink-1);">{{ fmtBackupTime(simple.latest) }}</span></div>
-            <div class="flex justify-between border rounded-lg px-3 py-2" style="background-color: var(--surface-1); border-color: var(--line-1);"><span style="color: var(--ink-2);">状态</span><span class="text-emerald-500 font-bold">{{ simple.latest.status || 'success' }}</span></div>
-          </div>
-          <div v-else class="py-6 text-center text-xs" style="color: var(--ink-3);">尚无匹配的灾备清单记录</div>
-          <div class="text-[11px] mt-3 leading-relaxed" style="color: var(--ink-3);">{{ status?.schedule }}</div>
-        </div>
+        <div class="bk-grid">
+          <!-- ══ 最近一次 ══ -->
+          <section class="card">
+            <header class="card-head">
+              <h2 class="card-title"><Clock :size="14" />{{ t('admin.backup.latestRun') }}</h2>
+            </header>
 
-        <!-- Local archives -->
-        <div class="rounded-xl border overflow-hidden shadow-xs" style="background-color: var(--surface-2); border-color: var(--line-1);">
-          <div class="px-4 py-3 border-b flex items-center justify-between" style="border-color: var(--line-1); background-color: var(--surface-1);">
-            <div class="flex items-center space-x-2">
-              <Archive class="w-4 h-4 text-cyan-400" />
-              <h2 class="text-xs font-semibold" style="color: var(--ink-1);">备份归档清单 ({{ status?.local_archives?.length ?? 0 }})</h2>
+            <BaseEmpty v-if="!simple.latest" :text="t('admin.backup.noLatest')" />
+
+            <div v-else class="bk-kv">
+              <div class="kv-row">
+                <span class="bk-kv-k">{{ t('admin.backup.time') }}</span>
+                <span class="bk-kv-v mono num">{{ fmtBackupTime(simple.latest) }}</span>
+              </div>
+              <div class="kv-row">
+                <span class="bk-kv-k">{{ t('admin.backup.status') }}</span>
+                <span class="badge" :class="simple.latest.status === 'failed' ? 'badge-down' : 'badge-up'" :title="simple.latest.status">
+                  {{ statusLabelOf(simple.latest.status) }}
+                </span>
+              </div>
             </div>
-            <span class="text-[11px]" style="color: var(--ink-3);">支持直接下载与一键恢复</span>
-          </div>
-          <div class="table-scroll-container">
-            <table v-if="status?.local_archives?.length" class="w-full text-left text-xs whitespace-nowrap">
-              <thead>
-                <tr class="border-b text-[11px] uppercase tracking-wider font-bold" style="border-color: var(--line-1); background-color: var(--surface-1); color: var(--ink-2);">
-                  <th class="py-2.5 px-4">归档文件</th>
-                  <th class="py-2.5 px-3 text-right">大小</th>
-                  <th class="py-2.5 px-4 text-right">创建时间</th>
-                  <th class="py-2.5 px-4 text-center">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="a in status.local_archives.slice(0, 10)" :key="a.name" class="border-b last:border-b-0 hover:bg-[var(--surface-3)] transition-colors" style="border-color: var(--line-1);">
-                  <td class="py-2.5 px-4 font-medium truncate max-w-[200px]" style="color: var(--ink-1);" :title="a.name">{{ a.name }}</td>
-                  <td class="py-2.5 px-3 text-right num" style="color: var(--ink-2);">{{ fmtBytes(a.bytes) }}</td>
-                  <td class="py-2.5 px-4 text-right num" style="color: var(--ink-3);">{{ fmtTime(a.mtime) }}</td>
-                  <td class="py-2.5 px-4 text-center">
-                    <div class="flex items-center justify-center space-x-2">
-                      <button
-                        @click="downloadArchive(a.name)"
-                        :disabled="downloadingArchive === (a.name.split('/').pop() || a.name)"
-                        class="p-1 rounded hover:bg-[var(--surface-3)] text-[var(--accent)] transition-colors cursor-pointer disabled:opacity-50"
-                        title="下载归档到本地"
-                      >
-                        <RefreshCw v-if="downloadingArchive === (a.name.split('/').pop() || a.name)" class="w-3.5 h-3.5 animate-spin" />
-                        <Download v-else class="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        v-if="auth.isSuperadmin"
-                        @click="restoreArchive(a.name)"
-                        :disabled="busy === 'restore'"
-                        class="p-1 rounded hover:bg-[var(--surface-3)] text-amber-500 transition-colors cursor-pointer"
-                        title="恢复此备份到系统"
-                      >
-                        <RotateCcw class="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <div v-else class="py-8 text-center text-xs" style="color: var(--ink-2);">暂无本地待清归档，可点击「立即备份」生成完整镜像包或「上传备份包」</div>
-          </div>
+
+            <p v-if="status?.schedule" class="bk-schedule">
+              <CalendarClock :size="12" />
+              <span>{{ status.schedule }}</span>
+            </p>
+          </section>
+
+          <!-- ══ 归档清单 ══ -->
+          <section class="card">
+            <header class="card-head">
+              <h2 class="card-title"><Archive :size="14" />{{ t('admin.backup.archiveList') }}</h2>
+              <span class="badge mono">{{ archives.length }}</span>
+            </header>
+
+            <BaseEmpty v-if="!archives.length" :text="t('admin.backup.emptyArchives')" />
+
+            <div v-else class="bk-rows">
+              <article v-for="a in archives" :key="a.name" class="bk-row">
+                <span class="icon-box"><Archive :size="14" /></span>
+
+                <div class="bk-archive-main">
+                  <span class="bk-archive-name mono truncate" :title="a.name">{{ a.name.split('/').pop() || a.name }}</span>
+                  <span class="bk-archive-meta mono num">{{ fmtBytes(a.bytes) }} · {{ fmtTime(a.mtime) }}</span>
+                </div>
+
+                <div class="bk-archive-actions">
+                  <button type="button"
+                    class="btn btn-ghost btn-sm"
+                    :disabled="downloadingArchive === (a.name.split('/').pop() || a.name)"
+                    :title="t('admin.backup.downloadTitle')"
+                    @click="downloadArchive(a.name)"
+                  >
+                    <Loader2 v-if="downloadingArchive === (a.name.split('/').pop() || a.name)" :size="13" class="animate-spin shrink-0" />
+                    <Download v-else :size="13" />
+                    <span>{{ t('admin.backup.downloadTitle') }}</span>
+                  </button>
+                  <button type="button"
+                    v-if="auth.isSuperadmin"
+                    class="btn btn-quiet btn-sm is-danger"
+                    :disabled="busy === 'restore'"
+                    :title="t('admin.backup.restoreTitle')"
+                    @click="restoreArchive(a.name)"
+                  >
+                    <RotateCcw :size="13" />
+                  </button>
+                </div>
+              </article>
+            </div>
+
+            <p class="bk-hint">{{ t('admin.backup.archiveHint') }}</p>
+          </section>
         </div>
-      </div>
+      </template>
     </template>
   </div>
 </template>
+
+<style scoped>
+.bk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-4);
+}
+
+/* ══ 状态带 ══ */
+
+
+
+
+
+
+
+
+
+
+
+/* ══ 配置 ══ */
+.bk-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bk-switch-text {
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  color: var(--ds-color-text-placeholder);
+}
+.bk-switch-text.is-on {
+  color: var(--up);
+}
+.bk-legacy {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding:10px var(--ds-space-4);
+  border-bottom: 1px solid var(--ds-color-border-default);
+  background-color: var(--warn-bg);
+  color: var(--warn);
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+}
+.bk-legacy > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.bk-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ds-space-4);
+  padding: var(--ds-space-4);
+}
+@media (min-width: 700px) {
+  .bk-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1200px) {
+  .bk-fields {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.bk-readonly {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.bk-creds {
+  padding: 0 var(--ds-space-4) var(--ds-space-4);
+}
+.bk-creds-head {
+  padding-bottom: var(--ds-space-3);
+}
+.bk-creds-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-3);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-inset);
+}
+@media (min-width: 700px) {
+  .bk-creds-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.bk-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  flex-wrap: wrap;
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface-inset);
+}
+.bk-readonly-note {
+  font-size: var(--text-3xs);
+  color: var(--ds-color-text-placeholder);
+}
+
+/* ══ 双栏 ══ */
+.bk-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ds-space-4);
+  align-items: start;
+}
+@media (min-width: 1000px) {
+  .bk-grid {
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  }
+}
+
+.bk-kv {
+  display: flex;
+  flex-direction: column;
+}
+.bk-kv-k {
+  font-size: var(--text-xs);
+  color: var(--ds-color-text-description);
+}
+.bk-kv-v {
+  font-size: var(--text-3xs);
+  color: var(--ds-color-text-primary);
+}
+.bk-schedule {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+  font-size: var(--text-4xs);
+  line-height: var(--leading-body);
+  color: var(--ds-color-text-placeholder);
+}
+.bk-schedule > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* ══ 归档清单 ══ */
+.bk-rows {
+  display: flex;
+  flex-direction: column;
+}
+.bk-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--ds-space-3);
+  padding: 10px var(--ds-space-4);
+  border-bottom: 1px solid var(--ds-color-border-default);
+  transition: background-color var(--dur-fast);
+}
+.bk-row:last-child {
+  border-bottom: 0;
+}
+.bk-row:hover {
+  background-color: var(--ds-color-bg-hover);
+}
+.bk-archive-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.bk-archive-name {
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+  min-width: 0;
+}
+.bk-archive-meta {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+}
+.bk-archive-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  flex-shrink: 0;
+}
+.bk-hint {
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+}
+
+@media (max-width: 760px) {
+  .bk-row {
+    grid-template-columns: 26px minmax(0, 1fr);
+  }
+  .bk-archive-actions {
+    grid-column: 2;
+    justify-content: flex-end;
+  }
+}
+</style>

@@ -1,7 +1,7 @@
 /** 关于与社区弹窗 */
 export const zhAbout = {
   title: '关于 R20',
-  desc: '开源机构级 AI 量化终端，代码即法律（Code is Law）',
+  desc: '查看版本、许可与开源仓库',
   arch: {
     title: '系统架构',
     stack: 'FastAPI + Vue 3 纯静态 SPA',

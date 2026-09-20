@@ -14,6 +14,8 @@ import glob
 import subprocess
 import datetime
 
+_BJ = datetime.timezone(datetime.timedelta(hours=8))
+
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(WORKSPACE_DIR, "logs")
 MAX_LOG_SIZE_MB = 10
@@ -43,16 +45,18 @@ def clean_logs():
         try:
             size_mb = os.path.getsize(file_path) / (1024 * 1024)
             if size_mb > MAX_LOG_SIZE_MB:
-                # Rotate
+                # 审计⑤(2026-09-13)·copytruncate：旧实现把活文件 move 走再新建空壳——
+                # 持有原 inode 的写入方（uvicorn 直写 logs/uvicorn.log 等）从此继续写
+                # .1 归档，「当前日志」再也不涨，等于轮转把活日志弄丢。改为归档副本 +
+                # 原地截断（inode 不变，追加句柄无感续写；截断瞬间的少量竞态对日志可接受）。
                 for i in range(BACKUP_COUNT - 1, 0, -1):
                     sfn = f"{file_path}.{i}"
                     dfn = f"{file_path}.{i+1}"
                     if os.path.exists(sfn):
                         shutil.move(sfn, dfn)
-                # move current to .1
-                shutil.move(file_path, f"{file_path}.1")
-                # create fresh empty log
-                open(file_path, 'w').close()
+                shutil.copy2(file_path, f"{file_path}.1")
+                with open(file_path, "r+") as fh:
+                    fh.truncate(0)
                 cleaned_files.append(f"Rotated {os.path.basename(file_path)} ({size_mb:.1f}MB)")
             
             # Remove any backup beyond BACKUP_COUNT
@@ -65,7 +69,7 @@ def clean_logs():
                 except ValueError:
                     pass
         except Exception as e:
-            pass
+            cleaned_files.append(f"Rotation failed for {os.path.basename(file_path)}: {e}")
 
     return cleaned_files
 
@@ -79,9 +83,14 @@ def clean_system_caches():
         pass
 
     # 2. Clean temporary files in /tmp older than 2 days
+    #    审计D(2026-09-13)·越权清扫收口：旧命令 `find /tmp -type f -mtime +2 -delete`
+    #    扫的是**整个 /tmp**——凡本用户可读写的其他程序临时件（SSH agent socket 目录、
+    #    测试沙箱、harness 文件）一律当垃圾删，属严重越权。现只清带本仓前缀 r20-* 的
+    #    顶层临时条目（测试/工具泄漏产物），其余一概不碰。
     try:
-        subprocess.run("find /tmp -type f -mtime +2 -delete 2>/dev/null", shell=True, capture_output=True, timeout=10)
-        actions.append("old /tmp files cleared")
+        subprocess.run("find /tmp -maxdepth 1 -name 'r20-*' -mtime +2 -exec rm -rf {} + 2>/dev/null",
+                       shell=True, capture_output=True, timeout=10)
+        actions.append("stale /tmp/r20-* entries cleared")
     except Exception:
         pass
 
@@ -97,7 +106,7 @@ def run_cleanup_and_check():
         cache_actions = clean_system_caches()
 
     report = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "timestamp": datetime.datetime.now(_BJ).isoformat(sep=" ", timespec="seconds"),
         "disk": disk,
         "log_rotations": log_actions,
         "cache_cleared": cache_actions

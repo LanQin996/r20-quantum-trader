@@ -142,7 +142,7 @@ class CaptureReplayTests(unittest.TestCase):
         if scripts not in sys.path: sys.path.insert(0,scripts)
         trader=importlib.import_module("scripts.ai_factor_trader")
         with capture.scope(inst="BTC-USDT-SWAP",decision_id="decision-replay"):
-            with patch.object(trader,"selected_environment",return_value=SimpleNamespace(simulated=False)),patch.object(trader,"okx_private_command",side_effect=lambda c:c),patch.object(trader,"run_cmd_result",return_value={"ok":True,"data":[{"ordId":"order-replay"}]}):
+            with patch.object(trader,"current_environment",return_value=SimpleNamespace(simulated=False, mode="live")), patch.object(trader,"fetch_ticker",return_value={"last":"100"}), patch("r20_backend.exchanges.listing.ensure_contract_listed",return_value=SimpleNamespace(ok=True)), patch.object(trader,"record_open_intent"), patch.object(trader.okx_rest,"place_order",return_value=[{"ordId":"order-replay"}]):
                 result=trader.submit_protected_limit_order("BTC-USDT-SWAP","buy","long",2,100,130,90)
         self.assertEqual(result,(True,"order-replay"))
         event=self.events("order.submitted")[0]
@@ -155,7 +155,7 @@ class CaptureReplayTests(unittest.TestCase):
         scripts=str(Path(__file__).resolve().parents[1]/"scripts")
         if scripts not in sys.path: sys.path.insert(0,scripts)
         trader=importlib.import_module("scripts.ai_factor_trader")
-        with patch.object(trader,"selected_environment",return_value=SimpleNamespace(simulated=False)),patch.object(trader,"run_cmd_result") as submit:
+        with patch.object(trader,"current_environment",return_value=SimpleNamespace(simulated=False, mode="live")), patch.object(trader,"fetch_ticker",return_value={"last":"100"}), patch("r20_backend.exchanges.listing.ensure_contract_listed",return_value=SimpleNamespace(ok=True)), patch.object(trader.okx_rest,"place_order") as submit:
             accepted,_=trader.submit_protected_limit_order("BTC-USDT-SWAP","buy","long",2,100,110,90)
         self.assertFalse(accepted); submit.assert_not_called()
         gate=self.events("execution.gate")[0]

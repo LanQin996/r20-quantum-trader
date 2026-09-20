@@ -22,18 +22,29 @@ if str(_THIS_DIR) not in sys.path:
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 import subprocess
 import urllib.request
 from typing import Dict, Any, List, Optional
+
+from scripts.factors.defaults import build_default_factors
+from scripts.factors.scoring import score_composite_alpha
+from scripts.factors.candles_15m import compute_15m_indicators
 from concurrent.futures import ThreadPoolExecutor
 
+_BJ = timezone(timedelta(hours=8))
+
 WORKSPACE_DIR = str(_PROJECT_ROOT)
-DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
+#: ⚠️ `R20_DATA_DIR` 是**测试沙箱专用环境变量**（由 tests/config_sandbox.isolate_config
+#: 设置、由 `run_script` 拉起的子进程继承）：跑测试时把 data/ 写入重定向到沙箱，
+#: **生产从不设置该变量 → 取值与原先逐位相同**。修复"测试经子进程写生产文件"
+#: 的泄漏（§88/§91.6），不改任何业务行为。
+DATA_DIR = os.environ.get("R20_DATA_DIR") or os.path.join(WORKSPACE_DIR, "data")
 FACTOR_LIB_CACHE_FILE = os.path.join(DATA_DIR, "factor_library_snapshot.json")
 
+from scripts.candle_data import closed_okx_candles
 from instrument_pool import load_instruments
 from market_data_service import fetch_orderbook_depth, fetch_indicators_batch, fetch_ticker, fetch_funding_rate, fetch_candles
-from candle_data import closed_okx_candles
 
 TARGET_INSTRUMENTS = load_instruments()
 
@@ -44,103 +55,42 @@ def safe_float(val: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+def _resolve_calculate_calculus():
+    """按需（并缓存）解析微积分引擎。
+
+    原实现在 `compute_instrument_factors` 的**循环体内**每次
+    `sys.path.append(...)` + `from calculus_engine import calculate_calculus` ——
+    8 个标的就重复 8 次路径追加与导入查找。这里改为**模块内 memo 一次**：
+    行为等价（返回同一个函数对象），只是不再每个标的重复做。
+
+    取不到时返回 `None` —— `compute_15m_indicators` 会跳过 Pillar 6
+    而保留前面算好的 ATR/RSI/VWAP/OBV（与原来"内层 try: pass"的语义一致）。
+    """
+    global _CALCULUS_ENGINE_FN
+    if _CALCULUS_ENGINE_FN is not _UNRESOLVED:
+        return _CALCULUS_ENGINE_FN
+    fn = None
+    try:
+        sys.path.append(os.path.join(WORKSPACE_DIR, "scripts"))
+        from calculus_engine import calculate_calculus
+        fn = calculate_calculus
+    except Exception:
+        fn = None
+    _CALCULUS_ENGINE_FN = fn
+    return fn
+
+
+_UNRESOLVED = object()
+_CALCULUS_ENGINE_FN = _UNRESOLVED
+
+
 def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str, Any]) -> Dict[str, Any]:
     inst_id = item["instId"]
     name = item["name"]
     ccy = item.get("ccy", "")
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    factors = {
-        "instId": inst_id,
-        "name": name,
-        "timestamp": int(time.time()),
-        "price": 0.0,
-        "chg24h": 0.0,
-        
-        # Pillar 1: Trend & Momentum
-        "trend_momentum": {
-            "adx_1h": 0.0,
-            "rsi_14": 50.0,
-            "kdj_j": 50.0,
-            "vwap_bias_pct": 0.0,
-            "trend_regime": "NEUTRAL"
-        },
-        
-        # Pillar 2: Volatility & Channel
-        "volatility_channel": {
-            "atr_14": 0.0,
-            "atr_pct": 0.0,
-            "atr_1h": 0.0,
-            "atr_1h_pct": 0.0,
-            "bb_width_1h": 0.0,
-            "volatility_regime": "NORMAL"
-        },
-        
-        # Pillar 3: Volume & Money Flow
-        "volume_money_flow": {
-            "vol_ratio_15m": 1.0,
-            "obv_flow": "NEUTRAL",
-            "cmf_1h": 0.0,
-            "taker_net_usd": "0 U",
-            "flow_sentiment": "BALANCED"
-        },
-        
-        # Pillar 4: Microstructure & Orderbook
-        "microstructure": {
-            "bid_px": 0.0,
-            "ask_px": 0.0,
-            "spread_pct": 0.0,
-            "bid_ask_depth_ratio": 1.0,
-            "depth_bias": "NEUTRAL"
-        },
-        
-        # Pillar 5: Smart Money & Derivatives
-        "smart_money_derivatives": {
-            "weighted_long_pct": 50.0,
-            "smart_money_flow_usd": "0 U",
-            "funding_rate_pct": 0.0,
-            "oi_usd": "--",
-            "long_short_ratio": "--",
-            "avg_long_entry": "--",
-            "avg_short_entry": "--",
-            "top_win_rate": "--",
-            "signal": "NEUTRAL"
-        },
-
-        # Pillar 6: Calculus, Definite Integrals & Probability Theory
-        "calculus_dynamics": {
-            "velocity": 0.0,
-            "acceleration": 0.0,
-            "impulse": 0.0,
-            "jerk": 0.0,
-            "curvature": 0.0,
-            "power": 0.0,
-            "power_regime": "STEADY_FLUX",
-            "regime": "RANGE_LOW_VELOCITY",
-            "quality": 0.0,
-            "direction": 0
-        },
-        "definite_integrals": {
-            "energy_integral": 0.0,
-            "deviation_area_integral": 0.0,
-            "volume_action_integral": 0.0,
-            "integral_regime": "BALANCED_ENERGY"
-        },
-        "probability_theory": {
-            "skewness": 0.0,
-            "kurtosis": 0.0,
-            "continuation_prob_pct": 50.0,
-            "breakdown_prob_pct": 50.0,
-            "var_95_pct": 1.5,
-            "cvar_95_pct": 2.2,
-            "prob_regime": "GAUSSIAN_BALANCED",
-            "is_fat_tail": False
-        },
-        
-        # Composite Factor Score (-100 to +100)
-        "composite_alpha_score": 0.0,
-        "signal_recommendation": "WAIT"
-    }
+    factors = build_default_factors(inst_id, name)
 
     # 1. Ticker & Depth (Orderbook)
     try:
@@ -180,104 +130,29 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     except Exception:
         pass
 
-    # 3. 15M Candles -> ATR, RSI, VWAP Bias, Vol Ratio, OBV
     raw_candles = []
+    raw_1h = []
+    # 3. 15M Candles -> ATR, RSI, VWAP Bias, Vol Ratio, OBV
     try:
-        raw_candles = closed_okx_candles(fetch_candles(inst_id, bar="15m", limit=24))[:24]
-        if len(raw_candles) >= 15:
-            closes = [safe_float(c[4]) for c in reversed(raw_candles)]
-            highs = [safe_float(c[2]) for c in reversed(raw_candles)]
-            lows = [safe_float(c[3]) for c in reversed(raw_candles)]
-            vols = [safe_float(c[5]) for c in reversed(raw_candles)]
-
-            # ATR 14
-            tr_list = []
-            for i in range(1, len(closes)):
-                tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-                tr_list.append(tr)
-            if len(tr_list) >= 14:
-                atr = sum(tr_list[-14:]) / 14
-                factors["volatility_channel"]["atr_14"] = round(atr, 4)
-                if factors["price"] > 0:
-                    factors["volatility_channel"]["atr_pct"] = round(atr / factors["price"] * 100, 2)
-
-            # RSI 14
-            diffs = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-            gains = [d if d > 0 else 0 for d in diffs]
-            losses = [-d if d < 0 else 0 for d in diffs]
-            if len(gains) >= 14:
-                avg_g = sum(gains[-14:]) / 14
-                avg_l = sum(losses[-14:]) / 14
-                rs = (avg_g / avg_l) if avg_l > 0 else 100.0
-                factors["trend_momentum"]["rsi_14"] = round(100.0 - (100.0 / (1.0 + rs)), 1)
-
-            # VWAP Bias
-            pv_sum = sum(closes[i] * vols[i] for i in range(len(closes)))
-            v_sum = sum(vols)
-            if v_sum > 0:
-                vwap = pv_sum / v_sum
-                factors["trend_momentum"]["vwap_bias_pct"] = round((factors["price"] - vwap) / vwap * 100, 2)
-
-            # Vol Ratio
-            if len(vols) >= 6:
-                avg_v5 = sum(vols[-6:-1]) / 5
-                if avg_v5 > 0:
-                    factors["volume_money_flow"]["vol_ratio_15m"] = round(vols[-1] / avg_v5, 2)
-
-            # OBV
-            obv = 0
-            for i in range(1, len(closes)):
-                if closes[i] > closes[i-1]: obv += vols[i]
-                elif closes[i] < closes[i-1]: obv -= vols[i]
-            factors["volume_money_flow"]["obv_flow"] = "BULL_FLOW" if obv > 0 else ("BEAR_FLOW" if obv < 0 else "NEUTRAL")
-
-            # Pillar 6: Calculus, Definite Integrals & Probability Theory (15M High-Resolution)
-            try:
-                sys.path.append(os.path.join(WORKSPACE_DIR, "scripts"))
-                from calculus_engine import calculate_calculus
-                c_res = calculate_calculus(closes, highs, lows, vols)
-                if c_res.get("valid"):
-                    # Calculus Dynamics
-                    factors["calculus_dynamics"]["velocity"] = c_res.get("velocity", 0.0)
-                    factors["calculus_dynamics"]["acceleration"] = c_res.get("acceleration", 0.0)
-                    factors["calculus_dynamics"]["impulse"] = c_res.get("impulse", 0.0)
-                    factors["calculus_dynamics"]["jerk"] = c_res.get("jerk", 0.0)
-                    factors["calculus_dynamics"]["curvature"] = c_res.get("curvature", 0.0)
-                    factors["calculus_dynamics"]["power"] = c_res.get("power", 0.0)
-                    factors["calculus_dynamics"]["power_regime"] = c_res.get("power_regime", "STEADY_FLUX")
-                    factors["calculus_dynamics"]["regime"] = c_res.get("regime", "RANGE_LOW_VELOCITY")
-                    factors["calculus_dynamics"]["quality"] = c_res.get("quality", 0.0)
-                    factors["calculus_dynamics"]["direction"] = c_res.get("direction", 0)
-
-                    # Definite Integrals
-                    d_int = c_res.get("definite_integrals", {})
-                    factors["definite_integrals"]["energy_integral"] = d_int.get("energy_integral", 0.0)
-                    factors["definite_integrals"]["deviation_area_integral"] = d_int.get("deviation_area_integral", 0.0)
-                    factors["definite_integrals"]["volume_action_integral"] = d_int.get("volume_action_integral", 0.0)
-                    factors["definite_integrals"]["integral_regime"] = d_int.get("integral_regime", "BALANCED_ENERGY")
-
-                    # Probability Theory & Stochastic Modeling
-                    p_th = c_res.get("probability_theory", {})
-                    factors["probability_theory"]["skewness"] = p_th.get("skewness", 0.0)
-                    factors["probability_theory"]["kurtosis"] = p_th.get("kurtosis", 0.0)
-                    factors["probability_theory"]["continuation_prob_pct"] = p_th.get("continuation_prob_pct", 50.0)
-                    factors["probability_theory"]["breakdown_prob_pct"] = p_th.get("breakdown_prob_pct", 50.0)
-                    factors["probability_theory"]["var_95_pct"] = p_th.get("var_95_pct", 1.5)
-                    factors["probability_theory"]["cvar_95_pct"] = p_th.get("cvar_95_pct", 2.2)
-                    factors["probability_theory"]["prob_regime"] = p_th.get("prob_regime", "GAUSSIAN_BALANCED")
-                    factors["probability_theory"]["is_fat_tail"] = p_th.get("is_fat_tail", False)
-            except Exception:
-                pass
+        d = {"data": closed_okx_candles(fetch_candles(inst_id, bar="15m", limit=24))[:24]}
+        if d["data"] and len(d["data"]) >= 15:
+            raw_candles = d["data"]
+            # 15M 派生序列 + 指标 + Pillar 6（阶段 4·B3 第三十二刀：
+            # 迁至 scripts/factors/candles_15m.py）。取数仍在本门面内，
+            # 故对 fetch_candles 的 patch.object 缝不受影响。
+            closes, highs, lows, vols = compute_15m_indicators(
+                raw_candles, factors, safe_float=safe_float,
+                calculate_calculus=_resolve_calculate_calculus())
         else:
             print(f"[Factor] ⚠️ {inst_id} 15m K线获取不足15根（www/aws/CLI 三级容灾均未取回），15M 因子降级缺省")
     except Exception as exc:
         print(f"[Factor] ⚠️ {inst_id} 15m K线处理异常: {exc}")
 
     # 3.5. 1H Candles -> 1H ATR & 1H RSI
-    raw_1h = []
     try:
-        raw_1h = closed_okx_candles(fetch_candles(inst_id, bar="1H", limit=24))[:24]
-        if len(raw_1h) >= 15:
+        d = {"data": closed_okx_candles(fetch_candles(inst_id, bar="1H", limit=24))[:24]}
+        if d["data"] and len(d["data"]) >= 15:
+            raw_1h = d["data"]
             closes_1h = [safe_float(c[4]) for c in reversed(raw_1h)]
             highs_1h = [safe_float(c[2]) for c in reversed(raw_1h)]
             lows_1h = [safe_float(c[3]) for c in reversed(raw_1h)]
@@ -352,8 +227,10 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         except Exception:
             pass
 
-    # SmartMoney Overlay
+    # SmartMoney Overlay（仅当真有数据源时覆盖缺失占位；无源时保留 available=False）
     if ccy in smart_money_pool:
+        factors["smart_money_derivatives"]["available"] = True
+        factors["smart_money_derivatives"]["reason"] = ""
         sm = smart_money_pool[ccy]
         ls = sm.get("longShortRatio", {})
         notional = sm.get("notional", {})
@@ -364,6 +241,8 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         
         factors["smart_money_derivatives"]["weighted_long_pct"] = w_long
         factors["smart_money_derivatives"]["smart_money_flow_usd"] = net_str
+        if ls.get("longShortRatio") is not None:
+            factors["smart_money_derivatives"]["long_short_ratio"] = str(round(safe_float(ls.get("longShortRatio")), 2))
         long_avg = safe_float(notional.get("smartMoneyLongAvgEntry", 0))
         short_avg = safe_float(notional.get("smartMoneyShortAvgEntry", 0))
         if long_avg > 0:
@@ -384,116 +263,29 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         elif w_long <= 35.0 and net_usdt < 0:
             factors["smart_money_derivatives"]["signal"] = "BEAR_DISTRIBUTION"
 
-    # =========================================================================
-    # COMPOSITE HIGH-ALPHA SCORING (-100 to +100)
-    # =========================================================================
-    score = 0.0
-    
-    # 1. ADX Trend Filter (Threshold = 22)
-    adx = factors["trend_momentum"]["adx_1h"]
-    if adx >= 22.0:
-        score += 15.0 if factors["trend_momentum"]["rsi_14"] >= 50 else -15.0
-        factors["trend_momentum"]["trend_regime"] = "STRONG_TREND"
-    else:
-        factors["trend_momentum"]["trend_regime"] = "CHOP_RANGE"
-
-    # 2. Smart Money Direction
-    sm_long = factors["smart_money_derivatives"]["weighted_long_pct"]
-    if sm_long >= 70.0: score += 30.0
-    elif sm_long <= 35.0: score -= 30.0
-
-    # 3. RSI & KDJ Dynamic Momentum
-    rsi = factors["trend_momentum"]["rsi_14"]
-    kdj_j = factors["trend_momentum"]["kdj_j"]
-    if rsi >= 55.0 and kdj_j >= 60.0: score += 20.0
-    elif rsi <= 45.0 and kdj_j <= 40.0: score -= 20.0
-
-    # 4. Money Flow (OBV & CMF)
-    cmf = factors["volume_money_flow"]["cmf_1h"]
-    obv_f = factors["volume_money_flow"]["obv_flow"]
-    if cmf > 0.05 and obv_f == "BULL_FLOW": score += 20.0
-    elif cmf < -0.05 and obv_f == "BEAR_FLOW": score -= 20.0
-
-    # 5. Orderbook Microstructure Imbalance
-    depth_r = factors["microstructure"]["bid_ask_depth_ratio"]
-    if depth_r >= 1.4: score += 15.0
-    elif depth_r <= 0.7: score -= 15.0
-
-    # 6. Calculus, Definite Integrals & Probability Theory Modulation
-    c_dyn = factors["calculus_dynamics"]
-    c_v = c_dyn.get("velocity", 0.0)
-    c_a = c_dyn.get("acceleration", 0.0)
-    c_i = c_dyn.get("impulse", 0.0)
-    c_j = abs(c_dyn.get("jerk", 0.0))
-    c_regime = c_dyn.get("regime", "")
-
-    # Bullish acceleration vs deceleration
-    if c_regime == "BULL_ACCELERATING" or (c_v > 0.2 and c_a > 0.1 and c_i > 0):
-        score += 15.0
-    elif c_regime == "BULL_DECELERATING" or (c_v > 0.2 and c_a < -0.3):
-        score -= 10.0 # Anti-FOMO top chasing penalty
-    elif c_regime == "BEAR_ACCELERATING" or (c_v < -0.2 and c_a < -0.1 and c_i < 0):
-        score -= 15.0
-    elif c_regime == "BEAR_DECELERATING" or (c_v < -0.2 and c_a > 0.3):
-        score += 10.0 # Anti-bottom chasing penalty
-
-    # 7. Definite Integrals & Energy Modulation
-    d_int = factors.get("definite_integrals", {})
-    e_int = d_int.get("energy_integral", 0.0)
-    dev_area = d_int.get("deviation_area_integral", 0.0)
-    if e_int > 1.2 and dev_area > 0.8:
-        score += 10.0 # Multi-period net positive displacement energy
-    elif e_int < -1.2 and dev_area < -0.8:
-        score -= 10.0 # Multi-period net negative depletion
-    elif abs(dev_area) >= 2.8:
-        # Overstretched deviation integral penalty: trigger mean-reversion caution
-        score *= 0.8
-
-    # 8. Probability Theory & Stochastic Risk
-    p_th = factors.get("probability_theory", {})
-    p_cont = p_th.get("continuation_prob_pct", 50.0)
-    p_break = p_th.get("breakdown_prob_pct", 50.0)
-    is_fat = p_th.get("is_fat_tail", False)
-    if p_cont >= 72.0:
-        score += 10.0 # High conditional continuation probability
-    elif p_break >= 72.0:
-        score -= 10.0 # High conditional breakdown probability
-
-    # High Jerk or Extreme Fat Tail Shock Dampener
-    if c_j >= 1.8 or c_regime == "SHOCK_HIGH_JERK" or (is_fat and p_th.get("kurtosis", 0) >= 3.5):
-        score *= 0.6 # dampen conviction under high-jerk shock / extreme fat tails
-
-    factors["composite_alpha_score"] = round(score, 1)
-
-    # Decision Recommendation
-    candles_ready = (
-        len(raw_candles) >= 15
-        and len(raw_1h) >= 15
-        and factors["calculus_dynamics"]["quality"] > 0
-    )
-    if not candles_ready:
+    # 复合 alpha 打分与信号建议（-100~+100）
+    # 阶段 4·B3 第二十九刀：整段迁至 scripts/factors/scoring.py::score_composite_alpha，
+    # 本处只保留调用。八项门槛/加减分与两处阻尼的说明见该模块文档串。
+    score_composite_alpha(factors)
+    if len(raw_candles) < 15 or len(raw_1h) < 15 or factors["calculus_dynamics"]["quality"] <= 0:
         factors["signal_recommendation"] = "WAIT"
-    elif score >= 45.0 and adx >= 20.0 and c_j < 1.8:
-        factors["signal_recommendation"] = "BUY_LONG"
-    elif score <= -45.0 and adx >= 20.0 and c_j < 1.8:
-        factors["signal_recommendation"] = "SELL_SHORT"
-    else:
-        factors["signal_recommendation"] = "WAIT"
+
 
     return factors
 
 def update_factor_library() -> Dict[str, Any]:
     """Fetch and calculate multi-pillar factor library snapshot for 6 instruments."""
-    # 1. Fetch Smart Money Pool
-    smart_money_pool = {}
+    # 1. Smart Money Pool：通过 Binance 公开大户指标 + OKX Rubik 备选双源容灾采集
+    #    双源均不可用时保持空池 → 优雅缺失化 available=False
     try:
-        cmd = "okx smartmoney signal-overview-by-filter --instCcyList BTC,ETH,SOL,DOGE,SUI,LINK --json 2>/dev/null"
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
-        if res.stdout:
-            d = json.loads(res.stdout).get("data", [])
-            smart_money_pool = {item.get("ccy"): item for item in d if item.get("ccy")}
+        try:
+            from scripts.factors.smart_money import fetch_smart_money_pool
+        except ImportError:
+            from factors.smart_money import fetch_smart_money_pool
+        smart_money_pool = fetch_smart_money_pool(TARGET_INSTRUMENTS)
     except Exception as e:
-        print(f"[Factor Library] SmartMoney pool error: {e}")
+        print(f"[Factor Library] SmartMoney pool fetch fallback: {e}")
+        smart_money_pool = {}
 
     # 2. Parallel Factor Computations
     with ThreadPoolExecutor(max_workers=6) as executor:
@@ -501,7 +293,7 @@ def update_factor_library() -> Dict[str, Any]:
 
     snapshot = {
         "timestamp": int(time.time()),
-        "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "time_str": datetime.now(_BJ).isoformat(sep=" ", timespec="seconds"),
         "instruments": results
     }
 

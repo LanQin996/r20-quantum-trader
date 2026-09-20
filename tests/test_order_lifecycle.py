@@ -46,7 +46,10 @@ class StaleOrderCleanupTests(unittest.TestCase):
                 return {"ok": True, "returncode": 0, "stdout": "[]", "stderr": "", "data": []}
             return {"ok": True, "returncode": 0, "stdout": "[]", "stderr": "", "data": orders}
 
-        with patch.object(self.trader, "run_cmd_result", side_effect=run):
+        with patch.object(self.trader.okx_rest, "pending_orders", return_value=orders), \
+             patch.object(self.trader.okx_rest, "cancel_order", side_effect=lambda inst, oid: cancelled.append(oid)), \
+             patch.object(self.trader, "load_open_intents", return_value=[]), \
+             patch.object(self.trader.venue_registry, "execution_open", return_value=False):
             ok, note = self.trader.clean_stale_open_orders()
         self.assertTrue(ok, note)
         self.assertEqual(len(cancelled), 1)
@@ -65,7 +68,10 @@ class StaleOrderCleanupTests(unittest.TestCase):
                 return {"ok": True, "returncode": 0, "stdout": "[]", "stderr": "", "data": []}
             return {"ok": True, "returncode": 0, "stdout": "[]", "stderr": "", "data": orders}
 
-        with patch.object(self.trader, "run_cmd_result", side_effect=run):
+        with patch.object(self.trader.okx_rest, "pending_orders", return_value=orders), \
+             patch.object(self.trader.okx_rest, "cancel_order", side_effect=lambda inst, oid: cancelled.append(oid)), \
+             patch.object(self.trader, "load_open_intents", return_value=[]), \
+             patch.object(self.trader.venue_registry, "execution_open", return_value=False):
             ok, _ = self.trader.clean_stale_open_orders()
         self.assertTrue(ok)
         self.assertEqual(cancelled, [])

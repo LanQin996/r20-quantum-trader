@@ -10,4 +10,12 @@ export const zhAdminLogin = {
   rateHint: '连续失败 5 次锁定 15 分钟；全部登录行为计入审计日志。',
   backToScreen: '返回实盘大屏',
   secured: '会话凭据仅存于本机浏览器',
+  showPwd: '显示密码',
+  hidePwd: '隐藏密码',
+  panelTitle: '管理控制台',
+  panelDesc: '配置交易引擎、决策主脑、数据管道与物理风控门禁；下单执行不在控制台内发生。',
+  factVersion: '版本',
+  factSession: '会话',
+  factAudit: '审计',
+  auditValue: '登录行为全部计入审计日志',
 };

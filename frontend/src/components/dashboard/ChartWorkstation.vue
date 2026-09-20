@@ -1,13 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { chartStyles } from './chartStyles'
+import { computeRiskReward, symbolPrecision } from './chartMath'
+import { deriveLiveEntry, deriveLiveSide, deriveLiveStopLoss, deriveLiveTakeProfit } from './chartLiveLevels'
+import { planPriceLines } from './chartOverlays'
+import { countdownLabel } from './chartCountdown'
+import { fetchCandles } from './chartCandles'
+import { mainIndicators, subIndicators, DEFAULT_ACTIVE_INDICATORS } from './chartIndicators'
+import { fmtDate, fmtHM, fmtClock } from '../../utils/format';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick, useId } from 'vue'
+import { usePopoverFocus } from '../../composables/usePopoverFocus'
 import { useDashboardStore } from '../../stores/dashboard'
 import { symOf, instIdOf } from '../../utils/instId'
 import { useTheme } from '../../composables/useTheme'
 import { useI18n } from '../../composables/useI18n'
+import { demotePositiveTabIndex } from '../../utils/tabOrder'
 import {
   init as initKLineChart,
   dispose as disposeKLineChart,
   registerIndicator,
+  registerOverlay,
   type Chart as KLineChartType,
   type KLineData,
 } from 'klinecharts'
@@ -24,29 +35,146 @@ import {
   Minimize,
 } from 'lucide-vue-next'
 import BaseSegmented from '../base/BaseSegmented.vue'
+import CryptoLogo from './CryptoLogo.vue'
 
 // ==========================================
-// 0. 注册原生 VWAP 指标 (基于成交量加权平均价)
+// 0. 注册原生 VWAP 指标与价格线渲染优化
 // ==========================================
+registerOverlay({
+  name: 'priceLine',
+  totalStep: 2,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: true,
+  createPointFigures: ({ coordinates, bounding, overlay }) => {
+    const y = coordinates[0]?.y ?? 0
+    const lineStyle = overlay.styles?.line || {}
+    const textStyle = overlay.styles?.text || {}
+    const label = String(overlay.extendData || '')
+
+    let strokeColor = lineStyle.color || '#10B981'
+    let strokeStyle = lineStyle.style || 'solid'
+    let strokeDashed = lineStyle.dashedValue || [6, 4]
+    let badgeBg = textStyle.backgroundColor || strokeColor
+    let displayBadge = label
+
+    const isEntry = label.includes('入场') || label.includes('Entry')
+    const isTp = label.includes('TP') || label.includes('止盈')
+    const isSl = label.includes('SL') || label.includes('止损') || label.includes('锁利') || label.includes('保本') || label.includes('Lock') || label.includes('Breakeven')
+
+    // 垂直错位避让：入场与止盈胶囊贴线上方，止损/锁利胶囊贴线下方，避免相近点位相互覆盖
+    let textBaseline: 'top' | 'bottom' | 'middle' = 'middle'
+    let textYOffset = 0
+
+    if (isEntry) {
+      strokeColor = '#0284C7'
+      strokeStyle = 'solid'
+      badgeBg = '#0369A1'
+      displayBadge = `⚡ ${label.replace(/^[▲▼⚡🛑🔒\s]+/, '')}`
+      textBaseline = 'bottom'
+      textYOffset = -2
+    } else if (isTp) {
+      strokeColor = '#10B981'
+      strokeStyle = 'dashed'
+      strokeDashed = [8, 4]
+      badgeBg = '#047857'
+      displayBadge = `🎯 ${label.replace(/^[▲▼🎯\s]+/, '')}`
+      textBaseline = 'bottom'
+      textYOffset = -2
+    } else if (isSl) {
+      const isLock = label.includes('锁利') || label.includes('保本') || label.includes('Lock') || label.includes('Breakeven')
+      strokeColor = isLock ? '#10B981' : '#F43F5E'
+      strokeStyle = 'dashed'
+      strokeDashed = isLock ? [8, 4] : [5, 3]
+      badgeBg = isLock ? '#047857' : '#BE123C'
+      displayBadge = isLock ? `🔒 ${label.replace(/^[▲▼🛑🔒\s]+/, '')}` : `🛑 ${label.replace(/^[▲▼🛑\s]+/, '')}`
+      textBaseline = 'top'
+      textYOffset = 2
+    }
+
+    // 视口上下边界保护：当线贴近画布顶部时（y < 24），改贴线下方；
+    // 当线贴近画布底部时（bounding.height && y > bounding.height - 24），改贴线上方
+    if (y < 24) {
+      textBaseline = 'top'
+      textYOffset = 3
+    } else if (bounding.height && y > bounding.height - 24) {
+      textBaseline = 'bottom'
+      textYOffset = -3
+    }
+
+    // 价格超出当前可视窗口时，自然不绘制（用户缩放/平移至该价位时自然展现，不强行拉扯或挤在角落）
+    if (y < -20 || (bounding.height > 0 && y > bounding.height + 20)) {
+      return []
+    }
+
+    const startX = y < 70 ? Math.min(240, bounding.width * 0.5) : 0
+
+    return [
+      {
+        type: 'line',
+        attrs: {
+          coordinates: [{ x: startX, y }, { x: bounding.width, y }],
+        },
+        styles: {
+          style: strokeStyle,
+          dashedValue: strokeDashed,
+          size: lineStyle.size || 1.2,
+          color: strokeColor,
+        },
+      },
+      {
+        type: 'text',
+        ignoreEvent: true,
+        attrs: {
+          x: Math.max(10, bounding.width - 6),
+          y: y + textYOffset,
+          text: displayBadge,
+          align: 'right',
+          baseline: textBaseline,
+        },
+        styles: {
+          size: 10,
+          family: 'JetBrains Mono, -apple-system, BlinkMacSystemFont, sans-serif',
+          weight: 'bold',
+          color: '#FFFFFF',
+          backgroundColor: badgeBg,
+          paddingLeft: 4,
+          paddingRight: 4,
+          paddingTop: 1.5,
+          paddingBottom: 1.5,
+          borderRadius: 2,
+        },
+      },
+    ]
+  },
+})
 registerIndicator({
   name: 'VWAP',
   shortName: 'VWAP',
   series: 'price',
   precision: 2,
-  figures: [{ key: 'vwap', title: 'VWAP: ', type: 'line' }],
+  // 批 18：图例由 klinecharts 渲染为「shortName + figure.title + 值」，
+  // 原先 title 也是 'VWAP: ' → 图例出现「VWAP VWAP: 97.740」这种重复。
+  // 去掉 figure.title 的前缀，图例变为「VWAP 97.740」。
+  figures: [{ key: 'vwap', title: '', type: 'line' }],
   styles: {
+    // ⚠️ 批 13 说明：此处是本仓**唯一**刻意保留的颜色字面量。
+    // `registerIndicator` 在模块求值时执行，而 `tok()` 依赖 document 与已生效的
+    // `data-theme`；此刻取值不可靠。且该色最终落在 canvas（不解析 var()）。
+    // 改这条线色需要目视验证 K 线工位；本仓不装浏览器，目视验证经 harness 的
+    // Playwright MCP 进行。未验证前按 chartStyles.ts 模块头「不动渲染路径」的纪律保留原值。
+    // 事件驱动的重绘会经 getChartStyles() 覆盖大部分指标样式，本值是注册期兜底。
     lines: [{ style: 'solid', smooth: false, size: 1.5, color: '#06B6D4' }], // 青蓝色
   },
   calc: (dataList: KLineData[]) => {
     let cumTypicalVol = 0
     let cumVol = 0
-    let lastDay = -1
+    let lastDay = ''
 
     return dataList.map((kLine) => {
-      const d = new Date(kLine.timestamp)
-      const day = d.getUTCDate()
+      const day = fmtDate(kLine.timestamp)
       // 每天重置或者连续累计
-      if (lastDay !== -1 && day !== lastDay) {
+      if (lastDay !== '' && day !== lastDay) {
         cumTypicalVol = 0
         cumVol = 0
       }
@@ -67,16 +195,31 @@ registerIndicator({
 const props = defineProps<{
   symbol?: string
   initialSymbol?: string
+  fill?: boolean
+  chartHeight?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'select-symbol', symbol: string): void
 }>()
 
-/* 工作站全屏：自管浮层，滚动锁 */
+/* 工作站全屏：自管浮层，滚动锁与重排自适应 */
 const isFullscreen = ref(false)
 watch(isFullscreen, (v) => {
   document.body.style.overflow = v ? 'hidden' : ''
+  nextTick(() => {
+    if (klineChart) {
+      klineChart.resize()
+      const offset = typeof window !== 'undefined' && window.innerWidth < 640 ? 75 : 95
+      klineChart.setOffsetRightDistance(offset)
+      klineChart.scrollToRealTime()
+    }
+    if (!v) {
+      requestAnimationFrame(() => {
+        klineChart?.resize()
+      })
+    }
+  })
 })
 onUnmounted(() => { document.body.style.overflow = '' })
 
@@ -84,10 +227,8 @@ const store = useDashboardStore()
 const { theme, cvd } = useTheme()
 const isDark = computed(() => theme.value === 'dark')
 
-/* P4: mobile hides the always-on legend to stop multi-line overlay on narrow screens;
-   desktop keeps it (data always readable). Re-applied when crossing the 640px breakpoint. */
 function legendRule(): 'always' {
-  // 用户要求图例常驻左上角；副图压缩 + 容器加高缓解遮挡
+  // 指标数值（VWAP、MA、VOL 等）常驻显示，满足量化操盘随时观察要求
   return 'always'
 }
 
@@ -107,7 +248,7 @@ const availableSymbols = computed(() => {
   // 1. 优先提取当前持仓标的 (去重)
   if (Array.isArray(store.positions)) {
     store.positions.forEach((p: any) => {
-      const sym = (p.name || symOf(p.instId))
+      const sym = (p.name || symOf(p.instId))?.replace(/_+$/, '').toUpperCase()
       if (sym) holdingSet.add(sym)
     })
   }
@@ -115,7 +256,7 @@ const availableSymbols = computed(() => {
   // 2. 优先提取挂单标的 (去重)
   if (Array.isArray(store.pendingOrders)) {
     store.pendingOrders.forEach((o: any) => {
-      const sym = (o.name || symOf(o.instId))
+      const sym = (o.name || symOf(o.instId))?.replace(/_+$/, '').toUpperCase()
       if (sym) holdingSet.add(sym)
     })
   }
@@ -124,7 +265,7 @@ const availableSymbols = computed(() => {
   //    此前误写为 store.factorLibrary，恒为 undefined 导致动态标的整段被跳过，标签页永远只剩硬编码兜底）
   if (Array.isArray(store.factors)) {
     store.factors.forEach((f: any) => {
-      const sym = (f.name || symOf(f.instId))
+      const sym = (f.name || symOf(f.instId))?.replace(/_+$/, '').toUpperCase()
       if (sym && !holdingSet.has(sym)) {
         otherSet.add(sym)
       }
@@ -157,61 +298,28 @@ const chartContainer = ref<HTMLElement | null>(null)
 // 2. 指标配置中心 (主图与副图严密区分)
 // ==========================================
 const showIndicatorMenu = ref<boolean>(false)
+/* 批 104：指标下拉是**非模态**气泡（role=dialog 但无 aria-modal），
+   打开时要把焦点交给面板 —— 此前键盘 Enter 打开后焦点仍停在触发按钮上。 */
+const indicatorTrigger = ref<HTMLElement | null>(null)
+const indicatorPanel = ref<HTMLElement | null>(null)
+usePopoverFocus(indicatorPanel, indicatorTrigger, showIndicatorMenu)
 const symbolMenu = ref<boolean>(false)
+const symbolMenuId = useId()
+/* 批 104：选币下拉同样是气泡，一并接管焦点交接。 */
+const symbolTrigger = ref<HTMLElement | null>(null)
+const symbolPanel = ref<HTMLElement | null>(null)
+usePopoverFocus(symbolPanel, symbolTrigger, symbolMenu)
+const indicatorMenuId = useId()
 
 /** 持仓/挂单中的币种（选币下拉的徽标） */
 const holdingSet = computed(() => {
   const s = new Set<string>()
-  store.positions.forEach((p: any) => { const n = String(p.name || p.instId || '').split('-')[0].toUpperCase(); if (n) s.add(n) })
-  store.pendingOrders.forEach((o: any) => { const n = String(o.name || o.instId || '').split('-')[0].toUpperCase(); if (n) s.add(n) })
+  store.positions.forEach((p: any) => { const n = String(p.name || p.instId || '').split('-')[0].replace(/_+$/, '').toUpperCase(); if (n) s.add(n) })
+  store.pendingOrders.forEach((o: any) => { const n = String(o.name || o.instId || '').split('-')[0].replace(/_+$/, '').toUpperCase(); if (n) s.add(n) })
   return s
 })
+const activeIndicators = ref<Record<string, boolean>>({ ...DEFAULT_ACTIVE_INDICATORS })
 
-// 主图叠加指标 (Overlay on Main Candle Pane)
-interface IndicatorOption {
-  key: string
-  name: string
-  label: string
-  desc: string
-  color: string
-  defaultParams?: any[]
-  isSub: boolean
-}
-
-const mainIndicators: IndicatorOption[] = [
-  { key: 'VWAP', name: 'VWAP', label: 'VWAP', desc: '成交量加权均价线', color: '#06B6D4', isSub: false },
-  { key: 'MA', name: 'MA', label: 'MA', desc: '均线 (5, 10, 20)', color: '#F59E0B', defaultParams: [5, 10, 20], isSub: false },
-  { key: 'EMA', name: 'EMA', label: 'EMA', desc: '指数均线 (12, 26, 50)', color: '#38BDF8', defaultParams: [12, 26, 50], isSub: false },
-  { key: 'BOLL', name: 'BOLL', label: 'BOLL', desc: '布林带轨道 (20, 2)', color: '#818CF8', defaultParams: [20, 2], isSub: false },
-  { key: 'SAR', name: 'SAR', label: 'SAR', desc: '抛物线转向', color: '#EC4899', isSub: false },
-]
-
-// 副图独立窗格指标 (Sub Panes)
-const subIndicators: IndicatorOption[] = [
-  { key: 'VOL', name: 'VOL', label: 'VOL', desc: '成交量与柱形量能', color: '#10B981', isSub: true },
-  { key: 'MACD', name: 'MACD', label: 'MACD', desc: '异同移动平均线', color: '#3B82F6', defaultParams: [12, 26, 9], isSub: true },
-  { key: 'RSI', name: 'RSI', label: 'RSI', desc: '相对强弱动量 (6, 12, 24)', color: '#F97316', defaultParams: [6, 12, 24], isSub: true },
-  { key: 'KDJ', name: 'KDJ', label: 'KDJ', desc: '随机摆动指标 (9, 3, 3)', color: '#A855F7', defaultParams: [9, 3, 3], isSub: true },
-  { key: 'OBV', name: 'OBV', label: 'OBV', desc: '能量潮累积线', color: '#EAB308', isSub: true },
-  { key: 'WR', name: 'WR', label: 'WR', desc: '威廉超买超卖 (14)', color: '#6366F1', defaultParams: [14], isSub: true },
-]
-
-// 默认激活指标：默认开启 VOL 与 VWAP
-const activeIndicators = ref<Record<string, boolean>>({
-  VWAP: true,
-  VOL: true,
-  MA: false,
-  EMA: false,
-  BOLL: false,
-  SAR: false,
-  MACD: false,
-  RSI: false,
-  KDJ: false,
-  OBV: false,
-  WR: false,
-})
-
-// 记录已挂载的指标 Pane ID，以便精准开关
 
 // 当前标的计算
 const currentInstId = computed(() => instIdOf(currentSymbol.value))
@@ -267,56 +375,22 @@ const activeOrder = computed(() => {
 // 真实最新价格 (纯从当前已加载的实时蜡烛最后一根获取，与K线和最新Tick 100% 同源)
 const currentPrice = ref<number>(0)
 
-// 真实开仓成本与方向
-const liveEntry = computed(() => {
-  if (activePosition.value) return Number(activePosition.value.avgPx || currentPrice.value)
-  if (activeOrder.value) return Number(activeOrder.value.px || currentPrice.value)
-  return currentPrice.value
-})
+// 真实开仓成本与方向（推导逻辑见 ./chartLiveLevels.ts，本处只负责读 ref 与响应式追踪）
+const liveEntry = computed(() => deriveLiveEntry({
+  position: activePosition.value, order: activeOrder.value, price: currentPrice.value,
+}))
 
-const liveSide = computed<'long' | 'short'>(() => {
-  if (activePosition.value) return activePosition.value.side === 'short' ? 'short' : 'long'
-  if (activeOrder.value) {
-    const s = String(activeOrder.value.side || activeOrder.value.side_raw || '').toLowerCase()
-    return s.includes('sell') || s.includes('空') ? 'short' : 'long'
-  }
-  return 'long'
-})
+const liveSide = computed<'long' | 'short'>(() => deriveLiveSide({
+  position: activePosition.value, order: activeOrder.value,
+}))
 
-const liveStopLoss = computed(() => {
-  if (activePosition.value) {
-    const s = Number(
-      activePosition.value.displayStop ??
-      activePosition.value.exchangeSl ??
-      activePosition.value.slTriggerPx ??
-      activePosition.value.trailingSl ??
-      0
-    )
-    if (s > 0) return s
-  }
-  if (activeOrder.value) {
-    const s = Number(activeOrder.value.sl_px ?? 0)
-    if (s > 0) return s
-  }
-  return 0
-})
+const liveStopLoss = computed(() => deriveLiveStopLoss({
+  position: activePosition.value, order: activeOrder.value,
+}))
 
-const liveTakeProfit = computed(() => {
-  if (activePosition.value) {
-    const tp = Number(
-      activePosition.value.displayTakeProfit ??
-      activePosition.value.exchangeTp ??
-      activePosition.value.tpTriggerPx ??
-      0
-    )
-    if (tp > 0) return tp
-  }
-  if (activeOrder.value) {
-    const tp = Number(activeOrder.value.tp_px ?? 0)
-    if (tp > 0) return tp
-  }
-  return 0
-})
+const liveTakeProfit = computed(() => deriveLiveTakeProfit({
+  position: activePosition.value, order: activeOrder.value,
+}))
 
 // ==========================================
 // 3. 调价试算控制器 (Sim Mode)
@@ -350,71 +424,20 @@ function resetSimulation() {
 }
 
 // 真实数学风控测算模型
-const riskRewardMetrics = computed(() => {
-  const entry = effectiveEntry.value
-  const sl = effectiveSL.value
-  const tp = effectiveTP.value
-  const side = liveSide.value
-  const atr = currentAtr.value
-
-  let riskDist = 0
-  let rewardDist = 0
-
-  if (side === 'long') {
-    riskDist = Math.max(0, entry - sl)
-    rewardDist = Math.max(0, tp - entry)
-  } else {
-    riskDist = Math.max(0, sl - entry)
-    rewardDist = Math.max(0, entry - tp)
-  }
-
-  const riskPct = entry > 0 ? (riskDist / entry) * 100 : 0
-  const rewardPct = entry > 0 ? (rewardDist / entry) * 100 : 0
-  const rrRatio = riskDist > 0 ? rewardDist / riskDist : 0
-  const atrMultiple = atr > 0 ? riskDist / atr : 0
-
-  const isRrCompliant = rrRatio >= 2.0
-  const isAtrOptimal = atrMultiple >= 1.8 && atrMultiple <= 2.2
-
-  const hasRealPosition = !!activePosition.value
-  // 未持仓时按「可用余额 × 20%」估算单笔保证金（与执行层 R20_MAX_MARGIN_EQUITY_RATIO 同口径），
-  // 不再写死 100U —— 那会让小资金账户看到与真实风险完全不符的预估盈亏。
-  const availEq = Number(store.account?.avail_eq || store.account?.total_eq || 0)
-  let activeMargin = availEq > 0 ? Math.round(availEq * 0.20 * 100) / 100 : 0
-  let activeLeverage = 3.0
-
-  if (hasRealPosition && activePosition.value) {
-    const rawMargin = Number(activePosition.value.margin_usdt ?? activePosition.value.margin ?? 0)
-    if (rawMargin > 0) activeMargin = rawMargin
-    const rawLever = Number(activePosition.value.lever ?? 3)
-    if (rawLever > 0) activeLeverage = rawLever
-  }
-
-  const estProfitUsd = activeMargin * activeLeverage * (rewardPct / 100)
-  const estRiskUsd = activeMargin * activeLeverage * (riskPct / 100)
-
-  return {
-    riskDist,
-    rewardDist,
-    riskPct,
-    rewardPct,
-    rrRatio,
-    atrMultiple,
-    isRrCompliant,
-    isAtrOptimal,
-    hasRealPosition,
-    estProfitUsd,
-    estRiskUsd,
-  }
-})
+const riskRewardMetrics = computed(() => computeRiskReward({
+  entry: effectiveEntry.value,
+  sl: effectiveSL.value,
+  tp: effectiveTP.value,
+  side: liveSide.value,
+  atr: currentAtr.value,
+  activePosition: activePosition.value,
+  // 可用权益在**调用点**读取：仍在 computed 求值期间发生，响应式追踪不变
+  availEq: Number(store.account?.avail_eq || store.account?.total_eq || 0),
+}))
 
 // 价格精度自适应
 function getSymbolPrecision(price: number): number {
-  if (price >= 10000) return 1
-  if (price >= 100) return 2
-  if (price >= 10) return 3
-  if (price >= 1) return 3
-  return 4
+  return symbolPrecision(price)
 }
 
 // ==========================================
@@ -430,193 +453,8 @@ let slOverlayId: string | null = null
 let tpOverlayId: string | null = null
 
 function getChartStyles(): any {
-  const dark = isDark.value
-  return {
-    grid: {
-      show: true,
-      horizontal: {
-        show: true,
-        size: 1,
-        color: dark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
-        style: 'solid',
-      },
-      vertical: {
-        show: false, // 隐藏垂直杂乱网格
-      },
-    },
-    candle: {
-      type: 'candle_solid',
-      bar: {
-        upColor: tok('--up'),
-        downColor: tok('--down'),
-        noChangeColor: tok('--ink-3'),
-        upBorderColor: tok('--up'),
-        downBorderColor: tok('--down'),
-        noChangeBorderColor: tok('--ink-3'),
-        upWickColor: tok('--up'),
-        downWickColor: tok('--down'),
-        noChangeWickColor: tok('--ink-3'),
-      },
-      priceMark: {
-        show: true,
-        high: {
-          show: false,
-          color: tok('--ink-2'),
-          textOffset: 4,
-          textSize: 10,
-        },
-        low: {
-          show: false,
-          color: tok('--ink-2'),
-          textOffset: 4,
-          textSize: 10,
-        },
-        last: {
-          show: true,
-          upColor: tok('--up'),
-          downColor: tok('--down'),
-          noChangeColor: tok('--ink-3'),
-          line: {
-            show: true,
-            style: 'dashed',
-            dashedValue: [4, 4],
-            size: 1,
-          },
-          text: {
-            show: true,
-            size: 11,
-            paddingLeft: 4,
-            paddingTop: 2,
-            paddingRight: 4,
-            paddingBottom: 2,
-            color: tok('--ink-1'),
-          },
-        },
-      },
-      tooltip: {
-        showRule: legendRule(),
-        showType: 'standard',
-        text: {
-          size: 11,
-          family: 'JetBrains Mono, monospace',
-          color: tok('--ink-2'),
-        },
-      },
-    },
-    indicator: {
-      tooltip: {
-        showRule: legendRule(),
-        showType: 'standard',
-      },
-      ohlc: {
-        upColor: tok('--up'),
-        downColor: tok('--down'),
-        noChangeColor: tok('--ink-3'),
-      },
-      lines: [
-        { style: 'solid', smooth: false, size: 1.5, color: '#F59E0B' }, // MA5 / 黄
-        { style: 'solid', smooth: false, size: 1.5, color: '#38BDF8' }, // MA10 / 蓝
-        { style: 'solid', smooth: false, size: 1.5, color: '#A855F7' }, // MA20 / 紫
-        { style: 'solid', smooth: false, size: 1.5, color: tok('--down') },
-        { style: 'solid', smooth: false, size: 1.5, color: tok('--up') },
-      ],
-      lastValueMark: {
-        show: true,
-        text: {
-          show: true,
-          size: 10,
-          paddingLeft: 3,
-          paddingTop: 1,
-          paddingRight: 3,
-          paddingBottom: 1,
-          color: tok('--ink-1'),
-        },
-      },
-    },
-    xAxis: {
-      show: true,
-      size: 'auto',
-      axisLine: {
-        show: true,
-        color: tok('--surface-3'),
-        size: 1,
-      },
-      tickText: {
-        show: true,
-        color: tok('--ink-3'),
-        family: 'JetBrains Mono, monospace',
-        size: 10,
-      },
-      tickLine: {
-        show: true,
-        size: 1,
-        length: 3,
-        color: tok('--surface-3'),
-      },
-    },
-    yAxis: {
-      show: true,
-      size: 'auto',
-      position: 'right',
-      type: 'normal',
-      inside: false,
-      axisLine: {
-        show: true,
-        color: tok('--surface-3'),
-        size: 1,
-      },
-      tickText: {
-        show: true,
-        color: tok('--ink-2'),
-        family: 'JetBrains Mono, monospace',
-        size: 11,
-      },
-      tickLine: {
-        show: false,
-      },
-    },
-    separator: {
-      size: 1,
-      color: tok('--surface-3'),
-      fill: true,
-      activeBackgroundColor: dark ? '#334155' : '#CBD5E1',
-    },
-    crosshair: {
-      show: true,
-      horizontal: {
-        show: true,
-        line: {
-          style: 'dashed',
-          dashedValue: [4, 4],
-          size: 1,
-          color: tok('--ink-3'),
-        },
-        text: {
-          show: true,
-          color: tok('--ink-1'),
-          size: 11,
-          family: 'JetBrains Mono, monospace',
-          backgroundColor: '#3B82F6',
-        },
-      },
-      vertical: {
-        show: true,
-        line: {
-          style: 'dashed',
-          dashedValue: [4, 4],
-          size: 1,
-          color: tok('--ink-3'),
-        },
-        text: {
-          show: true,
-          color: tok('--ink-1'),
-          size: 10,
-          family: 'JetBrains Mono, monospace',
-          backgroundColor: '#475569',
-        },
-      },
-    },
-  }
+  // 批 13：主题已完全由 tok() 经 --chart-* 主题化色板承载，不再需要传 isDark
+  return chartStyles(legendRule, tok)
 }
 
 // 统一根据 activeIndicators 渲染与挂载指标
@@ -697,25 +535,29 @@ function initChart() {
     formatter: {
       // 纯纯正正的纯数字时间刻度！彻底去除“几日几日”中文，符合用户习惯！
       formatDate: ({ timestamp }) => {
-        const date = new Date(timestamp)
-        const m = String(date.getMonth() + 1).padStart(2, '0')
-        const d = String(date.getDate()).padStart(2, '0')
-        const hh = String(date.getHours()).padStart(2, '0')
-        const mm = String(date.getMinutes()).padStart(2, '0')
+        const md = fmtDate(timestamp).slice(5)
+        const hm = fmtHM(timestamp)
         if (currentPeriod.value === '1D') {
-          return `${m}-${d}`
+          return md
         }
         if (currentPeriod.value === '4H') {
-          return `${m}-${d} ${hh}:${mm}`
+          return `${md} ${hm}`
         }
-        return `${hh}:${mm}`
+        return hm
       },
     },
   })
 
+  // 库把容器设成了 tabIndex=1（正数会插队到「跳到主内容」之前），装完立刻归一化
+  demotePositiveTabIndex(chartContainer.value)
+
   if (!klineChart) return
   ;(window as any).__klineChart = klineChart
-  klineChart.setOffsetRightDistance(25)
+  const rightOffset = typeof window !== 'undefined' && window.innerWidth < 640 ? 75 : 95
+  klineChart.setOffsetRightDistance(rightOffset)
+
+  // 默认 K 线根数设为之前的 3/4 (单根蜡烛宽度调整为 4/3，蜡烛更清晰平滑)
+  klineChart.setBarSpace(10 * (4 / 3))
 
   // 必须显式设置默认 symbol 与 period，KLineChart 内部的 _dataLoader 才会触发加载！
   klineChart.setSymbol({
@@ -723,33 +565,24 @@ function initChart() {
     pricePrecision: 2,
     volumePrecision: 2,
   })
-  klineChart.setPeriod({ type: 'hour', span: 1 })
+  const initP = periods.value.find((p) => p.id === currentPeriod.value) || { type: 'hour', span: 1 }
+  klineChart.setPeriod({ type: initP.type, span: initP.span })
 
   // 配置 DataLoader 驱动
   klineChart.setDataLoader({
     getBars: async ({ callback }) => {
       try {
-        const res = await fetch(
-          `/api/v1/market/${currentInstId.value}/candles?bar=${currentPeriod.value}&limit=150&_t=${Date.now()}`,
-          { cache: 'no-store' }
+        // 取数与归一统一走 chartCandles.ts —— 本文件原先有两条**逐字重复**的
+        // 取数路径（此处与下方 loadCandles），字段映射完全一样。
+        const { candles: raw, klineList, lastClose } = await fetchCandles(
+          currentInstId.value,
+          currentPeriod.value,
         )
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = await res.json()
-        if (Array.isArray(data.candles) && data.candles.length > 0) {
-          candles.value = data.candles
-          const lastC = data.candles[data.candles.length - 1]
-          if (lastC) {
-            currentPrice.value = Number(lastC.close)
+        if (klineList.length > 0) {
+          candles.value = raw
+          if (lastClose !== null) {
+            currentPrice.value = lastClose
           }
-          const klineList: KLineData[] = data.candles.map((c: any) => ({
-            timestamp: c.ts,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-            volume: c.vol,
-            turnover: c.vol * c.close,
-          }))
           callback(klineList, false)
           nextTick(() => {
             klineChart?.scrollToRealTime()
@@ -792,96 +625,43 @@ function updatePriceLines() {
   const tpPx = effectiveTP.value
   const hasPosOrOrder = activePosition.value || activeOrder.value || simMode.value
 
-  if (hasPosOrOrder && entryPx > 0) {
-    const isLong = liveSide.value === 'long'
-    const entryRes = klineChart.createOverlay({
-      name: 'priceLine',
-      paneId: 'candle_pane',
-      points: [{ value: entryPx }],
-      styles: {
-        line: {
-          style: 'solid',
-          size: 1.5,
-          color: isLong ? '#10B981' : '#F43F5E',
-        },
-        text: {
-          size: 11,
-          color: tok('--ink-1'),
-          backgroundColor: isLong ? '#10B981' : '#F43F5E',
-        },
-      },
-      extendData: isLong ? (isEn.value ? 'Entry Long' : '多头入场') : (isEn.value ? 'Entry Short' : '空头入场'),
-    })
+  // 阶段 3·F4：建线描述符抽到 chartOverlays.ts（纯函数）；此处只负责"怎么画"。
+  const plan = planPriceLines({
+    entryPx,
+    slPx,
+    tpPx,
+    hasPosOrOrder: !!hasPosOrOrder,
+    isLong: liveSide.value === 'long',
+    riskPct: riskRewardMetrics.value.riskPct,
+    rewardPct: riskRewardMetrics.value.rewardPct,
+    textColor: tok('--ink-1'),
+    isEn: isEn.value,
+    isLockProfit: riskRewardMetrics.value.isLockProfit,
+    slDiffPct: riskRewardMetrics.value.slDiffPct,
+  })
+
+  if (plan.entry) {
+    const entryRes = klineChart.createOverlay(plan.entry)
     entryOverlayId = typeof entryRes === 'string' ? entryRes : null
   }
 
-  if (slPx > 0) {
-    const slRes = klineChart.createOverlay({
-      name: 'priceLine',
-      paneId: 'candle_pane',
-      points: [{ value: slPx }],
-      styles: {
-        line: {
-          style: 'dashed',
-          dashedValue: [6, 4],
-          size: 1.5,
-          color: '#F43F5E',
-        },
-        text: {
-          size: 11,
-          color: tok('--ink-1'),
-          backgroundColor: '#F43F5E',
-        },
-      },
-      extendData: `🛑 ${isEn.value ? 'SL' : '止损SL'} -${riskRewardMetrics.value.riskPct.toFixed(1)}%`,
-    })
+  if (plan.sl) {
+    const slRes = klineChart.createOverlay(plan.sl)
     slOverlayId = typeof slRes === 'string' ? slRes : null
   }
 
-  if (tpPx > 0) {
-    const tpRes = klineChart.createOverlay({
-      name: 'priceLine',
-      paneId: 'candle_pane',
-      points: [{ value: tpPx }],
-      styles: {
-        line: {
-          style: 'dashed',
-          dashedValue: [6, 4],
-          size: 1.5,
-          color: '#10B981',
-        },
-        text: {
-          size: 11,
-          color: tok('--ink-1'),
-          backgroundColor: '#10B981',
-        },
-      },
-      extendData: `🎯 ${isEn.value ? 'TP' : '止盈TP'} +${riskRewardMetrics.value.rewardPct.toFixed(1)}%`,
-    })
+  if (plan.tp) {
+    const tpRes = klineChart.createOverlay(plan.tp)
     tpOverlayId = typeof tpRes === 'string' ? tpRes : null
   }
 }
 
 // 倒计时
 function updateCountdown() {
+  // 阶段 3·F4：纯算术抽到 chartCountdown.ts。时区仍由本处解析（时间契约留在调用点）。
   const now = new Date()
-  const sec = now.getSeconds()
-  const min = now.getMinutes()
-  const hr = now.getHours()
-  let remainSec = 0
-  if (currentPeriod.value === '15m') {
-    remainSec = (15 - (min % 15)) * 60 - sec
-  } else if (currentPeriod.value === '1H') {
-    remainSec = (60 - min) * 60 - sec
-  } else if (currentPeriod.value === '4H') {
-    remainSec = (4 - (hr % 4)) * 3600 - min * 60 - sec
-  } else {
-    remainSec = 86400 - (hr * 3600 + min * 60 + sec)
-  }
-  remainSec = Math.max(0, remainSec)
-  const m = Math.floor((remainSec % 3600) / 60)
-  const s = remainSec % 60
-  candleCountdown.value = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  const [hr = 0, min = 0, sec = 0] = fmtClock(now).split(':').map(Number)
+  candleCountdown.value = countdownLabel(currentPeriod.value, { hr, min, sec })
 }
 
 // 拉取行情蜡烛数据 (供定时静默刷新使用)
@@ -890,25 +670,13 @@ async function loadCandles(silent = false, resetTime = false) {
   if (!silent) isLoading.value = true
 
   try {
-    const res = await fetch(
-      `/api/v1/market/${currentInstId.value}/candles?bar=${currentPeriod.value}&limit=150&_t=${Date.now()}`,
-      { cache: 'no-store' }
+    // 取数与归一统一走 chartCandles.ts（与 setDataLoader 的 getBars 同源）
+    const { candles: raw, klineList, lastClose } = await fetchCandles(
+      currentInstId.value,
+      currentPeriod.value,
     )
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    if (Array.isArray(data.candles) && data.candles.length > 0) {
-      candles.value = data.candles
-
-      // 转换为 KLineChart 标准数据结构
-      const klineList: KLineData[] = data.candles.map((c: any) => ({
-        timestamp: c.ts,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.vol,
-        turnover: c.vol * c.close,
-      }))
+    if (klineList.length > 0) {
+      candles.value = raw
 
       // 配置标的价格精度
       const prec = getSymbolPrecision(currentPrice.value)
@@ -920,8 +688,8 @@ async function loadCandles(silent = false, resetTime = false) {
 
       // 增量精准更新 vs 全量初始化
       const lastCandle = klineList[klineList.length - 1]
-      if (lastCandle) {
-        currentPrice.value = Number(lastCandle.close)
+      if (lastClose !== null) {
+        currentPrice.value = lastClose
       }
       if (resetTime || klineChart.getDataList().length === 0) {
         // 全量加载
@@ -983,7 +751,14 @@ function selectPeriod(p: any) {
 }
 
 function copySimulationSummary() {
-  const text = `【R20 风控测算】${currentSymbol.value} 入场:${effectiveEntry.value} SL:${effectiveSL.value} TP:${effectiveTP.value} R:R=${riskRewardMetrics.value.rrRatio.toFixed(2)}:1`
+  // 批 77：剪贴板文案此前硬编码中文 —— 英文界面下用户复制出来是中英混排。
+  const text = t('dash.matrix.chart.sim.copySummary', undefined, {
+    sym: currentSymbol.value,
+    entry: effectiveEntry.value,
+    sl: effectiveSL.value,
+    tp: effectiveTP.value,
+    rr: riskRewardMetrics.value.rrRatio.toFixed(2),
+  })
   navigator.clipboard.writeText(text).then(() => {
     copied.value = true
     setTimeout(() => {
@@ -1004,6 +779,9 @@ function onLegendBreakpoint() {
   if (m !== lastMobile) {
     lastMobile = m
     klineChart?.setStyles(getChartStyles())
+    if (klineChart) {
+      klineChart.setOffsetRightDistance(m ? 75 : 95)
+    }
   }
 }
 onMounted(() => window.addEventListener('resize', onLegendBreakpoint))
@@ -1034,10 +812,27 @@ function handleClickOutside(e: MouseEvent) {
   }
 }
 
+/* 批 104：两个下拉此前**只能靠点空白处关**，按 Escape 毫无反应。
+   指标下拉声明的是 `role="dialog"` —— WAI-ARIA 明确要求 Escape 关闭对话框；
+   选币下拉是 listbox，同样应支持 Escape。焦点交还给触发器由 usePopoverFocus 负责。
+   本监听挂在 document 冒泡阶段：模态弹层（useModalFocus）会 stopPropagation，
+   所以模态开着时不会误伤。 */
+function handleKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (isFullscreen.value) {
+    isFullscreen.value = false
+    return
+  }
+  if (!showIndicatorMenu.value && !symbolMenu.value) return
+  showIndicatorMenu.value = false
+  symbolMenu.value = false
+}
+
 onMounted(() => {
   const initSym = props.initialSymbol || props.symbol
   if (initSym) currentSymbol.value = initSym.toUpperCase()
   document.addEventListener('click', handleClickOutside)
+  document.addEventListener('keydown', handleKeydown)
   nextTick(() => {
     initChart()
     // 3s 静默拉取最新数据，保证准确对齐与跳动
@@ -1050,6 +845,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('keydown', handleKeydown)
   if (timer) clearInterval(timer)
   if (countdownTimer) clearInterval(countdownTimer)
   if (chartContainer.value) {
@@ -1062,156 +858,214 @@ onUnmounted(() => {
 
 <template>
   <div
-    class="card overflow-hidden select-none"
-    :class="isFullscreen ? 'fixed inset-0 z-[var(--z-float)] rounded-none' : ''"
+    class="dsh-card select-none"
+    :class="[
+      isFullscreen ? 'fixed inset-0 z-[100] !bg-[var(--surface-0,#090d16)] !bg-none rounded-none flex flex-col' : '',
+      fill ? 'h-full flex flex-col' : '',
+    ]"
   >
     <!-- 工具条：行情信息 + 工作站工具 -->
-    <div
-      class="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2 sm:px-4"
-      style="border-color: var(--line-1); background-color: var(--surface-1)"
+    <header
+      class="dsh-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-2"
     >
-      <!-- 选币下拉 -->
-      <div class="indicator-dropdown-container relative">
-        <button
-          class="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 transition-colors"
-          style="border-color: var(--line-2); background-color: var(--surface-2)"
-          :aria-expanded="symbolMenu"
-          @click="symbolMenu = !symbolMenu"
-        >
-          <span class="text-sm font-bold" style="color: var(--ink-strong)">{{ currentSymbol }}</span>
-          <span class="text-xs" style="color: var(--ink-3)">/USDT · {{ t('dash.matrix.chart.perp') }}</span>
-          <ChevronDown class="h-3.5 w-3.5 transition-transform" :class="symbolMenu && 'rotate-180'" style="color: var(--ink-2)" />
-        </button>
-        <Transition name="pop">
-          <div
-            v-if="symbolMenu"
-            class="float-panel absolute left-0 top-9 z-50 max-h-80 w-56 overflow-y-auto p-1.5"
-          >
-            <button
-              v-for="sym in availableSymbols"
-              :key="sym"
-              class="flex w-full cursor-pointer items-center justify-between rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-[var(--surface-1)]"
-              :style="sym === currentSymbol ? { color: 'var(--accent)', fontWeight: 600 } : { color: 'var(--ink-1)' }"
-              @click="selectSymbol(sym); symbolMenu = false"
-            >
-              <span class="num">{{ sym }}</span>
-              <span v-if="holdingSet.has(sym)" class="badge badge-accent !h-4 !px-1 !text-[10px]">{{ t('dash.matrix.chart.holding') }}</span>
-            </button>
-          </div>
-        </Transition>
-      </div>
-
-      <!-- 现价 / 涨跌 / ATR -->
-      <span class="num text-md font-bold" style="color: var(--ink-strong)">
-        {{ currentPrice >= 100 ? currentPrice.toFixed(1) : currentPrice.toFixed(4) }}
-      </span>
-      <span class="num text-xs font-semibold" :class="liveChangePct >= 0 ? 'up' : 'down'">
-        {{ liveChangePct >= 0 ? '+' : '' }}{{ liveChangePct.toFixed(2) }}%
-      </span>
-      <span class="chip hidden !h-6 md:inline-flex">
-        <span class="dot dot-live" />{{ t('dash.matrix.chart.live') }}
-      </span>
-      <span class="t-faint num hidden text-xs lg:inline">1H ATR {{ currentAtr >= 100 ? '$' + currentAtr.toFixed(1) : (currentAtr * 100).toFixed(2) + '%' }}</span>
-
-      <!-- 右侧工具组 -->
-      <div class="ms-auto flex flex-wrap items-center gap-1.5">
-        <span class="chip mr-1 hidden !h-7 sm:inline-flex">
-          <span class="t-faint">{{ t('dash.matrix.chart.barCloseIn') }}</span>
-          <b class="num" style="color: var(--warn)">{{ candleCountdown }}</b>
-        </span>
-
-        <BaseSegmented
-          :model-value="currentPeriod"
-          :options="periods.map((p) => ({ value: p.id, label: p.label }))"
-          @update:model-value="(id: any) => selectPeriod(periods.find((p) => p.id === id))"
-        />
-
-        <!-- 指标菜单 -->
+      <div class="flex items-center gap-2 flex-wrap">
+        <!-- 选币下拉 -->
         <div class="indicator-dropdown-container relative">
-          <button
-            class="btn btn-sm"
-            :class="showIndicatorMenu || activeIndicatorCount > 0 ? 'btn-primary' : 'btn-ghost'"
-            :aria-expanded="showIndicatorMenu"
-            @click="showIndicatorMenu = !showIndicatorMenu"
+          <button type="button"
+            ref="symbolTrigger"
+            class="flex h-7 cursor-pointer items-center gap-1.5 rounded border border-[var(--line-1)] bg-[var(--surface-2)] px-2.5 transition-colors hover:bg-[var(--surface-3)]"
+            :aria-expanded="symbolMenu"
+            aria-haspopup="listbox"
+            :aria-controls="symbolMenu ? symbolMenuId : undefined"
+            @click="symbolMenu = !symbolMenu"
           >
-            <SlidersHorizontal />
-            {{ t('dash.matrix.chart.indicators') }}
-            <span v-if="activeIndicatorCount > 0" class="num">{{ activeIndicatorCount }}</span>
-            <ChevronDown class="h-3 w-3 transition-transform" :class="showIndicatorMenu && 'rotate-180'" />
+            <CryptoLogo :symbol="currentSymbol" :size="16" />
+            <span class="text-xs font-bold" style="color: var(--ink-strong)">{{ currentSymbol }}</span>
+            <span class="text-3xs" style="color: var(--ink-3)">/USDT · {{ t('dash.matrix.chart.perp') }}</span>
+            <ChevronDown class="h-3 w-3 transition-transform" :class="symbolMenu && 'rotate-180'" style="color: var(--ink-2)" />
           </button>
           <Transition name="pop">
-            <div v-if="showIndicatorMenu" class="float-panel absolute right-0 top-9 z-50 max-h-[65vh] w-72 overflow-y-auto p-3 max-md:fixed max-md:inset-x-2 max-md:top-auto max-md:bottom-2 max-md:w-auto max-md:max-h-[70vh]">
-              <p class="t-label mb-2">{{ t('dash.matrix.chart.indicatorHint') }}</p>
-              <p class="t-label mb-1.5">{{ t('dash.matrix.chart.overlays') }}</p>
-              <div class="mb-3 grid grid-cols-2 gap-1.5">
-                <button
-                  v-for="ind in mainIndicators"
-                  :key="ind.key"
-                  class="flex cursor-pointer items-center justify-between rounded-md border px-2 py-1.5 text-xs font-semibold transition-colors"
-                  :style="activeIndicators[ind.key]
-                    ? { backgroundColor: 'var(--accent-bg)', borderColor: 'var(--accent-line)', color: 'var(--ink-1)' }
-                    : { backgroundColor: 'var(--surface-1)', borderColor: 'var(--line-1)', color: 'var(--ink-2)' }"
-                  @click="toggleIndicatorKey(ind.key)"
-                >
-                  <span class="flex min-w-0 items-center gap-1.5">
-                    <span class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: ind.color }" />
-                    <span class="truncate">{{ ind.label }}</span>
-                  </span>
-                  <Check v-if="activeIndicators[ind.key]" class="h-3.5 w-3.5 shrink-0" style="color: var(--up)" />
-                </button>
-              </div>
-              <p class="t-label mb-1.5">{{ t('dash.matrix.chart.panes') }}</p>
-              <div class="grid grid-cols-2 gap-1.5">
-                <button
-                  v-for="ind in subIndicators"
-                  :key="ind.key"
-                  class="flex cursor-pointer items-center justify-between rounded-md border px-2 py-1.5 text-xs font-semibold transition-colors"
-                  :style="activeIndicators[ind.key]
-                    ? { backgroundColor: 'var(--accent-bg)', borderColor: 'var(--accent-line)', color: 'var(--ink-1)' }
-                    : { backgroundColor: 'var(--surface-1)', borderColor: 'var(--line-1)', color: 'var(--ink-2)' }"
-                  @click="toggleIndicatorKey(ind.key)"
-                >
-                  <span class="flex min-w-0 items-center gap-1.5">
-                    <span class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: ind.color }" />
-                    <span class="truncate">{{ ind.label }}</span>
-                  </span>
-                  <Check v-if="activeIndicators[ind.key]" class="h-3.5 w-3.5 shrink-0" style="color: var(--up)" />
-                </button>
-              </div>
+            <div
+              v-if="symbolMenu"
+              :id="symbolMenuId"
+              ref="symbolPanel"
+              tabindex="-1"
+              role="listbox"
+              :aria-label="t('dash.matrix.chart.perp')"
+              class="outline-none float-panel absolute left-0 top-8 z-[var(--z-float)] max-h-80 w-56 overflow-y-auto p-1.5"
+            >
+              <button type="button"
+                v-for="sym in availableSymbols"
+                :key="sym"
+                class="flex w-full cursor-pointer items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors hover:bg-[var(--surface-1)]"
+                :style="sym === currentSymbol ? { color: 'var(--accent)', fontWeight: 600 } : { color: 'var(--ink-1)' }"
+                @click="selectSymbol(sym); symbolMenu = false"
+              >
+                <div class="flex items-center gap-2">
+                  <CryptoLogo :symbol="sym" :size="16" />
+                  <span class="num font-mono">{{ sym }}</span>
+                </div>
+                <span v-if="holdingSet.has(sym)" class="badge badge-accent !h-4 !px-1 !text-4xs">{{ t('dash.matrix.chart.holding') }}</span>
+              </button>
             </div>
           </Transition>
         </div>
 
-        <!-- 试算开关 -->
-        <button
-          class="btn btn-sm"
-          :class="simMode ? 'btn-primary' : 'btn-ghost'"
-          :title="simMode ? t('dash.matrix.chart.sim.exit') : t('dash.matrix.chart.sim.enter')"
-          @click="simMode = !simMode; if (simMode) initSimulation(); updatePriceLines()"
-        >
-          <Sliders />
-          <span class="hidden sm:inline">{{ simMode ? t('dash.matrix.chart.sim.exit') : t('dash.matrix.chart.simulate') }}</span>
-        </button>
+        <!-- 现价 / 涨跌 / ATR -->
+        <span class="num font-mono text-sm font-bold" style="color: var(--ink-strong)">
+          {{ currentPrice >= 100 ? currentPrice.toFixed(1) : currentPrice.toFixed(4) }}
+        </span>
+        <span class="num font-mono text-xs font-semibold" :class="liveChangePct >= 0 ? 'up' : 'down'">
+          {{ liveChangePct >= 0 ? '+' : '' }}{{ liveChangePct.toFixed(2) }}%
+        </span>
+        <span class="dsh-pill hidden md:inline-flex">
+          <span class="dsh-status-dot active" aria-hidden="true" />{{ t('dash.matrix.chart.live') }}
+        </span>
+        <span class="t-faint num font-mono hidden text-3xs lg:inline">1H ATR {{ currentAtr >= 100 ? '$' + currentAtr.toFixed(1) : (currentAtr * 100).toFixed(2) + '%' }}</span>
+      </div>
 
-        <button class="btn btn-ghost btn-icon btn-sm" :title="t('common.refresh')" @click="loadCandles(false, true)">
-          <RefreshCw :class="isLoading && 'animate-spin'" />
+      <!-- 右侧动作按钮（全屏与刷新）：在窄屏保持在第 1 行右侧，在宽屏并入末端 -->
+      <div class="flex items-center gap-1.5 md:hidden ms-auto">
+        <button type="button" class="btn btn-ghost btn-icon btn-sm" :title="t('common.refresh')" @click="loadCandles(false, true)">
+          <RefreshCw :class="isLoading && 'animate-spin shrink-0'" />
         </button>
-        <button
-          class="btn btn-ghost btn-icon btn-sm"
+        <button type="button"
+          class="btn btn-sm cursor-pointer"
+          :class="isFullscreen ? 'btn-primary px-2.5 font-semibold text-xs gap-1 shadow-sm' : 'btn-ghost btn-icon'"
           :title="isFullscreen ? t('dash.matrix.chart.exitFullscreen') : t('dash.matrix.chart.fullscreen')"
+          :aria-label="isFullscreen ? t('dash.matrix.chart.exitFullscreen') : t('dash.matrix.chart.fullscreen')"
           @click="isFullscreen = !isFullscreen"
         >
-          <Minimize v-if="isFullscreen" />
-          <Maximize v-else />
+          <Minimize v-if="isFullscreen" class="h-3.5 w-3.5" />
+          <span v-if="isFullscreen">{{ t('dash.matrix.chart.exitFullscreen') }}</span>
+          <Maximize v-else class="h-3.5 w-3.5" />
         </button>
       </div>
-    </div>
 
-    <!-- 图表画布 -->
+      <!-- 周期、指标与试算组：宽屏居右，窄屏整齐铺于第 2 行 -->
+      <div class="flex flex-wrap items-center gap-1.5 max-md:w-full max-md:justify-between">
+        <span class="dsh-pill mr-1 hidden sm:inline-flex">
+          <span class="text-[var(--ink-3)]">{{ t('dash.matrix.chart.barCloseIn') }}</span>
+          <b class="num font-mono" style="color: var(--warn)">{{ candleCountdown }}</b>
+        </span>
+
+        <BaseSegmented
+          :model-value="currentPeriod"
+          :label="t('dash.matrix.chart.tf')"
+          :options="periods.map((p) => ({ value: p.id, label: p.label }))"
+          @update:model-value="(id: any) => selectPeriod(periods.find((p) => p.id === id))"
+        />
+
+        <div class="flex items-center gap-1.5">
+          <!-- 指标菜单 -->
+          <div class="indicator-dropdown-container relative">
+            <button type="button"
+              ref="indicatorTrigger"
+              class="btn btn-sm"
+              :class="showIndicatorMenu || activeIndicatorCount > 0 ? 'bg-[var(--accent-bg)] text-[var(--accent)] border border-[var(--accent-line)]' : 'btn-ghost'"
+              :aria-expanded="showIndicatorMenu"
+              aria-haspopup="dialog"
+              :aria-controls="showIndicatorMenu ? indicatorMenuId : undefined"
+              @click="showIndicatorMenu = !showIndicatorMenu"
+            >
+              <SlidersHorizontal />
+              {{ t('dash.matrix.chart.indicators') }}
+              <span v-if="activeIndicatorCount > 0" class="num">{{ activeIndicatorCount }}</span>
+              <ChevronDown class="h-3 w-3 transition-transform" :class="showIndicatorMenu && 'rotate-180'" />
+            </button>
+            <Transition name="pop">
+              <div v-if="showIndicatorMenu" :id="indicatorMenuId" ref="indicatorPanel" tabindex="-1" role="dialog" :aria-label="t('dash.matrix.chart.indicators')" class="outline-none float-panel absolute right-0 top-9 z-[var(--z-float)] max-h-[65vh] w-72 overflow-y-auto p-3 max-md:fixed max-md:inset-x-2 max-md:top-auto max-md:bottom-2 max-md:w-auto max-md:max-h-[70vh]">
+                <p class="t-label mb-2">{{ t('dash.matrix.chart.indicatorHint') }}</p>
+                <p class="t-label mb-1.5">{{ t('dash.matrix.chart.overlays') }}</p>
+                <div class="mb-3 grid grid-cols-2 gap-1.5">
+                  <button type="button"
+                    v-for="ind in mainIndicators"
+                    :key="ind.key"
+                    class="flex cursor-pointer items-center justify-between rounded-md border px-2 py-1.5 text-xs font-semibold transition-colors"
+                    :class="
+                      activeIndicators[ind.key]
+                        ? 'bg-[var(--accent-bg)] border-[var(--accent-line)] text-[var(--ink-1)]'
+                        : 'bg-[var(--surface-1)] border-[var(--line-1)] text-[var(--ink-2)] hover:bg-[var(--surface-3)] hover:text-[var(--ink-1)]'
+                    "
+                    @click="toggleIndicatorKey(ind.key)"
+                  >
+                    <span class="flex min-w-0 items-center gap-1.5">
+                      <span class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: ind.color }" />
+                      <span class="truncate">{{ ind.label }}</span>
+                    </span>
+                    <Check v-if="activeIndicators[ind.key]" class="h-3.5 w-3.5 shrink-0" style="color: var(--up)" />
+                  </button>
+                </div>
+                <p class="t-label mb-1.5">{{ t('dash.matrix.chart.panes') }}</p>
+                <div class="grid grid-cols-2 gap-1.5">
+                  <button type="button"
+                    v-for="ind in subIndicators"
+                    :key="ind.key"
+                    class="flex cursor-pointer items-center justify-between rounded-md border px-2 py-1.5 text-xs font-semibold transition-colors"
+                    :class="
+                      activeIndicators[ind.key]
+                        ? 'bg-[var(--accent-bg)] border-[var(--accent-line)] text-[var(--ink-1)]'
+                        : 'bg-[var(--surface-1)] border-[var(--line-1)] text-[var(--ink-2)] hover:bg-[var(--surface-3)] hover:text-[var(--ink-1)]'
+                    "
+                    @click="toggleIndicatorKey(ind.key)"
+                  >
+                    <span class="flex min-w-0 items-center gap-1.5">
+                      <span class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: ind.color }" />
+                      <span class="truncate">{{ ind.label }}</span>
+                    </span>
+                    <Check v-if="activeIndicators[ind.key]" class="h-3.5 w-3.5 shrink-0" style="color: var(--up)" />
+                  </button>
+                </div>
+              </div>
+            </Transition>
+          </div>
+
+          <!-- 试算开关 -->
+          <button type="button"
+            class="btn btn-sm"
+            :class="simMode ? 'btn-primary' : 'btn-ghost'"
+            :title="simMode ? t('dash.matrix.chart.sim.exit') : t('dash.matrix.chart.sim.enter')"
+            @click="simMode = !simMode; if (simMode) initSimulation(); updatePriceLines()"
+          >
+            <Sliders />
+            <span class="hidden sm:inline">{{ simMode ? t('dash.matrix.chart.sim.exit') : t('dash.matrix.chart.simulate') }}</span>
+          </button>
+        </div>
+
+        <!-- 桌面端刷新与全屏按钮 -->
+        <div class="hidden md:flex items-center gap-1.5">
+          <button type="button" class="btn btn-ghost btn-icon btn-sm" :title="t('common.refresh')" @click="loadCandles(false, true)">
+            <RefreshCw :class="isLoading && 'animate-spin shrink-0'" />
+          </button>
+          <button type="button"
+            class="btn btn-sm cursor-pointer"
+            :class="isFullscreen ? 'btn-primary px-2.5 font-semibold text-xs gap-1 shadow-sm' : 'btn-ghost btn-icon'"
+            :title="isFullscreen ? t('dash.matrix.chart.exitFullscreen') : t('dash.matrix.chart.fullscreen')"
+            :aria-label="isFullscreen ? t('dash.matrix.chart.exitFullscreen') : t('dash.matrix.chart.fullscreen')"
+            @click="isFullscreen = !isFullscreen"
+          >
+            <Minimize v-if="isFullscreen" class="h-3.5 w-3.5" />
+            <span v-if="isFullscreen">{{ t('dash.matrix.chart.exitFullscreen') }}</span>
+            <Maximize v-else class="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- 图表画布：高度响应式。旧固定 560px 在移动端占满整屏，把持仓面板顶到首屏外
+         且自身吃满手势；改 dvh 自适应。
+         批 84：全屏态原先走 `calc(100vh - 108px)` —— **该魔数既过时又无效**：
+           · 卡片全屏时是 `fixed inset-0` + flex 列，画布带 `flex-1`，
+             `flex-basis: 0%` 会直接覆盖内联 `height`，实测画布高 = 视口 − 真实 chrome；
+           · 而 `108` 与真实 chrome 对不上：顶栏在 1440/1024 宽时是 63px（chrome 65），
+             在 700 宽时换行成 99px（chrome 101）—— 常量在两种方向上都错（偏差 43 / 7）。
+         故删掉该内联高度，全屏一律交给 flex；并让全屏态也拿到 `flex-1 min-h-0`
+         （非 fill 用法在全屏下同样铺满，短视口不会被 `min-h-[340px]` 顶出裁切）。 -->
     <div
       ref="chartContainer"
       class="relative w-full"
-      :style="{ height: isFullscreen ? 'calc(100vh - 108px)' : '560px' }"
+      :class="isFullscreen ? 'flex-1 min-h-0' : ''"
+      :style="{ height: isFullscreen ? undefined : (props.chartHeight || 'clamp(340px, 60vw, 560px)') }"
     ></div>
 
     <!-- 试算控制台 -->
@@ -1275,10 +1129,10 @@ onUnmounted(() => {
       </div>
 
       <div class="flex flex-wrap items-center justify-end gap-2 pt-1">
-        <button class="btn btn-ghost btn-sm" @click="resetSimulation">
+        <button type="button" class="btn btn-ghost btn-sm" @click="resetSimulation">
           <RotateCcw />{{ t('dash.matrix.chart.sim.reset') }}
         </button>
-        <button class="btn btn-primary btn-sm" @click="copySimulationSummary">
+        <button type="button" class="btn btn-primary btn-sm" @click="copySimulationSummary">
           <Check v-if="copied" style="color: var(--up)" />
           <Copy v-else />
           {{ copied ? t('common.copied') : t('dash.matrix.chart.sim.copy') }}

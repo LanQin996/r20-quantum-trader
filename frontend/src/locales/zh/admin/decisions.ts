@@ -1,0 +1,20 @@
+/** 决策审计页文案 */
+export const zhAdminDecisions = {
+  desc: '核对宏观基调与逐币动作，查看三路实时日志',
+  normalRun: '日常运行',
+  latestFirst: '最新在前',
+  tabTrader: '交易巡检 (Trader)',
+  tabBackend: '控制面服务',
+  tabScheduler: '任务调度器',
+  pullingLogs: '正在拉取最新日志流...',
+  noLiveLogs: '无实时日志',
+  fetchLogFailed: '获取日志失败: {message}',
+  searchPlaceholder: '筛选日志内容',
+  filterAll: '全部级别',
+  filterWarn: '警告以上',
+  filterError: '仅错误',
+  filterNoMatch: '当前筛选条件无匹配日志',
+  entriesCount: '{n} 条',
+  logSourceAria: '日志数据源切换',
+  logLevelAria: '日志级别过滤',
+};

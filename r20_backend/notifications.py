@@ -7,11 +7,12 @@ import logging
 import os
 import threading
 import time
+import re
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
-from r20_backend.net_security import validate_outbound_url
+from r20_backend.net_security import validate_outbound_url, safe_urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +91,24 @@ def _env() -> dict[str, str]:
     return {**os.environ, **values, **encrypted}
 
 
+def _scrub_url_secret(text: str) -> str:
+    """审计修复A6(2026-09-13)：Telegram token 拼在 URL 路径里，任何异常文本入
+    响应/日志前一律打码（bot<digits>:<secret> 与 URL userinfo 两种形态）。"""
+    text = re.sub(r"bot\d{6,}:[A-Za-z0-9_-]{4,}", "bot***REDACTED***", text)
+    text = re.sub(r"://[^/@\s]+:[^/@\s]+@", "://***:***@", text)
+    return text
+
+
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[bool, str, dict[str, Any]]:
     request_headers = {"Content-Type": "application/json", "User-Agent": "R20-Standalone/6.6.2"}
     request_headers.update(headers or {})
-    request = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers=request_headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        # Request 构造必须在 try 内：非法 scheme 抛 ValueError(f"unknown url type: {url}")，
+        # 旧写法让它裸穿到 500 traceback，把含 token 的完整 URL 写进 uvicorn.log。
+        request = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers=request_headers, method="POST")
+        # 审计D(2026-09-13)：validate_outbound_url 只核首跳，urllib 默认跟随 3xx——
+        # 首跳合法却 302→内网/元数据即借道 SSRF。通知类无跟随重定向场景，走禁跳口。
+        with safe_urlopen(request, timeout=15) as response:
             raw = response.read().decode("utf-8")
             try:
                 data = json.loads(raw) if raw else {}
@@ -103,7 +116,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None
                 data = {"raw": raw}
             return 200 <= response.status < 300, f"HTTP {response.status}", data
     except Exception as exc:
-        return False, str(exc), {}
+        return False, _scrub_url_secret(str(exc)), {}
 
 
 def _qq_access_token(app_id: str, secret: str) -> tuple[str, str]:
@@ -257,6 +270,12 @@ def send_channel(channel: str, message: str, env: dict[str, str] | None = None) 
         if not token or not chat_id:
             return False, "Telegram Bot Token / Chat ID 未完整配置"
         target_url = f"{tg_base}/bot{token}/sendMessage"
+        # 审计修复A6(2026-09-13)：telegram 曾是外呼校验的孤儿通道（webhook/wechat 均有
+        # validate_outbound_url 而它没有）——api_base 由超管 PUT 随意写入，补同款防线。
+        try:
+            target_url = validate_outbound_url(target_url, allow_private=True)
+        except ValueError as exc:
+            return False, _scrub_url_secret(f"Telegram API Base URL 无效：{exc}")
         ok, detail, response = _post_json(target_url, {"chat_id": chat_id, "text": message})
         if not ok:
             d_lower = detail.lower()

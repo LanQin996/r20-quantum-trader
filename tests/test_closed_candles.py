@@ -70,6 +70,33 @@ class OfflineTest(unittest.TestCase):
 
 
 class ClosedCandleServiceTests(OfflineTest):
+    def test_alternate_venue_filters_forming_bars_and_normalizes_gate_seconds(self):
+        now_ms = 1_800_000_000_000
+        for venue in ("binance", "gate"):
+            with self.subTest(venue=venue):
+                divisor = 1000 if venue == "gate" else 1
+                closed_ts = (now_ms - 7_200_000) // divisor
+                forming_ts = (now_ms - 1000) // divisor
+                adapter = types.SimpleNamespace(
+                    canonical=lambda inst: inst,
+                    fetch_candles=lambda *args: [
+                        [closed_ts, "10", "12", "9", "11", "100"],
+                        [forming_ts, "11", "99", "1", "90", "1000"],
+                    ],
+                )
+                with patch.object(market_data_service, "_public_get", return_value=None), \
+                     patch.object(market_data_service, "_alt_venue_allowed", return_value=True), \
+                     patch.object(market_data_service, "_alt_venue_order", return_value=(venue,)), \
+                     patch.object(market_data_service, "_get_venue_adapter", return_value=adapter), \
+                     patch.object(market_data_service.time, "time", return_value=now_ms / 1000):
+                    closed = market_data_service.fetch_candles(ITEM["instId"], bar="1H")
+                    chart = market_data_service.fetch_candles(ITEM["instId"], bar="1H", closed_only=False)
+                self.assertEqual(len(closed), 1)
+                self.assertEqual(closed[0][0], str(now_ms - 7_200_000))
+                self.assertEqual(closed[0][8], "1")
+                self.assertEqual(len(chart), 2)
+                self.assertEqual(chart[0][8], "0")
+
     def test_filter_rejects_unknown_flags_and_preserves_confirmed_rows(self):
         closed = candle_rows(2)
         closed[1][8] = 1  # Also accept the integer representation.
@@ -87,7 +114,7 @@ class ClosedCandleServiceTests(OfflineTest):
         for rows in ([forming_bar(), *closed], closed):
             with self.subTest(forming=rows[0][8] == '0'), \
                     patch.object(market_data_service, '_public_get', return_value={'data': rows}) as get, \
-                    patch.object(market_data_service.subprocess, 'run') as cli:
+                    patch.object(market_data_service, '_alt_venue_candles') as cli:
                 actual = market_data_service.fetch_candles(ITEM['instId'], limit=3)
                 self.assertEqual(actual, closed[:3])
                 self.assertEqual(get.call_args.kwargs['params']['limit'], 4)
@@ -96,23 +123,23 @@ class ClosedCandleServiceTests(OfflineTest):
 
     def test_rest_without_confirmed_bars_returns_empty_without_raw_fallback(self):
         with patch.object(market_data_service, '_public_get', return_value={'data': [forming_bar()]}), \
-                patch.object(market_data_service.subprocess, 'run') as cli:
+                patch.object(market_data_service, '_alt_venue_candles') as cli:
             self.assertEqual(market_data_service.fetch_candles(ITEM['instId']), [])
             cli.assert_not_called()
 
-    def test_cli_fallback_uses_the_same_confirmation_filter(self):
+    def test_alternate_venue_fallback_uses_the_same_confirmation_filter(self):
         closed = candle_rows(3)
         result = types.SimpleNamespace(returncode=0, stdout=json.dumps([forming_bar(), *closed]))
         with patch.object(market_data_service, '_public_get', return_value=None), \
-                patch.object(market_data_service.subprocess, 'run', return_value=result) as cli:
+                patch.object(market_data_service, '_alt_venue_candles', return_value=json.loads(result.stdout)) as cli:
             self.assertEqual(market_data_service.fetch_candles(ITEM['instId'], limit=2), closed[:2])
-            self.assertIn('--limit 3', cli.call_args.args[0])
+            self.assertEqual(cli.call_args.args[2], 3)
         result.stdout = json.dumps([closed[0][:8], forming_bar()])
         with patch.object(market_data_service, '_public_get', return_value=None), \
-                patch.object(market_data_service.subprocess, 'run', return_value=result):
+                patch.object(market_data_service, '_alt_venue_candles', return_value=json.loads(result.stdout)):
             self.assertEqual(market_data_service.fetch_candles(ITEM['instId']), [])
 
-    def test_chart_can_opt_into_forming_bars_on_rest_and_cli(self):
+    def test_chart_can_opt_into_forming_bars_on_rest_and_alternate_venue(self):
         rows = [forming_bar(), *candle_rows(3)]
         with patch.object(market_data_service, '_public_get', return_value={'data': rows}) as get:
             actual = market_data_service.fetch_candles(ITEM['instId'], limit=3, closed_only=False)
@@ -120,10 +147,10 @@ class ClosedCandleServiceTests(OfflineTest):
         self.assertEqual(get.call_args.kwargs['params']['limit'], 3)
         result = types.SimpleNamespace(returncode=0, stdout=json.dumps(rows))
         with patch.object(market_data_service, '_public_get', return_value=None), \
-                patch.object(market_data_service.subprocess, 'run', return_value=result) as cli:
+                patch.object(market_data_service, '_alt_venue_candles', return_value=json.loads(result.stdout)) as cli:
             actual = market_data_service.fetch_candles(ITEM['instId'], limit=3, closed_only=False)
         self.assertEqual(actual, rows[:3])
-        self.assertIn('--limit 3', cli.call_args.args[0])
+        self.assertEqual(cli.call_args.args[2], 3)
 
     def test_request_limit_never_exceeds_exchange_cap(self):
         with patch.object(market_data_service, '_public_get', return_value={'data': candle_rows(300)}) as get:
@@ -183,34 +210,23 @@ class CandlePipelineTests(OfflineTest):
         return {'code': '0', 'data': self.rows[params['bar']][:params['limit']]}
 
     def brain(self):
-        namespace = load_functions('ai_brain_trader.py', ['fetch_single_instrument_package'], {
-            **self.common,
-            '_okx_get_json': lambda url, *args, **kwargs: self.response(url),
-            'fetch_single_indicator': lambda *args, **kwargs: {'adx': '28'},
-        })
-        return namespace['fetch_single_instrument_package'](ITEM)
+        from scripts.brain.packages import fetch_single_instrument_package
+        return fetch_single_instrument_package(ITEM, fetch_candles=market_data_service.fetch_candles,
+                                               fetch_single_indicator=lambda *a, **kw: {'adx': '28'})
 
     def factor_library(self):
-        namespace = load_functions('factor_library.py', ['safe_float', 'compute_instrument_factors'], {
-            **self.common,
-            'fetch_orderbook_depth': lambda *args, **kwargs: {'bids': [['180', '20']], 'asks': [['181', '1']]},
-            'fetch_indicators_batch': lambda *args, **kwargs: {'ADX': {'adx': '28'}, 'KDJ': {'j': '70'}, 'CMF': {'cmf': '0.2'}},
-        })
-        return namespace['compute_instrument_factors'](ITEM, {'BTC': {'longShortRatio': {'weightedLongRatio': 0.8}}})
+        from scripts import factor_library
+        with patch.object(factor_library, 'fetch_candles', market_data_service.fetch_candles), \
+             patch.object(factor_library, 'fetch_orderbook_depth', return_value={'bids': [['180', '20']], 'asks': [['181', '1']]}), \
+             patch.object(factor_library, 'fetch_indicators_batch', return_value={'ADX': {'adx': '28'}, 'KDJ': {'j': '70'}, 'CMF': {'cmf': '0.2'}}):
+            return factor_library.compute_instrument_factors(ITEM, {'BTC': {'longShortRatio': {'weightedLongRatio': 0.8}}})
 
     def factor_trader(self):
-        names = [
-            'fetch_single_instrument_data', 'fetch_candles_direct', 'effective_risk_per_trade',
-            'quantize_size', 'load_adaptive_config', 'calc_ema', 'calc_rsi', 'calc_atr',
-            'calc_macd_histogram_acceleration', 'calc_obv_trend', 'calc_bollinger_squeeze',
-        ]
-        namespace = load_functions('ai_factor_trader.py', names, {
-            **self.common,
-            'fetch_candles': market_data_service.fetch_candles,
-            'RISK_PER_TRADE_EQUITY_RATIO': 0.02,
-            'ASSET_CLASS_PROFILES': {'crypto': {'sl_atr_mult': 2.2}},
-        })
-        return namespace['fetch_single_instrument_data'](ITEM, [], 1000)
+        from scripts.trader.factors import fetch_single_instrument_data
+        return fetch_single_instrument_data(ITEM, [], 1000, news_sentiment_file='unused-news.json',
+                                            fetch_candles_direct=market_data_service.fetch_candles,
+                                            instrument_profile=lambda *a: {'sl_atr_mult': 2.2},
+                                            load_adaptive_config=lambda: {})
 
     def test_extreme_unclosed_bars_do_not_change_any_pipeline(self):
         for run in (self.brain, self.factor_library, self.factor_trader):
@@ -278,7 +294,7 @@ class CandlePipelineTests(OfflineTest):
 
     def test_confirmation_is_required_instead_of_guessed_from_position(self):
         self.rows = {bar: [row[:8] for row in rows] for bar, rows in self.rows.items()}
-        with patch.object(market_data_service.subprocess, 'run') as cli:
+        with patch.object(market_data_service, '_alt_venue_candles') as cli:
             result = self.brain()
             self.assertEqual(result['data_quality'], 'invalid')
             self.assertFalse(result['calculus']['valid'])

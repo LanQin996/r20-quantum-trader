@@ -8,8 +8,11 @@ const { t } = useI18n();
 
 const norm = computed<'long' | 'short' | 'flat'>(() => {
   const d = String(props.dir || '').toUpperCase();
-  if (d.includes('LONG') || d === 'BUY' || d === 'B') return 'long';
-  if (d.includes('SHORT') || d === 'SELL' || d === 'S') return 'short';
+  // 批A(2026-09-13)：台账源头值是中文「多/空」(sync_full_ledger)，此前不识别→flat，
+  // 迫使各调用点自写 `=== '多' ? 'long' : 'short'`，而该三元把 'long'/'buy'/空串
+  // 一律误压成 short（方向标签整体反向）。中文档位在此统一识别，消费端可直传原值。
+  if (d === '多' || d.includes('LONG') || d === 'BUY' || d === 'B') return 'long';
+  if (d === '空' || d.includes('SHORT') || d === 'SELL' || d === 'S') return 'short';
   return 'flat';
 });
 const glyph = computed(() => ({ long: '▲', short: '▼', flat: '—' })[norm.value]);

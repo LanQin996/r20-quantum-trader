@@ -19,10 +19,18 @@ LEDGER_JSON_FILE = os.path.join(DATA_DIR, "trading_ledger.json")
 
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 sys.path.append(os.path.join(WORKSPACE_DIR, "scripts"))
+sys.path.insert(0, WORKSPACE_DIR)
+from r20_backend.time_utils import beijing_day
 try:
     from qq_notifier import notify_daily_summary
 except Exception:
     notify_daily_summary = None
+
+def _run_captured(script, label=None, timeout=15):
+    """审计(2026-09-13)：同解释器子进程 + 非零必吼（旧裸 python3 shell 串=静默死亡）。"""
+    from r20_backend.spawn import run_script
+    return run_script(script, timeout=timeout, label=label)
+
 
 def generate_daily_briefing_and_backup():
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
@@ -45,19 +53,25 @@ def generate_daily_briefing_and_backup():
     try:
         sync_script = os.path.join(WORKSPACE_DIR, "scripts", "sync_full_ledger.py")
         if os.path.exists(sync_script):
-            subprocess.run([sys.executable, sync_script], capture_output=True, text=True, timeout=15)
-    except Exception as e:
-        print(f"[Daily Summary] Ledger sync warning: {e}", file=sys.stderr)
+            _run_captured(sync_script)
+    except Exception as exc:
+        print(f"[Daily Summary] Ledger sync warning: {exc}", file=sys.stderr)
 
     trades = []
+    _ledger_unreadable = False
     if os.path.exists(LEDGER_JSON_FILE):
         try:
             with open(LEDGER_JSON_FILE, "r", encoding="utf-8") as f:
                 trades = json.load(f)
-        except Exception:
-            pass
+            if not isinstance(trades, list):
+                _ledger_unreadable = True
+                trades = []
+        except (json.JSONDecodeError, OSError):
+            # 审计③(2026-09-13)：损坏≠「确实没有交易」。旧实现 except:pass 后照发
+            # 「0胜0负 +0.00U」假研报——把数据事故渲染成事实主动推送。
+            _ledger_unreadable = True
 
-    closed_today = [t for t in trades if t.get("status") == "closed" and date_str in str(t.get("close_time", ""))]
+    closed_today = [t for t in trades if t.get("status") == "closed" and beijing_day(t.get("close_time")) == date_str]
     total_trades = len(closed_today)
     wins = [t for t in closed_today if float(t.get("pnl", 0)) > 0]
     losses = [t for t in closed_today if float(t.get("pnl", 0)) < 0]
@@ -93,6 +107,11 @@ def generate_daily_briefing_and_backup():
         f"• 市场舆情环境：{macro_env}\n"
         f"• 策略状态：多周期趋势共振滤网已激活，黑天鹅熔断哨兵全天候巡检中。"
     )
+
+    if _ledger_unreadable:
+        briefing_text = ("⚠️ 台账文件损坏/不可读，今日战绩与净盈亏不可信（宁报故障，不发假 0）；"
+                         "请尽快人工检查 data/trading_ledger.json。\n" + briefing_text)
+        print("[daily_briefing] CRITICAL 台账不可解析，研报已改为故障警示。")
 
     if notify_daily_summary:
         notify_daily_summary(briefing_text)

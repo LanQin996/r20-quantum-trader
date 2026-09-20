@@ -3,22 +3,31 @@
  * 全局对话框原语：Teleport 挂 body、焦点陷阱、ESC/遮罩关闭、滚动锁。
  * 规则：编辑/表单用 Dialog，详情透视用 Drawer，删除确认用 useConfirm。
  */
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch, useId } from 'vue';
 import { X } from 'lucide-vue-next';
 import { useI18n } from '../../composables/useI18n';
+import { useModalFocus } from '../../composables/useModalFocus';
 
 const { t } = useI18n();
+const titleId = useId();
+const descId = useId();
 
 const props = withDefaults(
   defineProps<{
     open: boolean;
     title?: string;
     desc?: string;
-    size?: 'sm' | 'md' | 'lg' | 'xl';
+    size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl';
     closeOnScrim?: boolean;
     showClose?: boolean;
     /** 顶部强调条语义（danger 时用于编辑危险表单） */
     tone?: 'default' | 'danger';
+    /**
+     * 打开时的初始焦点选择器（在面板内部查找，批 69）。
+     * 仅用于"打开即需输入"的弹窗 —— 危险操作的确认短语、管理员密码等；
+     * 找不到匹配元素时自动回落到面板容器。
+     */
+    initialFocus?: string;
   }>(),
   { closeOnScrim: true, showClose: true, tone: 'default' },
 );
@@ -26,63 +35,25 @@ const props = withDefaults(
 const emit = defineEmits<{ (e: 'close'): void }>();
 
 const width = computed(
-  () => ({ sm: '400px', md: '560px', lg: '760px', xl: '960px' })[props.size || 'md'],
+  () => ({ sm: '400px', md: '560px', lg: '760px', xl: '960px', '2xl': '1160px' })[props.size || 'md'],
 );
 
 const panel = ref<HTMLElement | null>(null);
-let lastFocused: Element | null = null;
 
-function focusables(): HTMLElement[] {
-  if (!panel.value) return [];
-  return Array.from(
-    panel.value.querySelectorAll<HTMLElement>(
-      'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
-    ),
-  ).filter((el) => el.offsetParent !== null);
-}
-
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    e.stopPropagation();
-    emit('close');
-    return;
-  }
-  if (e.key === 'Tab') {
-    const els = focusables();
-    if (!els.length) return;
-    const first = els[0];
-    const last = els[els.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }
-}
-
-watch(
-  () => props.open,
-  async (open) => {
-    if (open) {
-      lastFocused = document.activeElement;
-      document.body.style.overflow = 'hidden';
-      await nextTick();
-      panel.value?.addEventListener('keydown', onKeydown);
-      const els = focusables();
-      (els[0] || panel.value)?.focus?.();
-    } else {
-      document.body.style.overflow = '';
-      panel.value?.removeEventListener('keydown', onKeydown);
-      (lastFocused as HTMLElement | null)?.focus?.();
-    }
+/* 批 42：焦点陷阱 / Escape 栈 / 滚动锁 / 焦点交接 提取到 useModalFocus，
+   与 BaseDrawer、TrajectoryPanel 共用同一份实现（此前三处各写或干脆没有）。 */
+const { sync: syncModalFocus, release: releaseModalFocus } = useModalFocus(
+  panel,
+  () => emit('close'),
+  {
+    initialFocus: () =>
+      props.initialFocus ? panel.value?.querySelector<HTMLElement>(props.initialFocus) ?? null : null,
   },
 );
 
-onBeforeUnmount(() => {
-  document.body.style.overflow = '';
-});
+watch(() => props.open, syncModalFocus);
+
+onBeforeUnmount(releaseModalFocus);
 </script>
 
 <template>
@@ -101,6 +72,8 @@ onBeforeUnmount(() => {
             ref="panel"
             role="dialog"
             aria-modal="true"
+            :aria-labelledby="title || $slots.title ? titleId : undefined"
+            :aria-describedby="desc ? descId : undefined"
             tabindex="-1"
             class="float-panel relative w-full outline-none"
             :style="{ maxWidth: width, outline: tone === 'danger' ? '1px solid var(--down-line)' : undefined }"
@@ -112,14 +85,15 @@ onBeforeUnmount(() => {
               style="border-bottom: 1px solid var(--line-1)"
             >
               <div class="min-w-0">
-                <h3 class="text-base font-semibold" style="color: var(--ink-strong)">
+                <h3 :id="titleId" class="text-base font-semibold" style="color: var(--ink-strong)">
                   <slot name="title">{{ title }}</slot>
                 </h3>
-                <p v-if="desc" class="mt-0.5 text-xs" style="color: var(--ink-2)">{{ desc }}</p>
+                <p v-if="desc" :id="descId" class="mt-0.5 text-xs" style="color: var(--ink-2)">{{ desc }}</p>
               </div>
-              <button
+              <button type="button"
                 v-if="showClose"
                 class="btn btn-quiet btn-icon shrink-0 -me-1.5"
+                :title="`${t('common.close')} (Esc)`"
                 :aria-label="t('common.close')"
                 @click="emit('close')"
               >

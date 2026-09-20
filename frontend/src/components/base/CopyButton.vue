@@ -27,10 +27,11 @@ async function copy() {
 </script>
 
 <template>
-  <button
+  <button type="button"
     class="btn"
     :class="label ? 'btn-ghost btn-sm' : 'btn-quiet btn-icon btn-sm'"
-    :title="t('common.copy')"
+    :title="done ? t('common.copied') : t('common.copy')"
+    :aria-label="done ? t('common.copied') : t('common.copy')"
     @click="copy"
   >
     <Check v-if="done" style="color: var(--up)" />

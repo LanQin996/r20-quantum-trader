@@ -16,15 +16,27 @@ const info = computed(() =>
 </script>
 
 <template>
-  <div class="flex items-center justify-between gap-3 px-3.5 py-2">
-    <span class="t-faint num text-xs">{{ info }}</span>
+  <nav class="flex items-center justify-between gap-3 px-3.5 py-2" :aria-label="t('common.pageNav')">
+    <span class="t-faint num text-xs" role="status" aria-live="polite">{{ info }}</span>
     <div v-if="pageCount > 1" class="flex items-center gap-1">
-      <button class="btn btn-ghost btn-icon btn-sm" :disabled="page <= 1" :aria-label="t('common.prevPage')" @click="emit('update:page', page - 1)">
+      <button type="button"
+        class="btn btn-ghost btn-icon btn-sm"
+        :disabled="page <= 1"
+        :title="t('common.prevPage')"
+        :aria-label="t('common.prevPage')"
+        @click="emit('update:page', page - 1)"
+      >
         <ChevronLeft />
       </button>
-      <button class="btn btn-ghost btn-icon btn-sm" :disabled="page >= pageCount" :aria-label="t('common.nextPage')" @click="emit('update:page', page + 1)">
+      <button type="button"
+        class="btn btn-ghost btn-icon btn-sm"
+        :disabled="page >= pageCount"
+        :title="t('common.nextPage')"
+        :aria-label="t('common.nextPage')"
+        @click="emit('update:page', page + 1)"
+      >
         <ChevronRight />
       </button>
     </div>
-  </div>
+  </nav>
 </template>

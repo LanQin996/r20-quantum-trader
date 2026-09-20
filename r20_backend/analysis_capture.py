@@ -49,23 +49,28 @@ def identity() -> str:
     return profile
 
 def resolve_identity(env=None) -> str:
-    """OAuth credentials may change inside one CLI profile; bind each cycle to its UID."""
+    """Bind each cycle to the frozen static credential profile."""
     from scripts.okx_runtime import selected_environment
-    env = env or selected_environment()
-    if env.configured:
-        return env.identity
+    from scripts.okx_runtime import current_environment
+    env = env or current_environment()
+    return env.identity
+
+
+def venue_identity(venue: str, environment: str | None = None) -> str:
+    """Keep external-venue events separate from the OKX archive."""
+    from scripts.okx_runtime import current_environment
+    venue = str(venue or "okx").lower()
+    if venue == "okx":
+        return identity()
+    mode = environment or current_environment().mode
     try:
-        from r20_backend.okx_trade_service import _run_cli
-        rows = _run_cli(["okx", f"--{env.mode}", "account", "config", "--json"], timeout=8)
-        uid = str(rows[0].get("uid") or "") if rows else ""
-        if not uid:
-            raise ValueError("OAuth account UID unavailable")
-        account = f"okx:{env.mode}:" + digest(["uid", uid])[:16]
-        Archive().sync_state(env.identity, "identity", {"account": account, "verified_ms": now_ms()})
-        return account
+        from r20_backend.exchanges.identity import credential_fingerprint
+        from r20_backend.exchanges.registry import venue_credentials
+        api_key, _ = venue_credentials(venue, mode)
+        return f"{venue}:{mode}:{credential_fingerprint(api_key)}"
     except Exception as exc:
         fault(exc, "account_identity")
-        return f"unknown:{env.mode}:" + uuid.uuid4().hex
+        return f"unknown:{venue}:{mode}:" + uuid.uuid4().hex
 
 def context() -> dict:
     return dict(_CONTEXT.get())
@@ -303,6 +308,9 @@ def position_meta(position: dict | None = None) -> dict:
     """
     pos = position or {}
     meta = {}
+    venue = str(pos.get("venue") or pos.get("exchange") or "okx").lower()
+    if venue != "okx":
+        meta["account"] = venue_identity(venue, pos.get("environment"))
     if pos.get("instId"): meta["inst"] = str(pos.get("instId"))
     side = str(pos.get("posSide") or pos.get("side") or "")
     if side and side != "net": meta["side"] = side

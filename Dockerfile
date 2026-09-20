@@ -48,6 +48,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY r20_backend/ ./r20_backend/
 COPY r20_gateway/ ./r20_gateway/
 COPY scripts/ ./scripts/
+COPY fcntl_compat.py ./fcntl_compat.py
 COPY plugins/ ./plugins/
 COPY dashboard/ ./dashboard/
 COPY docs/ ./docs/

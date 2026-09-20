@@ -11,7 +11,6 @@ export const zhNav = {
     console: '管理控制台',
     docs: '官方文档',
     about: '关于与社区',
-    search: '搜索 / 命令',
     theme: '主题',
     language: '语言',
     settings: '偏好设置',

@@ -1,30 +1,38 @@
 import { ref, computed } from 'vue'
-import { zhCN } from '../locales/zh'
-import { enUS } from '../locales/en'
-// ---- 迁移期兼容：旧组件仍引用旧键位，深合并保证不断档；旧页面清零后移除 ----
-import { zhCN as zhLegacy } from '../locales/legacy/zh'
-import { enUS as enLegacy } from '../locales/legacy/en'
+// 批 76：写成显式 `/index` —— 目录导入只有 Vite 能解析，
+// 而 `frontend/tests/*.test.mjs` 的自定义 loader 只试 `.ts`/`.js` 文件，
+// 于是任何（直接或间接）依赖本模块的 node 测试都会在解析阶段就挂掉。
+import { zhCN } from '../locales/zh/index'
+import { enUS } from '../locales/en/index'
 
 export type LocaleType = 'zh-CN' | 'en-US'
 
 const LOCALE_KEY = 'r20_locale'
 
+/**
+ * 界面语言选项 —— **全站唯一来源**。
+ *
+ * `label` 用该语言**自己的名字**（中文 / English），不随当前语言翻译：
+ * 语言开关的作用是让看不懂当前语言的人找到自己的语言，
+ * 译成「Chinese」对只看中文的人反而是障碍。
+ *
+ * 批 75：此前两个开关各写各的 —— 设置面板写 `中文` / `English`，
+ * 登录页模板里**硬编码**成 `中文` / `EN`，同一个语言两个写法。
+ */
+export const LOCALE_OPTIONS: { value: LocaleType; label: string }[] = [
+  { value: 'zh-CN', label: '中文' },
+  { value: 'en-US', label: 'English' },
+]
+
 type Dict = Record<string, any>
 
-function deepMerge<T extends Dict>(base: T, over: T): T {
-  const out: Dict = { ...base }
-  for (const [k, v] of Object.entries(over)) {
-    const b = out[k]
-    out[k] = b && v && typeof b === 'object' && typeof v === 'object' && !Array.isArray(b) && !Array.isArray(v)
-      ? deepMerge(b, v)
-      : v
-  }
-  return out as T
-}
-
+// 结构优化阶段 0（2026-09-14）：移除 locales/legacy 迁移期兼容层。
+// 移除依据（实测，非估计）：新树 zh/en 各 1639 键；代码中静态 t() 键位 1356 个；
+// 「仅 legacy 提供且仍被使用」的键位 = 0；legacy 292 键中 288 个无人使用。
+// 原注释自定的移除条件「旧页面清零后移除」已达成，故连同 deepMerge 一并删除。
 const messages: Record<LocaleType, Dict> = {
-  'zh-CN': deepMerge(zhLegacy as Dict, zhCN as Dict),
-  'en-US': deepMerge(enLegacy as Dict, enUS as Dict),
+  'zh-CN': zhCN as Dict,
+  'en-US': enUS as Dict,
 }
 
 let currentLocaleRaw = ref<LocaleType>('zh-CN')
@@ -41,6 +49,9 @@ export function useI18n() {
         localStorage.setItem(LOCALE_KEY, locale)
       } catch {
         // ignore storage error in private browsing
+      }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('r20:locale-changed'))
       }
     }
   }
@@ -113,6 +124,7 @@ export function useI18n() {
   return {
     locale,
     currentLocale,
+    LOCALE_OPTIONS,
     isEn,
     t,
     tm,

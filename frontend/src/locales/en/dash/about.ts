@@ -1,6 +1,6 @@
 export const enAbout = {
   title: 'About R20',
-  desc: 'Open-source institutional AI quant terminal — Code is Law',
+  desc: 'Version, licence and source repository',
   arch: {
     title: 'Architecture',
     stack: 'FastAPI + Vue 3 static SPA',

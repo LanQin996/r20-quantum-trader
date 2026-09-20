@@ -1,8 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { useI18n } from '../composables/useI18n'
 import type { DashboardResponse, InstrumentFactor, PositionItem, PendingOrderItem } from '../types/dashboard'
 
 export const useDashboardStore = defineStore('dashboard', () => {
+  // 批 76：回落文案改走 i18n（useI18n 只读模块级 locale ref，在 store 作用域调用是安全的）
+  const { t } = useI18n()
   const activeTab = ref<'trading' | 'factors' | 'news' | 'lab' | 'history'>('trading')
   const data = ref<DashboardResponse | null>(null)
   const loading = ref<boolean>(false)
@@ -11,7 +14,6 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const lastUpdated = ref<Date | null>(null)
   const isConnected = ref<boolean>(true)
   const pollingTimer = ref<any>(null)
-  const isFetching = ref<boolean>(false)
   const showAboutModal = ref<boolean>(false)
 
   // Getters
@@ -68,7 +70,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
       }
     })
   })
-  const macroAssessment = computed(() => data.value?.macro_assessment || '全市场宏观多周期多因子矩阵扫描中...')
+  const macroAssessment = computed(() => data.value?.macro_assessment || t('common.dashboardScanning'))
   // 不再伪造默认模型名：数据缺失时返回空对象，由视图显式呈现「未配置」，避免界面谎报正在使用的模型。
   const llmRuntime = computed(() => data.value?.llm_runtime || {})
   // 巡检日志倒序展示：最新在前（后端按时间正序 tail，此处仅显示层反转）
@@ -76,9 +78,17 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const isStale = computed(() => data.value?.is_stale ?? false)
 
   // Actions
+  // 批A(2026-09-13)·轮询竞态收口：/api/all 单次 ~387KB，移动弱网下 3s 一轮会堆积
+  // （上发未回又发）且**慢响应迟到可把快响应的新数据覆盖回几秒前**（行情倒跳）。
+  // 三重守卫：① in-flight 互斥——静默轮询遇忙直接跳过本轮；② 递增 seq——仅接受
+  // 发起序号最新的响应落盘；③ 页面隐藏（切后台）暂停轮询，回前台立即补一次。
+  let _inflight = false
+  let _seq = 0
+  let _lastAppliedSeq = 0
   async function fetchDashboard(silent = false) {
-    if (isFetching.value) return
-    isFetching.value = true
+    if (_inflight && silent) return
+    _inflight = true
+    const mySeq = ++_seq
     if (!silent) {
       isRefreshing.value = true
     }
@@ -92,16 +102,19 @@ export const useDashboardStore = defineStore('dashboard', () => {
         throw new Error(`HTTP ${resp.status}: ${resp.statusText}`)
       }
       const json: DashboardResponse = await resp.json()
+      if (mySeq < _lastAppliedSeq) return   // 陈旧响应：已被更新的发起覆盖，禁落盘
+      _lastAppliedSeq = mySeq
       data.value = json
       lastUpdated.value = new Date()
       isConnected.value = true
       error.value = null
     } catch (err: any) {
+      if (mySeq < _lastAppliedSeq) return
       console.error('[DashboardStore] fetch failed:', err)
-      error.value = err.message || '获取数据失败'
+      error.value = err.message || t('common.dashboardLoadFailed')
       isConnected.value = false
     } finally {
-      isFetching.value = false
+      _inflight = false
       loading.value = false
       if (!silent) {
         setTimeout(() => {
@@ -111,38 +124,20 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
-  let pollIntervalMs = 3000
-  let visibilityHandler: (() => void) | null = null
-
-  function schedulePollTimer() {
-    if (!pollingTimer.value) {
-      pollingTimer.value = setInterval(() => {
-        fetchDashboard(true)
-      }, pollIntervalMs)
-    }
-  }
-
-  function handleVisibilityChange() {
-    if (document.hidden) {
-      if (pollingTimer.value) {
-        clearInterval(pollingTimer.value)
-        pollingTimer.value = null
-      }
-    } else {
-      fetchDashboard(true)
-      schedulePollTimer()
-    }
-  }
-
   function startPolling(intervalMs = 3000) {
     stopPolling()
-    pollIntervalMs = intervalMs
     fetchDashboard(false)
-    if (!document.hidden) {
-      schedulePollTimer()
+    pollingTimer.value = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return   // 后台页不烧流量，回前台见 _onVis
+      fetchDashboard(true)
+    }, intervalMs)
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', _onVis)
+      document.addEventListener('visibilitychange', _onVis)
     }
-    visibilityHandler = handleVisibilityChange
-    document.addEventListener('visibilitychange', visibilityHandler)
+  }
+  function _onVis() {
+    if (!document.hidden && pollingTimer.value) fetchDashboard(true)   // 回前台立即补一轮
   }
 
   function stopPolling() {
@@ -150,10 +145,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
       clearInterval(pollingTimer.value)
       pollingTimer.value = null
     }
-    if (visibilityHandler) {
-      document.removeEventListener('visibilitychange', visibilityHandler)
-      visibilityHandler = null
-    }
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', _onVis)
   }
 
   return {

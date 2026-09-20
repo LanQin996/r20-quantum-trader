@@ -1,20 +1,54 @@
 <script setup lang="ts">
-import { useToast } from '../../composables/useToast'
-const toast = useToast()
-import { ref, computed, onMounted } from 'vue'
-import PageHeader from '../../components/admin/PageHeader.vue'
-import { useI18n } from '../../composables/useI18n'
-const { t } = useI18n()
-import { useApi } from '../../composables/useApi'
-import {Zap} from 'lucide-vue-next'
+/**
+ * NotifyPage.vue · 通知通道与事件流工位
+ * ---------------------------------------------------------------------------
+ * 骨架（推倒重来）：
+ *   旧 = 4 张通道卡（**开关块逐字复制了 4 遍，每遍 10 行**）
+ *        + 6 张类别卡（Tailwind 色相类 emerald/blue/indigo/purple/red/amber）
+ *        + 2 个手写 fixed 遮罩弹窗（含 📱💬🤖 emoji）
+ *   新 = 共享 PageHeader
+ *        → **通道状态带**（已开启 / QQ / Telegram / 简报时间）
+ *        → **通道清单：4 张卡由一份 `channelCards` computed 驱动**，模板只剩一份
+ *        → **通知类别：单一面板内的行式清单**（中性图标 + 等宽事件键）
+ *        → **每日简报** 独立面板
+ *        → 2 个弹窗改用 BaseDialog
+ *
+ * 后端契约（逐字未改）：
+ *   GET  /api/v1/admin/notifications
+ *   GET  /api/v1/admin/notifications/schedule
+ *   PUT  /api/v1/admin/notifications            ← saveAll 请求体字段逐字保留
+ *   PUT  /api/v1/admin/notifications/schedule   { briefing_times }
+ *   PUT  /api/v1/admin/channels/{channel}/toggle{ enabled, ...per-channel }
+ *   POST /api/v1/admin/notifications/diagnose   { channel }
+ *   POST /api/v1/admin/notifications/test       { channel, confirmation }
+ *   POST /api/v1/admin/notifications/qq/capture-openid/start  { timeout: 60 }
+ *   GET  /api/v1/admin/notifications/qq/capture-openid/{id}
+ *   POST /api/v1/admin/notifications/qq/bind/start            {}
+ *   GET  /api/v1/admin/notifications/qq/bind/{taskId}
+ *
+ * ⚠️ 轮询纪律逐字保留：捕获 1.5s / 绑定 2s，终态即停，`onBeforeUnmount` 停全部定时器。
+ */
+import { useToast } from '../../composables/useToast';
+const toast = useToast();
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import PageHeader from '../../components/admin/PageHeader.vue';
+import BaseDialog from '../../components/base/BaseDialog.vue';
+import BaseSwitch from '../../components/base/BaseSwitch.vue';
+import { useI18n } from '../../composables/useI18n';
+const { t } = useI18n();
+import { useApi } from '../../composables/useApi';
+import { Zap, RefreshCw, Loader2, ScanLine, QrCode, AlertTriangle, Send, Save,
+  ArrowUpRight, CheckCircle2, ShieldCheck, Brain, OctagonAlert, Clock, Radio, CalendarClock } from 'lucide-vue-next';
+import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
-const { api } = useApi()
-const config = ref<any>(null)
-const loading = ref(true)
-const testResults = ref<Record<string, any>>({})
-const captureModal = ref(false)
-const captureStatus = ref<any>(null)
-let captureTimer: any = null
+const { api } = useApi();
+const config = ref<any>(null);
+const loading = ref(true);
+const loadError = ref('');
+const testResults = ref<Record<string, any>>({});
+const captureModal = ref(false);
+const captureStatus = ref<any>(null);
+let captureTimer: any = null;
 
 const enabledChannelsCount = computed(() => {
   if (!config.value) return 0
@@ -23,6 +57,7 @@ const enabledChannelsCount = computed(() => {
 
 async function loadConfig(silent = false) {
   if (!silent) loading.value = true
+  loadError.value = ''
   try {
     const res = await api('/api/v1/admin/notifications')
     // Preserve local un-submitted secret inputs if any
@@ -35,7 +70,8 @@ async function loadConfig(silent = false) {
     config.value = res
   } catch (e: any) {
     console.error(e)
-    toast.err('加载通知配置失败: ' + (e.message || String(e)))
+    loadError.value = e.message || String(e)
+    if (!silent) toast.err(t('admin.notify.loadFailed', undefined, { msg: e.message || String(e) }))
   } finally {
     if (!silent) loading.value = false
   }
@@ -63,10 +99,16 @@ async function toggleChannel(channel: string, enabled: boolean) {
       }
     }
     const res = await api(`/api/v1/admin/channels/${channel}/toggle`, { method: 'PUT', body: JSON.stringify(payload) })
-    toast.ok(res.message || `${channel} 通道已成功${enabled ? '开启' : '关闭'}`)
+    toast.ok(
+      res.message ||
+        t('admin.notify.toggleOk', undefined, {
+          channel,
+          state: t(enabled ? 'admin.notify.stateOn' : 'admin.notify.stateOff'),
+        }),
+    )
     await loadConfig(true)
   } catch (e: any) {
-    toast.err(e.message || '通道状态切换失败')
+    toast.err(e.message || t('admin.notify.toggleFailed'))
     await loadConfig(true)
   }
 }
@@ -88,10 +130,10 @@ async function saveAll() {
       qq_openid: config.value.qq.openid,
     }
     const res = await api('/api/v1/admin/notifications', { method: 'PUT', body: JSON.stringify(body) })
-    toast.ok(res.message || '全部通知通道配置已保存')
+    toast.ok(res.message || t('admin.notify.savedAll'))
     await loadConfig(true)
   } catch (e: any) {
-    toast.err(e.message || '保存配置失败')
+    toast.err(e.message || t('admin.notify.saveFailed'))
   }
 }
 
@@ -111,7 +153,7 @@ async function startCapture() {
     captureStatus.value = res
     pollCapture(res.capture_id)
   } catch (e: any) {
-    alert(e.message)
+    toast.err(e.message)
   }
 }
 
@@ -150,7 +192,7 @@ async function startQqBind() {
   try {
     const d = await api('/api/v1/admin/notifications/qq/bind/start', { method: 'POST', body: '{}' })
     bindTaskId = d.task_id
-    bindStatus.value = { qr: d.qr_data_uri || '', link: d.qr_data_uri ? '' : (d.connect_url || ''), text: `等待扫码…（${d.expires_in} 秒内有效）`, tone: 'blue' }
+    bindStatus.value = { qr: d.qr_data_uri || '', link: d.qr_data_uri ? '' : (d.connect_url || ''), text: t('admin.notify.waitScan', undefined, { n: d.expires_in }), tone: 'blue' }
     bindModal.value = true
     stopBindPolling()
     bindTimer = setInterval(async () => {
@@ -158,23 +200,23 @@ async function startQqBind() {
       try {
         const r = await api(`/api/v1/admin/notifications/qq/bind/${bindTaskId}`)
         if (r.status === 'bound') {
-          bindStatus.value = { ...bindStatus.value, text: '绑定成功，凭证已写入本机加密库', tone: 'green' }
+          bindStatus.value = { ...bindStatus.value, text: t('admin.notify.bindSuccess'), tone: 'green' }
           stopBindPolling()
           await loadConfig()
           setTimeout(() => { bindModal.value = false }, 1800)
         } else if (r.status === 'awaiting_message') {
           stopBindPolling()
           bindModal.value = false
-          alert('QQ 机器人授权成功，正在自动启动 OpenID 捕获…')
+          toast.ok(t('admin.notify.qqBound'))
           startCapture()
         } else if (r.status === 'expired') {
-          bindStatus.value = { ...bindStatus.value, text: '二维码已过期，请点击刷新', tone: 'amber' }
+          bindStatus.value = { ...bindStatus.value, text: t('admin.notify.qrExpired'), tone: 'amber' }
           stopBindPolling()
         } else if (r.status === 'failed') {
-          bindStatus.value = { ...bindStatus.value, text: `绑定失败：${r.error || '未知错误'}`, tone: 'red' }
+          bindStatus.value = { ...bindStatus.value, text: t('admin.notify.bindFailed', undefined, { error: r.error || t('admin.notify.unknownError') }), tone: 'red' }
           stopBindPolling()
         } else {
-          bindStatus.value = { ...bindStatus.value, text: `等待扫码…（${r.expires_in ?? '--'} 秒内有效）`, tone: 'blue' }
+          bindStatus.value = { ...bindStatus.value, text: t('admin.notify.waitScan', undefined, { n: r.expires_in ?? '--' }), tone: 'blue' }
         }
       } catch (e: any) {
         bindStatus.value = { ...bindStatus.value, text: e.message, tone: 'red' }
@@ -182,7 +224,7 @@ async function startQqBind() {
       }
     }, 2000)
   } catch (e: any) {
-    alert(e.message)
+    toast.err(e.message)
   }
 }
 
@@ -194,12 +236,12 @@ function closeBindModal() {
 // ---- protected test send ----
 async function sendTest(channel: string) {
   try {
-    testResults.value[channel] = { status: 'testing', detail: '正在请求测试发送…' }
+    testResults.value[channel] = { status: 'testing', detail: t('admin.notify.requestingTest') }
     const res = await api('/api/v1/admin/notifications/test', {
       method: 'POST',
       body: JSON.stringify({ channel, confirmation: `SEND TEST ${channel.toUpperCase()}` }),
     })
-    testResults.value[channel] = { status: res.result?.[channel]?.startsWith('accepted:') ? 'ready' : (res.result?.status || 'sent'), detail: `${res.result?.[channel] || res.result?.detail || '已发送'} · ${res.meaning || ''}` }
+    testResults.value[channel] = { status: res.result?.[channel]?.startsWith('accepted:') ? 'ready' : (res.result?.status || 'sent'), detail: `${res.result?.[channel] || res.result?.detail || t('admin.notify.sent')} · ${res.meaning || ''}` }
   } catch (e: any) {
     testResults.value[channel] = { status: 'failed', detail: e.message }
   }
@@ -207,308 +249,668 @@ async function sendTest(channel: string) {
 
 async function saveSchedule() {
   const times = String(config.value._briefingTimes || '').split(/[,，\s]+/).filter(Boolean)
-  if (!times.length) { alert('请至少填写一个 HH:MM 时间'); return }
+  if (!times.length) { toast.warn(t('admin.notify.scheduleRequired')); return }
   try {
     await api('/api/v1/admin/notifications/schedule', { method: 'PUT', body: JSON.stringify({ briefing_times: times }) })
-    alert('简报时间已保存')
+    toast.ok(t('admin.notify.scheduleSaved'))
   } catch (e: any) {
-    alert(e.message)
+    toast.err(e.message)
   }
 }
+
+// ── 展示层：把 4 段复制粘贴的通道卡收成一份数据 ──
+interface FieldSpec {
+  key: string
+  label: string
+  type?: string
+  placeholder?: string
+  span?: boolean
+}
+interface ChannelCard {
+  key: string
+  title: string
+  offTitle: string
+  onTitle: string
+  qqActions: boolean
+  fields: FieldSpec[]
+}
+
+const channelCards = computed<ChannelCard[]>(() => [
+  {
+    key: 'qq',
+    title: t('admin.notify.qqTitle'),
+    offTitle: t('admin.notify.qqOff'),
+    onTitle: t('admin.notify.qqOn'),
+    qqActions: true,
+    fields: [
+      { key: 'app_id', label: 'App ID' },
+      { key: '_secret', label: 'Client Secret', type: 'password', placeholder: t('admin.notify.keepExisting') },
+      { key: 'openid', label: t('admin.notify.targetOpenId'), span: true },
+    ],
+  },
+  {
+    key: 'telegram',
+    title: 'Telegram Bot',
+    offTitle: t('admin.notify.telegramOff'),
+    onTitle: t('admin.notify.telegramOn'),
+    qqActions: false,
+    fields: [
+      { key: '_token', label: 'Bot Token', type: 'password', placeholder: t('admin.notify.keepExisting') },
+      { key: 'chat_id', label: 'Chat ID' },
+      { key: 'api_base', label: t('admin.notify.apiBaseLabel'), placeholder: 'https://api.telegram.org', span: true },
+    ],
+  },
+  {
+    key: 'wechat',
+    title: t('admin.notify.wechatTitle'),
+    offTitle: t('admin.notify.wechatOff'),
+    onTitle: t('admin.notify.wechatOn'),
+    qqActions: false,
+    fields: [{ key: 'webhook', label: 'Webhook URL', span: true }],
+  },
+  {
+    key: 'webhook',
+    title: t('admin.notify.webhookTitle'),
+    offTitle: t('admin.notify.webhookOff'),
+    onTitle: t('admin.notify.webhookOn'),
+    qqActions: false,
+    fields: [{ key: 'url', label: t('admin.notify.webhookUrlLabel'), span: true }],
+  },
+])
+
+const categories = computed(() => [
+  { key: 'trade.opened', label: t('admin.notify.catOpen'), desc: t('admin.notify.catOpenDesc'), icon: ArrowUpRight },
+  { key: 'trade.closed', label: t('admin.notify.catClosed'), desc: t('admin.notify.catClosedDesc'), icon: CheckCircle2 },
+  { key: 'trade.sl_updated', label: t('admin.notify.catBreakEven'), desc: t('admin.notify.catBreakEvenDesc'), icon: ShieldCheck },
+  { key: 'evolution.completed', label: t('admin.notify.catEvolution'), desc: t('admin.notify.catEvolutionDesc'), icon: Brain },
+  { key: 'risk.triggered', label: t('admin.notify.catRisk'), desc: t('admin.notify.catRiskDesc'), icon: OctagonAlert },
+  { key: 'briefing.ready', label: t('admin.notify.catBriefing'), desc: t('admin.notify.catBriefingDesc'), icon: Clock },
+])
+
+/** 后端返回的 status 是自由字符串 → 徽章色调（ready/sent 绿 · failed/error 红 · 其余琥珀） */
+function testTone(status: string): string {
+  if (['ready', 'sent', 'ok', 'success'].includes(status)) return 'badge-up'
+  if (['failed', 'error'].includes(status)) return 'badge-down'
+  return 'badge-warn'
+}
+function channelOn(k: string): boolean {
+  return config.value?.[k]?.enabled === true
+}
+const bindTone = computed(() => {
+  const tone = bindStatus.value?.tone
+  if (tone === 'green') return 'badge-up'
+  if (tone === 'red') return 'badge-down'
+  if (tone === 'amber') return 'badge-warn'
+  return 'badge-accent'
+})
 
 onMounted(() => {
   loadConfig()
 })
+
+// 批B(2026-09-13)·离场清理：旧实现仅在「终态/异常」清定时器，离开本页后 QQ
+// OpenID 捕获/扫码绑定仍每 1.5s 打一次管理接口（最长持续到服务端过期，失败还被
+// 静默吞）。组件卸载即停全部轮询。
+onBeforeUnmount(() => {
+  if (captureTimer) { clearInterval(captureTimer); captureTimer = null }
+  stopBindPolling()
+})
 </script>
 
 <template>
-  <div class="space-y-4 max-w-[2048px] mx-auto">
-    <PageHeader :title="t('nav.admin.notify')" description="逐通道配置、诊断与发送测试，保存后统一生效">
+  <div class="nf">
+    <PageHeader :title="t('nav.admin.notify')" :description="t('admin.notify.desc')">
       <template #actions>
-        <span class="chip">集成通道 · <b class="num">{{ enabledChannelsCount }}/4</b></span>
+        <span class="badge badge-accent mono">
+          {{ t('admin.notify.channelsChip') }} {{ enabledChannelsCount }}/4
+        </span>
+        <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="loadConfig()">
+          <Loader2 v-if="loading && config" :size="14" class="animate-spin shrink-0" />
+          <RefreshCw v-else :size="14" />
+          <span>{{ t('common.refresh') }}</span>
+        </button>
       </template>
     </PageHeader>
 
-    <!-- Alert / Banner Message -->
-    <div v-if="loading" class="py-12 text-center text-xs" style="color: var(--ink-2);">正在加载通知配置...</div>
+    <!-- 拉取失败 -->
+    <div v-if="loadError && !config" role="alert" class="state-block is-error">
+      <span class="state-icon"><AlertTriangle :size="17" /></span>
+      <p class="state-title">{{ t('common.loadFailed') }}</p>
+      <p class="state-desc">{{ loadError }}</p>
+      <button type="button" class="btn btn-ghost btn-sm mt-1" :disabled="loading" @click="loadConfig()">
+        <RefreshCw :size="14" />
+        <span>{{ t('common.retry') }}</span>
+      </button>
+    </div>
 
-    <template v-else-if="config">
-      <!-- QQ Channel -->
-      <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center space-x-2">
-            <span class="inline-block w-2 h-2 rounded-full" :class="config.qq.enabled ? 'bg-emerald-500' : 'bg-zinc-500'"></span>
-            <h2 class="text-sm font-bold" style="color: var(--ink-1);">{{ t('nav.admin.notify') }}</h2>
+    <template v-else>
+      <!-- ══ 通道状态带 ══ -->
+      <section class="card band">
+        <template v-if="loading && !config">
+          <BaseLoadingAnnounce />
+          <div v-for="i in 4" :key="i" class="fact">
+            <div class="skeleton skeleton-text" style="width: 48%" />
+            <div class="skeleton skeleton-text skeleton-value" style="width: 62%" />
+            <div class="skeleton skeleton-text" style="width: 36%" />
           </div>
-          <div class="flex items-center space-x-3">
-            <button @click="startQqBind" class="px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--accent); color: var(--accent-ink);">扫码绑定</button>
-            <button @click="startCapture" class="flex items-center space-x-1 px-2.5 py-1 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--accent-bg); border-color: var(--accent-line); color: var(--accent);">
-              <Zap class="w-3 h-3" />
-              <span>⚡ 自动获取 OpenID</span>
-            </button>
-            <div class="flex items-center space-x-2">
-              <button
-                type="button"
-                @click="toggleChannel('qq', !config.qq.enabled)"
-                class="relative inline-flex items-center cursor-pointer focus:outline-none"
-                :title="config.qq.enabled ? '点击关闭 QQ 通知' : '点击开启 QQ 通知'"
-              >
-                <div
-                  class="w-10 h-5 rounded-full transition-colors relative"
-                  :style="{ backgroundColor: config.qq.enabled ? 'var(--up)' : 'var(--line-2)' }"
-                >
-                  <div
-                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
-                    :class="config.qq.enabled ? 'translate-x-5' : 'translate-x-0'"
-                  ></div>
-                </div>
-              </button>
-              <span
-                class="text-xs font-bold select-none cursor-pointer"
-                @click="toggleChannel('qq', !config.qq.enabled)"
-                :style="{ color: config.qq.enabled ? 'var(--up)' : 'var(--ink-2)' }"
-              >
-                {{ config.qq.enabled ? '已开启' : '已关闭' }}
-              </span>
-            </div>
-          </div>
-        </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div><label class="block text-[11px] mb-1" style="color: var(--ink-2);">App ID</label><input v-model="config.qq.app_id" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" /></div>
-          <div><label class="block text-[11px] mb-1" style="color: var(--ink-2);">Client Secret</label><input v-model="config.qq._secret" type="password" placeholder="留空保持现有" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" /></div>
-          <div class="sm:col-span-2"><label class="block text-[11px] mb-1" style="color: var(--ink-2);">目标用户 OpenID</label><input v-model="config.qq.openid" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" /></div>
-        </div>
-        <div class="flex space-x-2 mt-3">
-          <button @click="diagnose('qq')" class="px-3 py-1.5 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">仅诊断</button>
-          <button @click="sendTest('qq')" class="px-3 py-1.5 rounded-lg border text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--up-bg); border-color: var(--up-line); color: var(--up);">发送测试</button>
-        </div>
-        <div v-if="testResults.qq" class="mt-2 text-xs" :class="testResults.qq.status === 'ready' ? 'text-emerald-500' : 'text-amber-500'">{{ testResults.qq.status }} · {{ testResults.qq.detail }}</div>
-      </div>
+        </template>
 
-      <!-- Telegram -->
-      <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center space-x-2">
-            <span class="inline-block w-2 h-2 rounded-full" :class="config.telegram.enabled ? 'bg-emerald-500' : 'bg-zinc-500'"></span>
-            <h2 class="text-sm font-bold" style="color: var(--ink-1);">Telegram Bot</h2>
-          </div>
-          <div class="flex items-center space-x-2">
-            <button
-              type="button"
-              @click="toggleChannel('telegram', !config.telegram.enabled)"
-              class="relative inline-flex items-center cursor-pointer focus:outline-none"
-              :title="config.telegram.enabled ? '点击关闭 Telegram 通知' : '点击开启 Telegram 通知'"
-            >
-              <div
-                class="w-10 h-5 rounded-full transition-colors relative"
-                :style="{ backgroundColor: config.telegram.enabled ? 'var(--up)' : 'var(--line-2)' }"
-              >
-                <div
-                  class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
-                  :class="config.telegram.enabled ? 'translate-x-5' : 'translate-x-0'"
-                ></div>
-              </div>
-            </button>
-            <span
-              class="text-xs font-bold select-none cursor-pointer"
-              @click="toggleChannel('telegram', !config.telegram.enabled)"
-              :style="{ color: config.telegram.enabled ? 'var(--up)' : 'var(--ink-2)' }"
-            >
-              {{ config.telegram.enabled ? '已开启' : '已关闭' }}
+        <template v-else-if="config">
+          <div class="fact">
+            <span class="fact-label"><Radio :size="12" />{{ t('admin.notify.bandEnabled') }}</span>
+            <span class="fact-value num" :class="enabledChannelsCount ? 'is-up' : ''">
+              {{ enabledChannelsCount }} / 4
             </span>
+            <span class="fact-foot">{{ t('admin.notify.channelsTitle') }}</span>
           </div>
-        </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div><label class="block text-[11px] mb-1" style="color: var(--ink-2);">Bot Token</label><input v-model="config.telegram._token" type="password" placeholder="留空保持现有" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" /></div>
-          <div><label class="block text-[11px] mb-1" style="color: var(--ink-2);">Chat ID</label><input v-model="config.telegram.chat_id" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" /></div>
-          <div class="sm:col-span-2"><label class="block text-[11px] mb-1" style="color: var(--ink-2);">API Base URL (国内反代)</label><input v-model="config.telegram.api_base" placeholder="https://api.telegram.org" class="w-full rounded-lg px-3 py-2 text-xs outline-none border" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" /></div>
-        </div>
-        <div class="flex space-x-2 mt-3">
-          <button @click="diagnose('telegram')" class="px-3 py-1.5 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">仅诊断</button>
-          <button @click="sendTest('telegram')" class="px-3 py-1.5 rounded-lg border text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--up-bg); border-color: var(--up-line); color: var(--up);">发送测试</button>
-        </div>
-        <div v-if="testResults.telegram" class="mt-2 text-xs" :class="testResults.telegram.status === 'ready' ? 'text-emerald-500' : 'text-amber-500'">{{ testResults.telegram.status }} · {{ testResults.telegram.detail }}</div>
-      </div>
 
-      <!-- WeChat + Webhook -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-          <div class="flex items-center justify-between mb-4">
-            <div class="flex items-center space-x-2"><span class="inline-block w-2 h-2 rounded-full" :class="config.wechat.enabled ? 'bg-emerald-500' : 'bg-zinc-500'"></span><h2 class="text-sm font-bold" style="color: var(--ink-1);">企业微信</h2></div>
-            <div class="flex items-center space-x-2">
-              <button
-                type="button"
-                @click="toggleChannel('wechat', !config.wechat.enabled)"
-                class="relative inline-flex items-center cursor-pointer focus:outline-none"
-                :title="config.wechat.enabled ? '点击关闭企业微信通知' : '点击开启企业微信通知'"
-              >
-                <div
-                  class="w-10 h-5 rounded-full transition-colors relative"
-                  :style="{ backgroundColor: config.wechat.enabled ? 'var(--up)' : 'var(--line-2)' }"
-                >
-                  <div
-                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
-                    :class="config.wechat.enabled ? 'translate-x-5' : 'translate-x-0'"
-                  ></div>
+          <div class="fact">
+            <span class="fact-label"><Zap :size="12" />{{ t('admin.notify.bandQQ') }}</span>
+            <span class="fact-value" :class="channelOn('qq') ? 'is-up' : 'is-off'">
+              {{ channelOn('qq') ? t('admin.notify.enabled') : t('admin.notify.disabled') }}
+            </span>
+            <span class="fact-foot mono truncate" :title="config.qq?.openid || t('admin.notify.notSet')">{{ config.qq?.openid || t('admin.notify.notSet') }}</span>
+          </div>
+
+          <div class="fact">
+            <span class="fact-label"><Send :size="12" />{{ t('admin.notify.bandTelegram') }}</span>
+            <span class="fact-value" :class="channelOn('telegram') ? 'is-up' : 'is-off'">
+              {{ channelOn('telegram') ? t('admin.notify.enabled') : t('admin.notify.disabled') }}
+            </span>
+            <span class="fact-foot mono truncate">{{ config.telegram?.chat_id || t('admin.notify.notSet') }}</span>
+          </div>
+
+          <div class="fact">
+            <span class="fact-label"><CalendarClock :size="12" />{{ t('admin.notify.bandBriefing') }}</span>
+            <span class="fact-value num truncate" :title="config._briefingTimes || t('admin.notify.notSet')">{{ config._briefingTimes || t('admin.notify.notSet') }}</span>
+            <span class="fact-foot">{{ t('admin.notify.scheduleTitle') }}</span>
+          </div>
+        </template>
+      </section>
+
+      <template v-if="config">
+        <!-- ══ 通知通道 ══ -->
+        <section class="nf-block">
+          <header class="nf-block-head">
+            <div>
+              <h2 class="card-title">{{ t('admin.notify.channelsTitle') }}</h2>
+              <p class="card-sub">{{ t('admin.notify.channelsDesc') }}</p>
+            </div>
+          </header>
+
+          <div class="nf-channels">
+            <article
+              v-for="c in channelCards"
+              :key="c.key"
+              class="card nf-card"
+              :class="{ 'is-on': channelOn(c.key) }"
+            >
+              <header class="nf-card-head">
+                <span class="nf-card-dot" :class="{ 'is-on': channelOn(c.key) }" aria-hidden="true" />
+                <h3 class="nf-card-title">{{ c.title }}</h3>
+
+                <div class="nf-card-actions">
+                  <template v-if="c.qqActions">
+                    <button type="button" class="btn btn-primary btn-sm" @click="startQqBind">
+                      <QrCode :size="13" />
+                      <span>{{ t('admin.notify.scanBind') }}</span>
+                    </button>
+                    <button type="button" class="btn btn-ghost btn-sm" @click="startCapture">
+                      <Zap :size="13" />
+                      <span>{{ t('admin.notify.autoOpenId') }}</span>
+                    </button>
+                  </template>
+
+                  <span class="nf-state" :class="channelOn(c.key) ? 'is-on' : ''">
+                    {{ channelOn(c.key) ? t('admin.notify.enabled') : t('admin.notify.disabled') }}
+                  </span>
+                  <BaseSwitch
+                    :model-value="channelOn(c.key)"
+                    :label="channelOn(c.key) ? c.offTitle : c.onTitle"
+                    @update:model-value="() => toggleChannel(c.key, !channelOn(c.key))"
+                  />
                 </div>
-              </button>
-              <span
-                class="text-xs font-bold select-none cursor-pointer"
-                @click="toggleChannel('wechat', !config.wechat.enabled)"
-                :style="{ color: config.wechat.enabled ? 'var(--up)' : 'var(--ink-2)' }"
-              >
-                {{ config.wechat.enabled ? '已开启' : '已关闭' }}
-              </span>
-            </div>
-          </div>
-          <label class="block text-[11px] mb-1" style="color: var(--ink-2);">Webhook URL</label>
-          <input v-model="config.wechat.webhook" class="w-full rounded-lg px-3 py-2 text-xs outline-none border mb-3" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
-          <button @click="diagnose('wechat')" class="px-3 py-1.5 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">仅诊断</button>
-          <button @click="sendTest('wechat')" class="ml-2 px-3 py-1.5 rounded-lg border text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--up-bg); border-color: var(--up-line); color: var(--up);">发送测试</button>
-          <div v-if="testResults.wechat" class="mt-2 text-xs" :class="testResults.wechat.status === 'ready' ? 'text-emerald-500' : 'text-amber-500'">{{ testResults.wechat.status }} · {{ testResults.wechat.detail }}</div>
-        </div>
-        <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-          <div class="flex items-center justify-between mb-4">
-            <div class="flex items-center space-x-2"><span class="inline-block w-2 h-2 rounded-full" :class="config.webhook.enabled ? 'bg-emerald-500' : 'bg-zinc-500'"></span><h2 class="text-sm font-bold" style="color: var(--ink-1);">通用 Webhook</h2></div>
-            <div class="flex items-center space-x-2">
-              <button
-                type="button"
-                @click="toggleChannel('webhook', !config.webhook.enabled)"
-                class="relative inline-flex items-center cursor-pointer focus:outline-none"
-                :title="config.webhook.enabled ? '点击关闭通用 Webhook' : '点击开启通用 Webhook'"
-              >
-                <div
-                  class="w-10 h-5 rounded-full transition-colors relative"
-                  :style="{ backgroundColor: config.webhook.enabled ? 'var(--up)' : 'var(--line-2)' }"
+              </header>
+
+              <div class="nf-fields">
+                <label
+                  v-for="f in c.fields"
+                  :key="f.key"
+                  class="field-stack nf-field"
+                  :class="{ 'is-span': f.span }"
                 >
-                  <div
-                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-xs"
-                    :class="config.webhook.enabled ? 'translate-x-5' : 'translate-x-0'"
-                  ></div>
+                  <span class="form-label">{{ f.label }}</span>
+                  <input
+                    v-model="config[c.key][f.key]"
+                    :type="f.type || 'text'"
+                    :placeholder="f.placeholder"
+                    class="field"
+                  />
+                </label>
+              </div>
+
+              <footer class="nf-card-foot">
+                <!-- 批 71：测试进行中按钮必须禁用 —— 此前连点会并发发起多次测试请求，
+                     而右上角结果区只会显示最后一次，用户看到的"重试"其实是请求风暴。 -->
+                <button type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="testResults[c.key]?.status === 'testing'"
+                  @click="diagnose(c.key)"
+                >
+                  <ScanLine :size="13" aria-hidden="true" />
+                  <span>{{ t('admin.notify.diagnose') }}</span>
+                </button>
+                <button type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="testResults[c.key]?.status === 'testing'"
+                  @click="sendTest(c.key)"
+                >
+                  <Send :size="13" aria-hidden="true" />
+                  <span>{{ t('admin.notify.sendTest') }}</span>
+                </button>
+
+                <!-- 批 70：测试发送/诊断的结果只写进 testResults，本页不弹 toast，
+                     故这里必须自报 —— 失败用 alert，其余（含 testing）用 status。 -->
+                <span
+                  v-if="testResults[c.key]"
+                  class="nf-result"
+                  :class="testTone(testResults[c.key].status)"
+                  :role="testTone(testResults[c.key].status) === 'badge-down' ? 'alert' : 'status'"
+                  aria-live="polite"
+                >
+                  <b>{{ testResults[c.key].status }}</b>
+                  <span class="nf-result-detail">{{ testResults[c.key].detail }}</span>
+                </span>
+                <span v-else class="nf-result is-idle">{{ t('admin.notify.testIdle') }}</span>
+              </footer>
+            </article>
+          </div>
+        </section>
+
+        <!-- ══ 通知类别 ══ -->
+        <section class="card">
+          <header class="card-head">
+            <div>
+              <h2 class="card-title">{{ t('admin.notify.categoriesTitle') }}</h2>
+              <p class="card-sub">{{ t('admin.notify.categoriesDesc') }}</p>
+            </div>
+            <span class="badge mono">{{ categories.length }}</span>
+          </header>
+
+          <div class="nf-cats">
+            <article v-for="cat in categories" :key="cat.key" class="nf-cat">
+              <span class="icon-box"><component :is="cat.icon" :size="14" /></span>
+              <div class="nf-cat-main">
+                <div class="nf-cat-title">
+                  <span class="nf-cat-name">{{ cat.label }}</span>
+                  <code class="nf-cat-key">{{ cat.key }}</code>
                 </div>
-              </button>
-              <span
-                class="text-xs font-bold select-none cursor-pointer"
-                @click="toggleChannel('webhook', !config.webhook.enabled)"
-                :style="{ color: config.webhook.enabled ? 'var(--up)' : 'var(--ink-2)' }"
-              >
-                {{ config.webhook.enabled ? '已开启' : '已关闭' }}
-              </span>
-            </div>
+                <p class="panel-desc">{{ cat.desc }}</p>
+              </div>
+            </article>
           </div>
-          <label class="block text-[11px] mb-1" style="color: var(--ink-2);">URL (智能兼容钉钉/飞书/Discord)</label>
-          <input v-model="config.webhook.url" class="w-full rounded-lg px-3 py-2 text-xs outline-none border mb-3" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
-          <button @click="diagnose('webhook')" class="px-3 py-1.5 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">仅诊断</button>
-          <button @click="sendTest('webhook')" class="ml-2 px-3 py-1.5 rounded-lg border text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--up-bg); border-color: var(--up-line); color: var(--up);">发送测试</button>
-          <div v-if="testResults.webhook" class="mt-2 text-xs" :class="testResults.webhook.status === 'ready' ? 'text-emerald-500' : 'text-amber-500'">{{ testResults.webhook.status }} · {{ testResults.webhook.detail }}</div>
-        </div>
-      </div>
+        </section>
 
-      <!-- Schedule + Notification Categories + Save -->
-      <div class="rounded-xl border p-4 sm:p-5 shadow-xs transition-colors space-y-4" style="background-color: var(--surface-2); border-color: var(--line-1);">
-        <div>
-          <h2 class="text-sm font-bold mb-1" style="color: var(--ink-1);">通知类别与事件流</h2>
-          <p class="text-xs" style="color: var(--ink-2);">系统底层事件已全面升级，针对不同关键节点自动化推送结构化卡片文案：</p>
-        </div>
+        <!-- ══ 每日简报 ══ -->
+        <section class="card">
+          <header class="card-head">
+            <h2 class="card-title"><CalendarClock :size="14" />{{ t('admin.notify.scheduleTitle') }}</h2>
+          </header>
 
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs">
-          <div class="p-3 rounded-lg border space-y-1" style="background-color: var(--surface-1); border-color: var(--line-1);">
-            <div class="flex items-center space-x-1.5 font-bold text-emerald-400">
-              <span>🚀 实盘开仓触发 <code class="mono text-[10px] opacity-60">trade.opened</code></span>
-            </div>
-            <p class="text-[11px] leading-relaxed" style="color: var(--ink-2);">
-              包含标的、多空方向、杠杆、开仓挂单价、OCO云端止盈/止损双轨及大模型因果决策逻辑。
-            </p>
+          <div class="nf-schedule">
+            <label class="field-stack nf-field is-span">
+              <span class="form-label">{{ t('admin.notify.scheduleLabel') }}</span>
+              <input
+                v-model="config._briefingTimes"
+                placeholder="08:00, 20:00"
+                class="field num"
+              />
+            </label>
           </div>
 
-          <div class="p-3 rounded-lg border space-y-1" style="background-color: var(--surface-1); border-color: var(--line-1);">
-            <div class="flex items-center space-x-1.5 font-bold text-blue-400">
-              <span>平仓结清提醒 <code class="mono text-[10px] opacity-60">trade.closed</code></span>
-            </div>
-            <p class="text-[11px] leading-relaxed" style="color: var(--ink-2);">
-              智能区分「🎉 盈利落袋」、「⚖️ 保本结清」与「🛡️ 风控止损」，清晰输出净盈亏 U 数、ROI 与持仓时长。
-            </p>
-          </div>
-
-          <div class="p-3 rounded-lg border space-y-1" style="background-color: var(--surface-1); border-color: var(--line-1);">
-            <div class="flex items-center space-x-1.5 font-bold text-indigo-400">
-              <span>保本锁利移损 <code class="mono text-[10px] opacity-60">trade.sl_updated</code></span>
-            </div>
-            <p class="text-[11px] leading-relaxed" style="color: var(--ink-2);">
-              浮盈达标触发保本移损时，即刻播报原止损位与上移后的保本价，确认锁定本单胜率下限。
-            </p>
-          </div>
-
-          <div class="p-3 rounded-lg border space-y-1" style="background-color: var(--surface-1); border-color: var(--line-1);">
-            <div class="flex items-center space-x-1.5 font-bold text-purple-400">
-              <span>AI 自进化心法 <code class="mono text-[10px] opacity-60">evolution.completed</code></span>
-            </div>
-            <p class="text-[11px] leading-relaxed" style="color: var(--ink-2);">
-              每日闭环自进化完成后，实时推送当日全样本胜率、演进状态及大模型提炼的核心实战心法。
-            </p>
-          </div>
-
-          <div class="p-3 rounded-lg border space-y-1" style="background-color: var(--surface-1); border-color: var(--line-1);">
-            <div class="flex items-center space-x-1.5 font-bold text-red-400">
-              <span>🚨 黑天鹅避险熔断 <code class="mono text-[10px] opacity-60">risk.triggered</code></span>
-            </div>
-            <p class="text-[11px] leading-relaxed" style="color: var(--ink-2);">
-              全网舆情暴跌或流动性枯竭触发全自动熔断时，以 P0 最高优先级向全部通道进行声光告警。
-            </p>
-          </div>
-
-          <div class="p-3 rounded-lg border space-y-1" style="background-color: var(--surface-1); border-color: var(--line-1);">
-            <div class="flex items-center space-x-1.5 font-bold text-amber-400">
-              <span>📊 每日晨/晚报 <code class="mono text-[10px] opacity-60">briefing.ready</code></span>
-            </div>
-            <p class="text-[11px] leading-relaxed" style="color: var(--ink-2);">
-              按下方指定时间自动汇总在手仓位、资金净值、当日累计盈亏与宏观市场因果微积分综述。
-            </p>
-          </div>
-        </div>
-
-        <div class="pt-2 border-t" style="border-color: var(--line-1);">
-          <label class="block text-[11px] mb-1 font-bold" style="color: var(--ink-2);">每日量化简报时间 (北京时间，多个用逗号隔开)</label>
-          <input v-model="config._briefingTimes" placeholder="08:00, 20:00" class="w-full rounded-lg px-3 py-2 text-xs outline-none border mb-4" style="background-color: var(--surface-input); border-color: var(--line-1); color: var(--ink-1);" />
-          <div class="flex items-center space-x-3">
-            <button @click="saveAll" class="px-4 py-2 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--accent); color: var(--accent-ink);">保存全部通知通道</button>
-            <button @click="saveSchedule" class="px-4 py-2 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">保存通知时间</button>
-          </div>
-        </div>
-      </div>
+          <footer class="nf-save">
+            <button type="button" class="btn btn-primary btn-sm" @click="saveAll">
+              <Save :size="14" />
+              <span>{{ t('admin.notify.saveAll') }}</span>
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" @click="saveSchedule">
+              <CalendarClock :size="14" />
+              <span>{{ t('admin.notify.saveSchedule') }}</span>
+            </button>
+          </footer>
+        </section>
+      </template>
     </template>
 
-    <!-- Capture Modal -->
-    <div v-if="captureModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4" @click.self="captureModal = false">
-      <div class="rounded-xl border p-6 w-full max-w-[520px] max-h-[88dvh] overflow-y-auto text-center shadow-2xl transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-        <h3 class="text-sm font-bold mb-3" style="color: var(--ink-1);">⚡ 自动捕获目标用户 OpenID</h3>
-        <div class="text-4xl mb-3">📱 💬 🤖</div>
-        <p class="text-sm font-bold mb-2" style="color: var(--ink-1);">{{ captureStatus?.bot_name || '连接中...' }}</p>
-        <p class="text-xs mb-4 leading-relaxed" style="color: var(--ink-2);">用手机 QQ 打开与机器人的私聊窗口，发送任意文字（如：绑定）。系统将自动捕获并填入你的 OpenID。</p>
-        <div class="border rounded-lg p-3 mb-4" style="background-color: var(--surface-1); border-color: var(--line-1);">
-          <div class="font-bold text-sm" :class="captureStatus?.status === 'captured' ? 'text-emerald-500' : 'text-blue-500'">
-            {{ captureStatus?.status === 'captured' ? '捕获成功！' : '正在监听...' }}
-          </div>
-          <div v-if="captureStatus?.expires_in" class="text-[11px] mt-1" style="color: var(--ink-3);">剩余时间：{{ captureStatus.expires_in }} 秒</div>
-          <div v-if="captureStatus?.openid" class="text-xs mt-2" style="color: var(--accent);">OpenID: {{ captureStatus.openid }}</div>
-        </div>
-        <button @click="captureModal = false" class="px-4 py-2 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">关闭</button>
-      </div>
-    </div>
+    <!-- ══ OpenID 捕获 ══ -->
+    <BaseDialog
+      :open="captureModal"
+      :title="t('admin.notify.captureTitle')"
+      size="md"
+      @close="captureModal = false"
+    >
+      <div class="nf-capture">
+        <span
+          class="badge"
+          :class="captureStatus?.status === 'captured' ? 'badge-up' : 'badge-accent'"
+        >
+          {{ captureStatus?.status === 'captured' ? t('admin.notify.captured') : t('admin.notify.listening') }}
+        </span>
 
-    <!-- QQ Bind QR Modal -->
-    <div v-if="bindModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4" @click.self="closeBindModal">
-      <div class="rounded-xl border p-5 sm:p-6 w-full max-w-[380px] max-h-[88dvh] overflow-y-auto text-center shadow-2xl transition-colors" style="background-color: var(--surface-2); border-color: var(--line-1);">
-        <h3 class="text-sm font-bold mb-2" style="color: var(--ink-1);">绑定 QQ 机器人</h3>
-        <p class="text-[11px] mb-3" style="color: var(--ink-2);">使用手机 QQ 扫一扫，或长按复制链接在 QQ 内打开。确认授权后本页自动完成绑定。</p>
-        <img v-if="bindStatus?.qr" :src="bindStatus.qr" alt="QQ 绑定二维码" class="w-[220px] h-[220px] rounded-lg bg-white p-2.5 mx-auto mb-3 shadow-xs border" style="border-color: var(--line-1);" />
-        <p v-if="bindStatus?.link" class="text-[11px] break-all mb-3" style="color: var(--accent);">{{ bindStatus.link }}</p>
-        <p class="text-xs mb-4" :class="{ 'text-blue-500': bindStatus?.tone === 'blue', 'text-emerald-500': bindStatus?.tone === 'green', 'text-amber-500': bindStatus?.tone === 'amber', 'text-rose-500': bindStatus?.tone === 'red' }">{{ bindStatus?.text }}</p>
-        <div class="flex justify-center space-x-2">
-          <button @click="startQqBind" class="px-3 py-1.5 rounded-lg border text-xs cursor-pointer transition-all shadow-xs" style="background-color: var(--surface-1); border-color: var(--line-2); color: var(--ink-1);">刷新二维码</button>
-          <button @click="closeBindModal" class="px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-xs" style="background-color: var(--accent); color: var(--accent-ink);">关闭</button>
+        <p class="nf-capture-bot">{{ captureStatus?.bot_name || t('admin.notify.connecting') }}</p>
+        <p class="nf-capture-guide">{{ t('admin.notify.captureGuide') }}</p>
+
+        <div class="nf-capture-box">
+          <p v-if="captureStatus?.expires_in" class="nf-capture-meta mono">
+            {{ t('admin.notify.remainingSeconds', undefined, { n: captureStatus.expires_in }) }}
+          </p>
+          <p v-if="captureStatus?.openid" class="nf-capture-openid mono">
+            OpenID: {{ captureStatus.openid }}
+          </p>
         </div>
       </div>
-    </div>
+
+      <template #footer>
+        <button type="button" class="btn btn-ghost btn-sm" @click="captureModal = false">
+          {{ t('admin.notify.close') }}
+        </button>
+      </template>
+    </BaseDialog>
+
+    <!-- ══ QQ 扫码绑定 ══ -->
+    <BaseDialog
+      :open="bindModal"
+      :title="t('admin.notify.bindTitle')"
+      :desc="t('admin.notify.bindGuide')"
+      size="sm"
+      @close="closeBindModal"
+    >
+      <div class="nf-bind">
+        <img
+          v-if="bindStatus?.qr"
+          :src="bindStatus.qr"
+          :alt="t('admin.notify.qrAlt')"
+          class="nf-qr"
+        />
+        <p v-if="bindStatus?.link" class="nf-bind-link mono">{{ bindStatus.link }}</p>
+        <span class="badge" :class="bindTone">{{ bindStatus?.text }}</span>
+      </div>
+
+      <template #footer>
+        <button type="button" class="btn btn-ghost btn-sm" @click="startQqBind">
+          <RefreshCw :size="14" />
+          <span>{{ t('admin.notify.refreshQr') }}</span>
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" @click="closeBindModal">
+          {{ t('admin.notify.close') }}
+        </button>
+      </template>
+    </BaseDialog>
   </div>
 </template>
+
+<style scoped>
+.nf {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-4);
+}
+
+/* ══ 状态带 ══ */
+
+
+
+
+
+
+
+
+
+/* ══ 通道 ══ */
+.nf-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+}
+.nf-block-head {
+  padding: 0 2px;
+}
+.nf-channels {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ds-space-4);
+}
+@media (min-width: 1100px) {
+  .nf-channels {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.nf-card {
+  display: flex;
+  flex-direction: column;
+  border-left: 2px solid transparent;
+}
+.nf-card.is-on {
+  border-left-color: var(--up);
+}
+.nf-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-bottom: 1px solid var(--ds-color-border-default);
+}
+.nf-card-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--ds-color-text-placeholder);
+  flex-shrink: 0;
+}
+.nf-card-dot.is-on {
+  background-color: var(--up);
+}
+.nf-card-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+}
+.nf-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.nf-state {
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  color: var(--ds-color-text-placeholder);
+}
+.nf-state.is-on {
+  color: var(--up);
+}
+
+.nf-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-4);
+}
+@media (min-width: 520px) {
+  .nf-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.nf-field.is-span {
+  grid-column: 1 / -1;
+}
+
+.nf-card-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface-inset);
+}
+.nf-result {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+  font-size: var(--text-3xs);
+}
+.nf-result.is-idle {
+  color: var(--ds-color-text-placeholder);
+}
+.nf-result b {
+  font-weight: 600;
+}
+.nf-result-detail {
+  color: var(--ds-color-text-description);
+  overflow-wrap: anywhere;
+}
+
+/* ══ 类别 ══ */
+.nf-cats {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 900px) {
+  .nf-cats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1500px) {
+  .nf-cats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.nf-cat {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+}
+@media (min-width: 900px) {
+  .nf-cat:nth-child(-n + 2) {
+    border-top: 0;
+  }
+  .nf-cat:nth-child(even) {
+    border-left: 1px solid var(--ds-color-border-default);
+  }
+}
+@media (min-width: 1500px) {
+  .nf-cat:nth-child(3) {
+    border-top: 0;
+  }
+  .nf-cat:nth-child(3n) {
+    border-left: 0;
+  }
+  .nf-cat:not(:nth-child(3n + 1)) {
+    border-left: 1px solid var(--ds-color-border-default);
+  }
+}
+.nf-cat-main {
+  min-width: 0;
+}
+.nf-cat-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.nf-cat-name {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+}
+.nf-cat-key {
+  padding:1px 6px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface-1);
+  font-family: var(--ds-font-mono);
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+}
+
+/* ══ 简报 ══ */
+.nf-schedule {
+  padding: var(--ds-space-4);
+}
+.nf-save {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  flex-wrap: wrap;
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface-inset);
+}
+
+/* ══ 弹窗内 ══ */
+.nf-capture {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ds-space-2);
+  text-align: center;
+}
+.nf-capture-bot {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+}
+.nf-capture-guide {
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+  color: var(--ds-color-text-description);
+}
+.nf-capture-box {
+  width: 100%;
+  margin-top: var(--ds-space-2);
+  padding: var(--ds-space-3);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-inset);
+}
+.nf-capture-meta {
+  font-size: var(--text-3xs);
+  color: var(--ds-color-text-placeholder);
+}
+.nf-capture-openid {
+  margin-top: 6px;
+  font-size: var(--text-3xs);
+  color: var(--ds-color-brand);
+  overflow-wrap: anywhere;
+}
+.nf-bind {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ds-space-3);
+  text-align: center;
+}
+.nf-qr {
+  width: 220px;
+  height: 220px;
+  padding: 10px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--ds-color-border-default);
+  /* 唯一一处刻意的固定色：二维码必须落在纯白底上才能被手机相机/QQ 稳定识别，
+     深色主题下的半透明表面色会让多数扫码器解读失败。这是功能性对比要求，非装饰用色。 */
+  background-color: #fff;
+}
+.nf-bind-link {
+  font-size: var(--text-3xs);
+  color: var(--ds-color-brand);
+  overflow-wrap: anywhere;
+}
+</style>

@@ -17,7 +17,7 @@ interface Trade extends RecordData { id: string; inst: string; side: string; cos
 interface Event extends RecordData { id: string; kind: string; status: string; occurred_ms: number; inst: string }
 interface Config extends RecordData { id: string; source: string; process: string; captured_ms: number }
 const { t, locale } = useI18n();
-const tr = (key: string) => t('analysis.' + key);
+const tr = (key: string) => t(`analysis.${key}`);
 const toast = useToast();
 const api = '/api/v1/admin/analysis';
 const summary = ref<RecordData | null>(null);
@@ -203,7 +203,7 @@ onMounted(() => apply());
       <p v-else-if="pending" class="text-xs t-faint">{{ tr('syncPending') }}</p>
       <details v-if="fault || pending" class="text-xs t-faint"><summary>{{ tr('coverageNote') }}</summary><BaseCodeBlock :code="json(health)" /></details>
     </div>
-    <BaseTabs v-model="tab" :items="tabs" />
+    <BaseTabs v-model="tab" :items="tabs" :label="tr('title')" />
     <p v-if="loading" role="status" class="text-sm t-faint">{{ tr('refresh') }}…</p>
     <section v-if="tab === 'overview'" class="space-y-4">
       <div class="card grid grid-cols-2 lg:grid-cols-4">

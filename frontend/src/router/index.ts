@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useI18n } from '../composables/useI18n'
+import { allAdminItems } from '../config/nav'
 
 /**
  * 路由表：path 与后端钉扎路由严格一致（SEO/CF 缓存/test_docs_images_route）。
@@ -12,7 +14,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/news', name: 'dashboard-news', component: () => import('../layouts/DashboardLayout.vue'), meta: { isPublic: true, tab: 'news' } },
   { path: '/lab', name: 'dashboard-lab', component: () => import('../layouts/DashboardLayout.vue'), meta: { isPublic: true, tab: 'lab' } },
   { path: '/history', name: 'dashboard-history', component: () => import('../layouts/DashboardLayout.vue'), meta: { isPublic: true, tab: 'history' } },
-  { path: '/docs', name: 'docs', component: () => import('../views/DocsView.vue'), meta: { isPublic: true } },
+  { path: '/docs', name: 'docs', component: () => import('../views/docs/DocsView.vue'), meta: { isPublic: true } },
   { path: '/doc', redirect: '/docs' },
   {
     path: '/admin',
@@ -50,6 +52,19 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../views/admin/LoginPage.vue'),
     meta: { isPublic: true },
   },
+  {
+    path: '/login',
+    redirect: '/admin/login',
+  },
+  // 批 45：兜底路由。此前**没有** catch-all，拼错的地址渲染出一整页空白
+  // （实测 body 文本长度 0、无标题、无回退入口）；后端对未知路径回的是
+  // `{"detail":"Not Found"}` JSON，前端也曾把 SPA 外壳渲染成空白。
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: () => import('../views/NotFoundView.vue'),
+    meta: { isPublic: true },
+  },
 ]
 
 const router = createRouter({
@@ -58,6 +73,17 @@ const router = createRouter({
   scrollBehavior() {
     return { top: 0 }
   },
+})
+
+router.onError((error) => {
+  if (/Failed to fetch dynamically imported module|Importing a module script failed/i.test(error?.message || '')) {
+    const key = 'r20_chunk_reload_lock'
+    const lastReload = parseInt(sessionStorage.getItem(key) || '0', 10)
+    if (Date.now() - lastReload > 10000) {
+      sessionStorage.setItem(key, String(Date.now()))
+      window.location.reload()
+    }
+  }
 })
 
 router.beforeEach(async (to) => {
@@ -86,13 +112,27 @@ const PUBLIC_TITLES: Record<string, string> = {
   '/docs': '官方文档 | R20量子交易系统',
 }
 
-router.afterEach((to) => {
+export function updateDocumentTitle(to = router.currentRoute.value) {
+  const { t } = useI18n()
   let title = 'R20 量子交易系统'
   let isNoIndex = false
 
-  if (to.path.startsWith('/admin')) {
+  if (to.name === 'not-found') {
     isNoIndex = true
-    title = '管理控制台 · R20'
+    const notFoundText = t('common.notFound.title') || '页面不存在'
+    title = to.path.startsWith('/admin')
+      ? `${notFoundText} · ${t('nav.actions.console')} · R20`
+      : `${notFoundText} · R20`
+  } else if (to.path === '/admin/login' || to.name === 'admin-login') {
+    isNoIndex = true
+    title = `${t('admin.login.submit')} · ${t('nav.actions.console')} · R20`
+  } else if (to.path.startsWith('/admin')) {
+    isNoIndex = true
+    const hit = allAdminItems.find((item) => item.path === to.path || item.key === to.name)
+    const pageName = hit ? t(hit.labelKey) : ''
+    title = pageName
+      ? `${pageName} · ${t('nav.actions.console')} · R20`
+      : `${t('nav.actions.console')} · R20`
   } else if (PUBLIC_TITLES[to.path]) {
     title = PUBLIC_TITLES[to.path]
   }
@@ -111,6 +151,14 @@ router.afterEach((to) => {
   } else if (robotsMeta) {
     robotsMeta.content = 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1'
   }
+}
+
+router.afterEach((to) => {
+  updateDocumentTitle(to)
 })
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('r20:locale-changed', () => updateDocumentTitle())
+}
 
 export default router

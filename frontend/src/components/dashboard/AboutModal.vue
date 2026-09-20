@@ -16,7 +16,13 @@ const LINUXDO = 'https://linux.do/';
 </script>
 
 <template>
-  <BaseDialog :open="aboutOpen" size="sm" @close="aboutOpen = false">
+  <BaseDialog
+    :open="aboutOpen"
+    :title="t('brand.name')"
+    :desc="t('brand.tagline')"
+    size="sm"
+    @close="aboutOpen = false"
+  >
     <template #title>
       <div class="flex items-center gap-2.5">
         <img src="/favicon.svg" class="h-8 w-8 rounded-lg" alt="" />
@@ -35,17 +41,18 @@ const LINUXDO = 'https://linux.do/';
       </p>
       <p class="mono mb-2 text-xs" style="color: var(--ink-3)">{{ t('dash.about.arch.stack') }}</p>
       <ul class="space-y-1.5">
-        <li v-for="(p, i) in tm('dash.about.arch.points')" :key="i" class="flex gap-2 text-xs leading-relaxed" style="color: var(--ink-2)">
-          <span class="dot dot-up mt-1.5" style="width: 5px; height: 5px" />{{ p }}
+        <li v-for="(p, i) in tm('dash.about.arch.points')" :key="i" class="flex gap-2 text-xs leading-body" style="color: var(--ink-2)">
+          <span class="dot dot-up mt-1.5" aria-hidden="true" />{{ p }}
         </li>
       </ul>
     </div>
 
     <!-- 仓库 -->
     <a :href="OFFICIAL_REPO" target="_blank" rel="noopener noreferrer" class="btn btn-primary mt-3 w-full">
-      <Github />
+      <Github aria-hidden="true" />
       {{ t('dash.about.repo.visit') }}
-      <ExternalLink class="h-3.5 w-3.5 opacity-70" />
+      <span class="sr-only">{{ t('common.opensInNewTab') }}</span>
+      <ExternalLink class="h-3.5 w-3.5 opacity-70" aria-hidden="true" />
     </a>
     <p class="mt-1.5 text-center text-xs" style="color: var(--ink-3)">{{ t('dash.about.repo.starHint') }}</p>
 
@@ -72,7 +79,10 @@ const LINUXDO = 'https://linux.do/';
         class="card-flat col-span-2 flex items-center justify-between gap-2 px-3 py-2.5 transition-colors hover:bg-[var(--surface-3)]"
       >
         <span class="t-label">{{ t('dash.about.community.linuxdo') }}</span>
-        <span class="link text-sm font-semibold">linux.do ↗</span>
+        <span class="link text-sm font-semibold">
+          linux.do <span aria-hidden="true">↗</span>
+          <span class="sr-only">{{ t('common.opensInNewTab') }}</span>
+        </span>
       </a>
     </div>
 
@@ -81,7 +91,7 @@ const LINUXDO = 'https://linux.do/';
         {{ t('dash.about.version', undefined, { v: APP_VERSION, r: BRAND_REVISION }) }}
       </p>
       <p class="text-xs" style="color: var(--ink-3)">{{ t('dash.about.license') }}</p>
-      <p class="text-xs leading-relaxed" style="color: var(--ink-3)">{{ t('dash.about.risk') }}</p>
+      <p class="text-xs leading-body" style="color: var(--ink-3)">{{ t('dash.about.risk') }}</p>
     </div>
   </BaseDialog>
 </template>

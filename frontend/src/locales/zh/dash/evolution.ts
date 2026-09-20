@@ -1,7 +1,7 @@
 /** 自进化：复盘 HUD + 心法库 + 归因切片 */
 export const zhEvolution = {
   title: '自进化',
-  desc: '每 6 小时穿透全量平仓台账自省归因，提炼心法注入下一轮决策提示词',
+  desc: '每 6 小时复盘全量台账，提炼经验法则',
   hud: {
     at: '最近复盘',
     sample: '复盘样本',
@@ -32,7 +32,7 @@ export const zhEvolution = {
   },
   memory: {
     title: '黄金心法库',
-    desc: 'AI 自己维护的实战纪律，随每次复盘覆写；旧经验按半衰期自动淘汰',
+    desc: 'AI 自维护的实战纪律，旧经验按半衰期淘汰',
     empty: '心法库为空，等待首次复盘',
     halfLife: '半衰期 {n} 天',
     remaining: '余量 {n}%',
@@ -48,6 +48,16 @@ export const zhEvolution = {
   guard: {
     title: '防污染护栏',
     on: '生效中',
+    off: '未生效',
     desc: '样本不足、情绪化措辞与过拟合经验会被拒绝入库',
+    snapshot: '数理快照可观测性',
+    snapshotCounts: '动力学 {observed}/{total} · 仅价格 {priceOnly} · 无快照 {none}',
+    baselineProtected: '基准心法补回 {n} 条',
   },
+  // 批 38：展示用列表分隔符（全角分号 vs 半角分号+空格）
+  itemSep: '；',
+  // ── 批 41：本地化写死文案（EvolutionView 模板与动作文本前缀）──
+  autoIterateBadge: '每 6 小时自主覆写迭代',
+  snapshotAuditTitle: '确定性物理快照审计',
+  actText: '【{type}】{text}',
 };

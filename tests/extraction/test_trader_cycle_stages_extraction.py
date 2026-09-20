@@ -1,0 +1,297 @@
+r"""cycle_stages 抽取对拍门（结构优化阶段 4·B3 第九十一刀）。
+
+`execute_portfolio` 的三个相位段 **纯搬家**到 `scripts/trader/cycle_stages.py`：
+
+| 函数 | 原相位 |
+|---|---|
+| `preflight_reconcile_and_housekeeping` | 0/0a（引擎就绪闸 + 挂单对账 + 陈旧单回收 + 舆情） |
+| `fetch_universe_and_manage_positions` | 2-3（并发取因子 + 逐仓追踪退出） |
+| `persist_state_and_sync_ledger` | 5-6（面板持久化 + 台账/SQLite 同步） |
+
+判据同第九十刀：段体 **AST 逐字**、调用点**逐个同名恰好一次**、
+自由名全可解析；另加**中止哨兵行为**（段内 `return None` = 本周期中止）
+与两个 smoke 例（副作用全部替身/指向临时目录 —— §104.2 教训）。
+"""
+from __future__ import annotations
+
+import ast
+import builtins
+import os
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+PRE = "d90fac5"          # 本刀动工前最后提交（第九十刀收口）
+MOD = "scripts/trader/cycle_stages.py"
+SPECS = {  # 函数名 -> (该刀动工前的提交, 基线 execute_portfolio 的语句下标区间)
+    # 每刀基线不同（分段逐个抽出，下标随之前移）⇒ 每项自带版本，避免"用错基线"。
+    "scan_risk_gates_and_ai_brain": ("672b3e5", 7, 11),        # 第九十三刀：相位 4 前段
+    "fetch_positions_and_reconcile": ("d90fac5", 11, 39),      # 第九十二刀：相位 1
+    "preflight_reconcile_and_housekeeping": ("d90fac5", 0, 10),  # 第九十一刀
+    "fetch_universe_and_manage_positions": ("d90fac5", 40, 46),  # 第九十一刀
+    "persist_state_and_sync_ledger": ("d90fac5", 53, 58),        # 第九十一刀
+}
+
+
+def _baseline_portfolio(rev: str = PRE) -> ast.FunctionDef:
+    r = subprocess.run(["git", "show", f"{rev}:scripts/ai_factor_trader.py"],
+                       capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode == 0, f"基线取不到({rev})：{r.stderr[:200]}"
+    t = ast.parse(r.stdout)
+    return next(n for n in t.body if isinstance(n, ast.FunctionDef)
+                and n.name == "execute_portfolio")
+
+
+def _module_tree() -> ast.Module:
+    return ast.parse((ROOT / MOD).read_text(encoding="utf-8"))
+
+
+def _func(name: str) -> ast.FunctionDef:
+    for n in _module_tree().body:
+        if isinstance(n, ast.FunctionDef) and n.name == name:
+            return n
+    raise AssertionError(f"{name} 不在 {MOD} 顶层")
+
+
+def _seg_stmts(fn: ast.FunctionDef) -> list:
+    """去掉本刀新增的 docstring 与末尾追加的 return。"""
+    body = list(fn.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    if body and isinstance(body[-1], ast.Return):
+        body = body[:-1]
+    return body
+
+
+class CycleStagesVerbatimTest(unittest.TestCase):
+    def test_segments_are_ast_identical_to_baseline(self):
+        for name, (rev, lo, hi) in SPECS.items():
+            with self.subTest(fn=name):
+                base = _baseline_portfolio(rev)
+                seg = base.body[lo:hi + 1]
+                got = _seg_stmts(_func(name))
+                self.assertEqual(
+                    ast.dump(ast.Module(body=got, type_ignores=[]), include_attributes=False),
+                    ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False),
+                    f"{name} 段体与抽取前**不再同一棵 AST**")
+
+    def test_facade_calls_pass_every_parameter_once_same_name(self):
+        facade = ast.parse((ROOT / "scripts/ai_factor_trader.py").read_text(encoding="utf-8"))
+        for name in SPECS:
+            with self.subTest(fn=name):
+                params = [a.arg for a in _func(name).args.kwonlyargs]
+                calls = [n for n in ast.walk(facade)
+                         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                         and n.func.id == name]
+                self.assertEqual(len(calls), 1, f"{name} 调用点应恰 1 处")
+                call = calls[0]
+                self.assertEqual(call.args, [], f"{name} 应全关键字传参")
+                self.assertEqual([k.arg for k in call.keywords], params,
+                                 f"{name} 调用点参数与签名不一致（漏传=生产 NameError）")
+                for k in call.keywords:
+                    self.assertEqual(ast.unparse(k.value), k.arg,
+                                     f"{name}.{k.arg} 未按同名传参")
+
+    def test_no_undeclared_free_names(self):
+        module = _module_tree()
+        module_names = set()
+        for n in module.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                module_names.add(n.name)
+            elif isinstance(n, ast.Assign):
+                for tg in n.targets:
+                    if isinstance(tg, ast.Name):
+                        module_names.add(tg.id)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    module_names.add(a.asname or a.name.split(".")[0])
+        for name in SPECS:
+            with self.subTest(fn=name):
+                fn = _func(name)
+                local = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
+                for n in ast.walk(fn):
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        local.add(n.name); local |= {a.arg for a in n.args.args}
+                    if isinstance(n, ast.Lambda):
+                        local |= {a.arg for a in n.args.args}
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                        local.add(n.id)
+                    if isinstance(n, ast.ExceptHandler) and n.name:
+                        local.add(n.name)
+                    if isinstance(n, (ast.Import, ast.ImportFrom)):
+                        for a in n.names:
+                            local.add(a.asname or a.name.split(".")[0])
+                reads = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)
+                         and isinstance(n.ctx, ast.Load)}
+                missing = sorted(reads - local - set(dir(builtins)) - module_names)
+                self.assertEqual(missing, [], f"{name} 有解析不到的名字: {missing}")
+
+    def test_preflight_abort_sentinel_returns_none(self):
+        """段内 `return None` = 本周期中止 ⇒ helper 必须把 None 透出来。"""
+        from scripts.trader import cycle_stages as cs
+        env = types.SimpleNamespace(configured=False, mode="demo")
+        got = cs.preflight_reconcile_and_housekeeping(
+            WORKSPACE_DIR="/nonexistent", _run_captured=lambda *a, **k: None,
+            clean_stale_open_orders=lambda **k: (True, ""),
+            current_environment=lambda: env, datetime=__import__("datetime"),
+            load_trackers=lambda: {}, os=os,
+            reconcile_pending_orders=lambda **k: (True, set()))
+        self.assertIsNone(got, "引擎未就绪必须中止（返回 None）")
+
+    def test_fetch_universe_smoke_with_empty_universe(self):
+        from scripts.trader import cycle_stages as cs
+        class _Ex:
+            def __init__(self, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def map(self, fn, items): return [fn(i) for i in items]
+        got = cs.fetch_universe_and_manage_positions(
+            all_positions=[], real_pos_dict={}, timestamp_full="2026-09-15 08:00:00",
+            usdt_available=0.0, TARGET_INSTRUMENTS=[], ThreadPoolExecutor=_Ex,
+            fetch_single_instrument_data=lambda *a, **k: None, load_trackers=lambda: {},
+            manage_position_tp_and_trailing=lambda *a, **k: None,
+            prune_trackers=lambda t, r: 0, save_trackers=lambda t: None)
+        self.assertEqual(len(got), 3, "返回 (all_factors, executed_actions, trackers)")
+        self.assertEqual(got[0], [], "空宇宙应得空因子表")
+        self.assertEqual(got[2], {}, "追踪器应为空")
+
+    def test_persist_smoke_writes_only_into_temp(self):
+        """副作用替身 + LOG_FILE 指向临时目录（§104.2：替身清单照实现体抄）。"""
+        from scripts.trader import cycle_stages as cs
+        written = []
+        with tempfile.TemporaryDirectory() as td:
+            cs.persist_state_and_sync_ledger(
+                _xv_total=0, active_pos_count=0, all_factors=[], cb_active=False,
+                cb_reason="", executed_actions=[],
+                long_count=0, short_count=0, timestamp_full="2026-09-15 08:00:00",
+                DATA_DIR=td, LEDGER_AUTOSYNC_ENABLED=False,
+                LOG_FILE=os.path.join(td, "t.log"), MAX_CONCURRENT_POSITIONS=6,
+                WORKSPACE_DIR=td, __version__="test",
+                _atomic_write_json=lambda path, payload: written.append(path),
+                _run_captured=lambda *a, **k: None,
+                build_state_payload=lambda **k: {"ok": True},
+                evaluate_asset_signal=lambda *a, **k: None, os=os)
+            self.assertEqual(written, [os.path.join(td, "trading_state.json")],
+                             "面板状态必须写进（被替身捕获的）目标路径")
+            self.assertFalse(os.path.exists(os.path.join(td, "trading_state.json")),
+                             "替身后不得真的落盘")
+
+    def test_positions_abort_sentinel_returns_none(self):
+        """相位 1：查持仓失败必须中止本周期（段内 `return None` 语义）。"""
+        from scripts.trader import cycle_stages as cs
+        with tempfile.TemporaryDirectory() as td:
+            got = cs.fetch_positions_and_reconcile(
+                entries_blocked=False,
+                _BROKEN_VENUES=set(), collect_pending_inst_ids=lambda **k: (set(), 0, 0),
+                current_environment=lambda: types.SimpleNamespace(mode="demo", simulated=False),
+                fetch_other_venue_positions=lambda env: (True, {}, ""),
+                load_instruments=lambda: [], okx_rest=types.SimpleNamespace(),
+                query_positions=lambda: (False, [], "no creds"),
+                reconcile_reservation_ledger=lambda *a, **k: None,
+                venue_execution_ready=lambda v, e: False,
+                venue_registry=types.SimpleNamespace())
+        self.assertIsNone(got, "查持仓失败必须中止（返回 None）")
+
+    def test_positions_empty_world_returns_thirteen_outputs(self):
+        """空世界 smoke：10 项注入全活 ⇒ 必须产出 13 项输出（含持仓/额度/预留计数）。"""
+        from scripts.trader import cycle_stages as cs
+        okx = types.SimpleNamespace(balances=lambda: None, positions=lambda: None,
+                                    pending_orders=lambda *a: [])
+        reg = types.SimpleNamespace(execution_open=lambda v, e: False,
+                                    get_adapter=lambda v, environment=None: None,
+                                    is_registered=lambda k: False)
+        got = cs.fetch_positions_and_reconcile(
+            entries_blocked=False,
+            _BROKEN_VENUES=set(), collect_pending_inst_ids=lambda **k: (set(), 0, 0),
+            current_environment=lambda: types.SimpleNamespace(mode="demo", simulated=False),
+            fetch_other_venue_positions=lambda env: (True, {}, ""),
+            load_instruments=lambda: [], okx_rest=okx,
+            query_positions=lambda: (True, [], ""),
+            reconcile_reservation_ledger=lambda *a, **k: None,
+            venue_execution_ready=lambda v, e: False, venue_registry=reg)
+        self.assertIsNotNone(got)
+        self.assertEqual(len(got), 13, "13 项输出必须齐（调用点按序解包）")
+        self.assertEqual(got[2], [], "all_positions 应为空")
+        self.assertFalse(got[3], "entries_blocked 应为 False（对账成功）")
+
+    def _scan_kwargs(self, **over):
+        """相位 4 前段的替身集合（照实现体调用形状抄，§104.2）。"""
+        from scripts.trader import cycle_stages as _cs  # noqa: F401
+        base = dict(
+            _xv_total=0, active_pos_count=0, all_factors=[], executed_actions=[],
+            long_count=0, short_count=0, timestamp_full="2026-09-15 09:00:00",
+            trackers={}, usdt_available=1000.0, xv_positions_by_venue={},
+            MAX_CONCURRENT_POSITIONS=6,
+            _collect_okx_position_payloads=lambda *a, **k: [],
+            _merge_cross_venue_positions=lambda *a, **k: [],
+            effective_single_asset_margin=lambda u: 123.0,
+            execute_ai_position_management=lambda *a, **k: None,
+            execute_batch_ai_brain_cycle=None,
+            is_circuit_breaker_active=lambda u: (False, ""),
+            pool_is_trustworthy=lambda: True, pool_state=lambda: {},
+            query_positions=lambda: (True, [], ""), read_cycle_health=lambda: {},
+            save_trackers=lambda t: None)
+        base.update(over)
+        return base
+
+    def test_scan_circuit_breaker_active_skips_llm(self):
+        from scripts.trader import cycle_stages as cs
+        acts = []
+        got = cs.scan_risk_gates_and_ai_brain(**self._scan_kwargs(
+            is_circuit_breaker_active=lambda u: (True, "黑天鹅"),
+            executed_actions=acts))
+        self.assertEqual(len(got), 4, "返回 (ASSET_MARGIN_CAP, brain_cache, cb_active, cb_reason)")
+        self.assertEqual(got[0], 123.0, "单标的保证金上限由 effective_single_asset_margin 决定")
+        self.assertEqual(got[1], {}, "熔断时不得调用 LLM（brain_cache 保持空）")
+        self.assertTrue(got[2]); self.assertEqual(got[3], "黑天鹅")
+        self.assertEqual(acts, [], "熔断时不应产生池闸告警")
+
+    def test_scan_pool_untrusted_appends_failclosed_warning(self):
+        from scripts.trader import cycle_stages as cs
+        acts = []
+        got = cs.scan_risk_gates_and_ai_brain(**self._scan_kwargs(
+            executed_actions=acts, pool_is_trustworthy=lambda: False,
+            pool_state=lambda: {"status": "corrupt", "detail": "坏"}))
+        self.assertFalse(got[2], "非熔断")
+        self.assertEqual(len(acts), 1, "池不可信必须留一条告警（fail-closed 可追溯）")
+        self.assertIn("标的池不可信", acts[0])
+        self.assertIn("禁止开新仓", acts[0])
+
+    def test_scan_brain_cache_path_manages_positions(self):
+        """LLM 有返回 ⇒ 必须刷新真实持仓并交给主脑执行器（深路径）。"""
+        from scripts.trader import cycle_stages as cs
+        seen = {}
+        acts = []
+        got = cs.scan_risk_gates_and_ai_brain(**self._scan_kwargs(
+            executed_actions=acts,
+            execute_batch_ai_brain_cycle=lambda desc, pos, usdt_available=None: {"BTC": {"action": "hold"}},
+            query_positions=lambda: (True, [{"instId": "BTC-USDT-SWAP", "pos": "1", "posSide": "long"}], ""),
+            execute_ai_position_management=lambda d, t, ts, a: seen.update(d=d, a=a),
+            _collect_okx_position_payloads=lambda f, t: [{"instId": "BTC-USDT-SWAP"}]))
+        self.assertEqual(got[1], {"BTC": {"action": "hold"}}, "brain_cache 必须回传")
+        self.assertEqual(list(seen.get("d", {})), ["BTC-USDT-SWAP"],
+                         "刷新后的持仓字典应交给主脑执行器")
+        self.assertIs(seen.get("a"), acts, "executed_actions 必须**原地**传入（副作用回传）")
+
+    def test_judgment_actually_notices_a_change(self):
+        base = _baseline_portfolio("d90fac5")
+        got = _seg_stmts(_func("fetch_universe_and_manage_positions"))
+        seg = base.body[40:47]
+        self.assertEqual(ast.dump(ast.Module(body=got, type_ignores=[]), include_attributes=False),
+                         ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False))
+        self.assertNotEqual(
+            ast.dump(ast.Module(body=seg + [ast.Pass()], type_ignores=[]), include_attributes=False),
+            ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False),
+            "自检：判据看不见语句增减")
+
+
+if __name__ == "__main__":
+    unittest.main()

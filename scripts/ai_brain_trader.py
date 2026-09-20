@@ -9,6 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = Path(PROJECT_ROOT)
 SCRIPTS_DIR = os.path.join(PROJECT_ROOT, "scripts")
@@ -17,36 +19,43 @@ if PROJECT_ROOT not in sys.path:
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
-from okx_runtime import replace_cli_prefix as okx_private_command
+from r20_backend import analysis_capture
+from scripts.candle_data import closed_okx_candles
+
+import scripts.okx_rest as okx_rest
 # 风控提示词与执行层共用单一事实源，防止「提示词口径 vs 代码口径」漂移
 from risk_constants import (
     DAILY_LOSS_EQUITY_RATIO,
+    MAX_CONCURRENT_POSITIONS_CAP,
+    MAX_DAILY_LOSS_USDT,
     MAX_LEVERAGE,
+    MIN_LEVERAGE,
     MAX_MARGIN_EQUITY_RATIO,
     MAX_SAME_DIRECTION_POSITIONS,
     MAX_SCALE_IN_COUNT,
+    MAX_SINGLE_ASSET_MARGIN,
     MIN_ENTRY_CONFIDENCE,
     MIN_RISK_REWARD_RATIO,
     MIN_SCALE_IN_CONFIDENCE,
     MIN_SCALE_IN_PROFIT_RATIO,
+    PORTFOLIO_RISK_BUDGET_USDT,
     RISK_PER_TRADE_EQUITY_RATIO,
     SINGLE_ASSET_EQUITY_RATIO,
     STOP_COOLDOWN_MINUTES,
+    TIME_STOP_ATR_BAND,
     TIME_STOP_HOURS,
+    effective_daily_loss_limit,
+    effective_single_asset_margin,    MAX_TOTAL_EXPOSURE_USDT,
 )
 import json
-import logging
 import time
 import datetime
 import urllib.request
 import subprocess
 import tempfile
-try:
-    from file_lock import single_cycle
-except ImportError:  # imported as scripts.ai_brain_trader (repo root on sys.path)
-    from scripts.file_lock import single_cycle
+import fcntl_compat as fcntl
 from typing import Dict, Any, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from r20_backend.config import settings as standalone_settings
@@ -65,11 +74,101 @@ def _get_system_version_tag() -> str:
 WORKSPACE_DIR = PROJECT_ROOT
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
 from market_data_service import fetch_single_indicator, fetch_ticker, fetch_candles
-from candle_data import closed_okx_candles
+# 结构优化阶段4·B3：单标的数据包装配已搬入 scripts/brain/packages.py（门面保留薄壳）
+from scripts.brain.packages import fetch_single_instrument_package as _fetch_single_instrument_package
+# 结构优化阶段4·B3 第二块：跨所采集/健康度/提示词组装已搬入 scripts/brain/xvenue.py。
+# 依赖面较宽（适配器缝、safe_float、VENUE_HEALTH_FILE、atomic_write_json、_XV_HEALTH），
+# 全部走**调用期注入**，理由见该模块 docstring 与 r20_backend/README.md §5。
+from scripts.brain.prompt import (
+    construct_full_market_prompt as _construct_full_market_prompt_impl,
+)
+# 第三十刀：在途持仓/挂单文本装配搬入 account_text，按调用期注入（同名参数解析陷阱见
+# construct_full_market_prompt 的 docstring）。
+from scripts.brain.account_text import (
+    build_position_lines as _build_position_lines,
+    build_pending_order_lines as _build_pending_order_lines,
+)
+from scripts.brain.runtime import (
+    capture_policy_snapshot,
+    resolve_llm_runtime,
+)
+from scripts.brain.snapshots import (
+    update_factor_library_snapshot,
+    write_calculus_snapshot,
+    write_prompt_snapshot,
+)
+from scripts.brain.dispatch import (
+    dispatch_llm_and_persist_decisions,
+)
+from scripts.brain.cycle_parts import (
+    normalize_position_management as _normalize_position_management,
+    build_effective_prompt_text as _build_effective_prompt_text,
+    build_history_record as _build_history_record,
+)
+from scripts.brain.decisions import (
+    validate_and_filter_decision as _validate_and_filter_decision_impl,
+    assemble_decision_cache as _assemble_decision_cache_impl,
+)
+from scripts.brain.xvenue import (
+    _xvenue_enabled as _xvenue_enabled_impl,
+    _xv_record as _xv_record_impl,
+    _xv_flush_health as _xv_flush_health_impl,
+    _get_xvenue_adapter as _get_xvenue_adapter_impl,
+    _xv_binance_snapshot as _xv_binance_snapshot_impl,
+    _xv_gate_snapshot as _xv_gate_snapshot_impl,
+    fetch_cross_venue_matrix as _fetch_cross_venue_matrix_impl,
+    _xv_divergence_notes as _xv_divergence_notes_impl,
+    _xvenue_prompt_line as _xvenue_prompt_line_impl,
+)
 AI_DECISION_CACHE_FILE = os.path.join(DATA_DIR, "ai_brain_decisions.json")
 AI_DECISION_HISTORY_FILE = os.path.join(DATA_DIR, "ai_brain_history.json")
+
+
+def _ai_health_path() -> str:
+    # 调用时解析 DATA_DIR——测试 patch 模块属性即封闭（律①）
+    return os.path.join(DATA_DIR, "ai_health.json")
+
+
+def read_cycle_health() -> dict:
+    """供 trader/面板读取最近批次健康；缺文件=无记录（不误伤）。"""
+    try:
+        p = _ai_health_path()
+        if not os.path.exists(p):
+            return {}
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _record_cycle_health(status: str, reason: str = "") -> None:
+    """审计监控面：trader 为 15 分钟短驻进程，内存计数跨轮即失忆——连续失败
+    计数持久化到 data/ai_health.json。04:45 起 14 轮 LLM 停摆但巡检 rc=0 全绿
+    的根因就是失败终态没有任何跨进程可查痕迹。>=2 连续失败由 data_health 降
+    PARTIAL、由 trader 在 executed_actions 显式告警。"""
+    prev = read_cycle_health()
+    now_iso = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat()
+    if status == "ok":
+        payload = {
+            "last_status": "ok", "last_at": now_iso, "consecutive_failures": 0,
+            "last_ok_at": now_iso, "last_error": None,
+            "total_failures": int(prev.get("total_failures", 0) or 0),
+        }
+    else:
+        payload = {
+            "last_status": "failed", "last_at": now_iso,
+            "consecutive_failures": int(prev.get("consecutive_failures", 0) or 0) + 1,
+            "last_error": str(reason)[:300], "last_ok_at": prev.get("last_ok_at"),
+            "total_failures": int(prev.get("total_failures", 0) or 0) + 1,
+        }
+    try:
+        atomic_write_json(_ai_health_path(), payload)
+    except Exception as exc:
+        print(f"[AI Brain Batch] warn ai_health 旁车写入失败: {exc}")
 AI_POSITION_MANAGEMENT_FILE = os.path.join(DATA_DIR, "ai_position_management.json")
 AI_LAST_PROMPT_FILE = os.path.join(DATA_DIR, "ai_brain_last_prompt.txt")
+VENUE_HEALTH_FILE = os.path.join(DATA_DIR, "venue_health.json")
 FACTOR_LIBRARY_FILE = os.path.join(DATA_DIR, "factor_library_snapshot.json")
 NEWS_SENTIMENT_FILE = os.path.join(DATA_DIR, "news_sentiment.json")
 AI_MEMORY_MD_FILE = os.path.join(DATA_DIR, "AI_TRADING_MEMORY.md")
@@ -83,8 +182,24 @@ from r20_backend.version import __version__
 from instrument_pool import load_instruments
 from prompt_library import active_profile, append_layer, apply_module_layout
 from r20_gateway.telemetry import ModelCallTelemetry
+from llm_credentials import get_cpa_client_config as _get_cpa_client_config  # noqa: E402
 
 TARGET_INSTRUMENTS = load_instruments()
+
+try:  # 跨所符号归一（审计 P2-12）：把 BINANCE:BTCUSDT / BTC_USDT / BTC 统一成 OKX 形态
+    from r20_backend.exchanges.base import canonical_base as _canonical_base_name
+except Exception:  # pragma: no cover - scripts/ 直接运行时走兜底
+    try:
+        from exchanges.base import canonical_base as _canonical_base_name  # type: ignore
+    except Exception:
+        def _canonical_base_name(symbol: str) -> str:
+            s = str(symbol or "").strip().upper()
+            for marker in ("-USDT-SWAP", "USDT", "_USDT", "-USDT"):
+                if s.endswith(marker):
+                    s = s[: -len(marker)]
+                    break
+            return s.replace("-", "").replace("_", "")
+
 
 def atomic_write_json(path: str, payload: Any) -> None:
     """Replace JSON atomically so readers never observe a partial cache."""
@@ -103,10 +218,25 @@ def atomic_write_json(path: str, payload: Any) -> None:
 
 def single_brain_cycle(func):
     """Prevent overlapping cron runs from overwriting the shared decision cache."""
-    return single_cycle(
-        lambda: AI_BRAIN_LOCK_FILE,
-        on_skip=lambda: print("[AI Brain Batch] Skip: another inference cycle is still running"),
-    )(func)
+    def wrapped(*args, **kwargs):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        lock_handle = open(AI_BRAIN_LOCK_FILE, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_handle.close()
+            print("[AI Brain Batch] Skip: another inference cycle is still running")
+            return None
+        try:
+            lock_handle.seek(0)
+            lock_handle.truncate()
+            lock_handle.write(str(os.getpid()))
+            lock_handle.flush()
+            return func(*args, **kwargs)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_handle.close()
+    return wrapped
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -125,305 +255,110 @@ def is_same_direction_scale_request(position_side: str, action: str) -> bool:
 
 
 def get_cpa_client_config() -> Tuple[str, str]:
-    """Resolve LLM credentials only from process environment or local .env."""
-    try:
-        from r20_backend.llm_manager import get_active_llm_runtime
-        active_llm = get_active_llm_runtime()
-        if active_llm.get("base_url"):
-            return active_llm["base_url"], active_llm.get("api_key", "")
-    except Exception:
-        pass
-    if standalone_settings:
-        return standalone_settings.llm_base_url, standalone_settings.llm_api_key
-    return (
-        os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
-        os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "",
-    )
+    """薄壳：调用时解析门面全局，使测试的 patch / 直接赋值生效。
 
-def get_effective_system_prompt() -> str:
-    """Append a locally managed admin override without replacing audited safety rules."""
+    实现已迁往 r20_backend.llm.credentials（结构优化阶段 4·B3 第四十六刀）。
+    ⚠️ `standalone_settings` 必须**在这里**读取后传入 —— 门面全局会被测试
+    patch / 原地 reload，子模块 import 期绑定会读到陈旧副本。
+    """
+    return _get_cpa_client_config(standalone_settings)
+
+def read_prompt_override() -> str:
+    """读取管理员提示词覆盖层（不存在/不可读 → 空串，绝不抛）。"""
     try:
         if os.path.exists(PROMPT_OVERRIDE_FILE):
-            override = open(PROMPT_OVERRIDE_FILE, "r", encoding="utf-8").read().strip()
-            if override:
-                return f"{SYSTEM_PROMPT}\n\n【管理员提示词覆盖层（同样必须遵守上述风控和 JSON 约束）】\n{override}"
+            with open(PROMPT_OVERRIDE_FILE, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
     except OSError:
         pass
-    return SYSTEM_PROMPT
+    return ""
 
 
-logger = logging.getLogger("ai_brain_trader")
+# 止损基准（审计 P2-5）：池条目 per-instrument 值优先——与 ai_factor_trader.instrument_profile
+# 同一优先级；TRADFI 等不在池内的标的回落到资产类别档（数值与 ai_factor_trader.
+# ASSET_CLASS_PROFILES 逐项对齐，tests/audit/test_audit_config_p4_cleanup.py 有源码钉守着）。
+_SL_ATR_BY_ASSET_CLASS = {"commodity": 1.3, "index": 1.2, "stock": 1.3, "crypto": 1.4}
 
 
-def _okx_get_json(url: str, headers: Dict[str, str], timeout: float = 6.0, retries: int = 2, tag: str = "") -> Optional[Dict[str, Any]]:
-    """GET an OKX REST endpoint with retry; failures are logged instead of silently swallowed."""
-    last_exc: Optional[Exception] = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            last_exc = exc
-            if attempt < retries:
-                time.sleep(0.4 * (attempt + 1))
-    logger.warning("OKX fetch failed [%s] %s -> %s: %s", tag or "okx", url, type(last_exc).__name__, last_exc)
-    return None
+def canonical_position_inst_id(raw: Any) -> str:
+    """跨所持仓符号 → OKX 形态（审计 P2-12，模块级便于直接测试）。
+
+    规则：池内币种映射回池内 instId；标准 USDT 永续写法补齐成 OKX 形态；
+    其余（日期合约/币本位/不认识的写法）原样保留——绝不假装认识。
+    """
+    text = str(raw or "").strip().upper()
+    if not text:
+        return ""
+    bare = text.split(":")[-1]
+    pool_by_base: Dict[str, str] = {}
+    for item in (TARGET_INSTRUMENTS if isinstance(TARGET_INSTRUMENTS, list) else []):
+        iid = str((item or {}).get("instId") or "").strip().upper()
+        if iid:
+            pool_by_base.setdefault(_canonical_base_name(iid), iid)
+    base = _canonical_base_name(bare)
+    if base in pool_by_base:
+        return pool_by_base[base]
+    if base and bare in (base, f"{base}USDT", f"{base}_USDT", f"{base}-USDT", f"{base}-USDT-SWAP"):
+        return f"{base}-USDT-SWAP"
+    return text
+
+
+def _sl_atr_mult_for(package: Dict[str, Any]) -> float:
+    """提示词里展示的止损基准＝执行层真正会用的那个数（不再硬编码 1.5~2.0x）。"""
+    raw = (package or {}).get("sl_atr_mult")
+    try:
+        value = float(raw)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    name = str((package or {}).get("name") or "").strip().upper()
+    for item in (TARGET_INSTRUMENTS if isinstance(TARGET_INSTRUMENTS, list) else []):
+        if str((item or {}).get("name") or "").strip().upper() == name:
+            try:
+                pooled = float((item or {}).get("sl_atr_mult"))
+                if pooled > 0:
+                    return pooled
+            except (TypeError, ValueError):
+                pass
+            break
+    return float(_SL_ATR_BY_ASSET_CLASS.get(str((package or {}).get("type") or "crypto"), 1.4))
+
+
+def get_effective_system_prompt(profile: Dict[str, Any] = None, context: Dict[str, Any] = None) -> str:
+    """模型真正收到的 System Prompt = 模块布局(SYSTEM_PROMPT) → **之后**再追加管理员覆盖层。
+
+    审计 P1-3(2026-09-13)：旧实现把覆盖层拼在 SYSTEM_PROMPT 尾部再交给
+    `apply_module_layout(..., "trading_system", ...)`——而该布局只输出被列名的模块，
+    未列名的 base 段（正是这段覆盖层）被直接丢弃，且 fail-closed 只对 trading_user 生效。
+    于是 UI 承诺"下一次 AI 推演循环将自动叠加此提示词覆盖层"，模型却从未收到过。
+    现在覆盖层在布局**之后**拼接，顺序与 UI 呈现一致；接口侧同样调用本函数，
+    保证「看到的」= 「模型收到的」。
+    """
+    prof = profile if isinstance(profile, dict) and profile else active_profile()
+    effective = apply_module_layout(
+        SYSTEM_PROMPT, prof, "trading_system", f"{prof.get('name', '稳健')}交易系统提示词模板", context=context
+    )
+    override = read_prompt_override()
+    if override:
+        effective = f"{effective}\n\n【管理员提示词覆盖层（同样必须遵守上述风控和 JSON 约束）】\n{override}"
+    return effective
 
 
 def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
-    inst_id = item["instId"]
-    name = item["name"]
-    ccy = item.get("ccy", "")
-    headers = {"User-Agent": "Mozilla/5.0"}
+    """装配单标的数据包。实现见 scripts/brain/packages.py。
 
-    pkg = {
-        "instId": inst_id,
-        "name": name,
-        "type": item["type"],
-        "precision": item["precision"],
-        "price": 0.0,
-        "chg24h": 0.0,
-        "bidPx": 0.0,
-        "askPx": 0.0,
-        "fundingRate": 0.0,
-        "oiUsd": "N/A",
-        "vol24h": 0.0,
-        "lsRatio": "N/A",
-        "takerNetUsd": "N/A",
-        "atr": 0.0,
-        "rsi": 50.0,
-        "vwap_bias": 0.0,
-        "macd_hist": 0.0,
-        "macd_accel": 0.0,
-        "vol_ratio": 1.0,
-        "obv_flow": "NEUTRAL",
-        "adx_1h": 0.0,
-        "smart_money": {
-            "weighted_long_pct": 50.0,
-            "net_flow_usdt": "0 U",
-            "avg_long_entry": "--",
-            "avg_short_entry": "--",
-            "top_win_rate": "--"
-        },
-        "recent_15m": [],
-        "recent_1h": [],
-        "recent_4h": [],
-        "calculus": {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0},
-        "data_quality": "invalid"
-    }
-
-    # 1. Ticker
-    try:
-        d = _okx_get_json(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers, tag=f"{inst_id} ticker")
-        if d and d.get("code") == "0" and d.get("data"):
-            t = d["data"][0]
-            pkg["price"] = float(t.get("last", 0))
-            pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
-            pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
-            op = float(t.get("open24h", 0) or 0)
-            pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
-            pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
-    except Exception as exc:
-        logger.warning("ticker parse failed for %s: %s", inst_id, exc)
-
-    # 2. 15M Candles (recent 24, about 6 hours) & Technical Indicators Calculation
-    try:
-        d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
-        if d["data"]:
-            raw_candles = closed_okx_candles(d["data"])[:24]
-            pkg["recent_15m"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_candles[:12]]
-
-            # Calculate 15M indicators
-            if len(raw_candles) >= 15:
-                closes = [float(c[4]) for c in reversed(raw_candles)]
-                highs = [float(c[2]) for c in reversed(raw_candles)]
-                lows = [float(c[3]) for c in reversed(raw_candles)]
-                vols = [float(c[5]) for c in reversed(raw_candles)]
-
-                # ATR 15M
-                tr_list = []
-                for i in range(1, len(closes)):
-                    tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-                    tr_list.append(tr)
-                if len(tr_list) >= 14:
-                    pkg["atr_15m"] = round(sum(tr_list[-14:]) / 14, 4)
-                    pkg["atr"] = pkg["atr_15m"]
-
-                # RSI 15M
-                diffs = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-                gains = [d if d > 0 else 0 for d in diffs]
-                losses = [-d if d < 0 else 0 for d in diffs]
-                if len(gains) >= 14:
-                    avg_g = sum(gains[-14:]) / 14
-                    avg_l = sum(losses[-14:]) / 14
-                    rs = (avg_g / avg_l) if avg_l > 0 else 100.0
-                    pkg["rsi"] = round(100.0 - (100.0 / (1.0 + rs)), 1)
-                    pkg["rsi_15m"] = pkg["rsi"]
-
-                # VWAP Bias
-                pv_sum = sum(closes[i] * vols[i] for i in range(len(closes)))
-                v_sum = sum(vols)
-                if v_sum > 0:
-                    vwap = pv_sum / v_sum
-                    pkg["vwap_bias"] = round((pkg["price"] - vwap) / vwap * 100, 2)
-
-                # Volume Ratio (Last vs MA5)
-                if len(vols) >= 6:
-                    avg_v5 = sum(vols[-6:-1]) / 5
-                    if avg_v5 > 0:
-                        pkg["vol_ratio"] = round(vols[-1] / avg_v5, 2)
-
-                # OBV Flow
-                obv = 0
-                for i in range(1, len(closes)):
-                    if closes[i] > closes[i-1]:
-                        obv += vols[i]
-                    elif closes[i] < closes[i-1]:
-                        obv -= vols[i]
-                pkg["obv_flow"] = "BULL_FLOW" if obv > 0 else ("BEAR_FLOW" if obv < 0 else "NEUTRAL")
-        else:
-            print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（www/aws/CLI 三级容灾均未取回），本包 15M 微观指标降级缺省")
-    except Exception as exc:
-        print(f"[AI Brain] ⚠️ {inst_id} 15m K线处理异常: {exc}")
-
-    # 3. 1H Candles (recent 24, about 24 hours) & 1H ATR / 1H RSI
-    try:
-        d = {"data": fetch_candles(inst_id, bar="1H", limit=24)}
-        if d["data"]:
-            raw_1h = closed_okx_candles(d["data"])[:24]
-            pkg["recent_1h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_1h[:12]]
-            if len(raw_1h) >= 15:
-                closes_1h = [float(c[4]) for c in reversed(raw_1h)]
-                highs_1h = [float(c[2]) for c in reversed(raw_1h)]
-                lows_1h = [float(c[3]) for c in reversed(raw_1h)]
-
-                tr_list_1h = []
-                for i in range(1, len(closes_1h)):
-                    tr = max(highs_1h[i] - lows_1h[i], abs(highs_1h[i] - closes_1h[i-1]), abs(lows_1h[i] - closes_1h[i-1]))
-                    tr_list_1h.append(tr)
-                if len(tr_list_1h) >= 14:
-                    pkg["atr_1h"] = round(sum(tr_list_1h[-14:]) / 14, 4)
-                    pkg["atr"] = pkg["atr_1h"]  # Elevate primary ATR to 1H
-
-                diffs_1h = [closes_1h[i] - closes_1h[i-1] for i in range(1, len(closes_1h))]
-                gains_1h = [d if d > 0 else 0 for d in diffs_1h]
-                losses_1h = [-d if d < 0 else 0 for d in diffs_1h]
-                if len(gains_1h) >= 14:
-                    avg_g_1h = sum(gains_1h[-14:]) / 14
-                    avg_l_1h = sum(losses_1h[-14:]) / 14
-                    rs_1h = (avg_g_1h / avg_l_1h) if avg_l_1h > 0 else 100.0
-                    pkg["rsi_1h"] = round(100.0 - (100.0 / (1.0 + rs_1h)), 1)
-
-                # 1H Swing Structure
-                if len(closes_1h) >= 10:
-                    ma7_1h = sum(closes_1h[-7:]) / 7
-                    ma20_1h = sum(closes_1h[-20:]) / min(len(closes_1h), 20)
-                    if closes_1h[-1] > ma7_1h > ma20_1h:
-                        pkg["structure_1h"] = "1H_SWING_BULL"
-                    elif closes_1h[-1] < ma7_1h < ma20_1h:
-                        pkg["structure_1h"] = "1H_SWING_BEAR"
-                    else:
-                        pkg["structure_1h"] = "1H_SWING_CHOP"
-        else:
-            print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（www/aws/CLI 三级容灾均未取回），1H ATR/RSI/结构字段降级缺省")
-    except Exception as exc:
-        print(f"[AI Brain] ⚠️ {inst_id} 1H K线处理异常: {exc}")
-
-    # 4. 4H Candles (recent 16, about 64 hours) & 4H Macro Structure
-    try:
-        d = {"data": fetch_candles(inst_id, bar="4H", limit=16)}
-        if d["data"]:
-            raw_4h = closed_okx_candles(d["data"])[:16]
-            pkg["recent_4h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_4h[:8]]
-            if len(raw_4h) >= 8:
-                closes_4h = [float(c[4]) for c in reversed(raw_4h)]
-                ma5_4h = sum(closes_4h[-5:]) / 5
-                ma12_4h = sum(closes_4h[-12:]) / min(len(closes_4h), 12)
-                if closes_4h[-1] > ma5_4h > ma12_4h:
-                    pkg["macro_4h"] = "4H_MACRO_BULL (大级别多头通道)"
-                elif closes_4h[-1] < ma5_4h < ma12_4h:
-                    pkg["macro_4h"] = "4H_MACRO_BEAR (大级别空头承压)"
-                else:
-                    pkg["macro_4h"] = "4H_MACRO_RANGE (大级别区间震荡)"
-        else:
-            print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（www/aws/CLI 三级容灾均未取回），4H 宏观结构字段降级缺省")
-    except Exception as exc:
-        print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
-
-    # 5. Funding Rate & OI
-    if item["type"] == "crypto":
-        try:
-            d = _okx_get_json(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", headers, tag=f"{inst_id} funding-rate")
-            if d and d.get("code") == "0" and d.get("data"):
-                pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
-        except Exception as exc:
-            logger.warning("funding-rate parse failed for %s: %s", inst_id, exc)
-
-        try:
-            d = _okx_get_json(f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", headers, tag=f"{inst_id} open-interest")
-            if d and d.get("code") == "0" and d.get("data"):
-                usd = float(d["data"][0].get("oiUsd", 0) or 0)
-                pkg["oiUsd"] = f"{round(usd / 1e8, 2)}亿 U" if usd > 1e8 else f"{round(usd / 1e4, 1)}万 U"
-        except Exception as exc:
-            logger.warning("open-interest parse failed for %s: %s", inst_id, exc)
-
-        if ccy:
-            try:
-                d = _okx_get_json(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers, tag=f"{inst_id} long-short-ratio")
-                if d and d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                    pkg["lsRatio"] = float(d["data"][0][1])
-            except Exception as exc:
-                logger.warning("long-short-ratio parse failed for %s: %s", inst_id, exc)
-
-            try:
-                d = _okx_get_json(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers, tag=f"{inst_id} taker-volume")
-                if d and d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                    b_vol = float(d["data"][0][1])
-                    s_vol = float(d["data"][0][2])
-                    net_diff = b_vol - s_vol
-                    pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
-            except Exception as exc:
-                logger.warning("taker-volume parse failed for %s: %s", inst_id, exc)
-
-        # 6. OKX ADX Trend Strength Indicator (1H) via direct REST (zero Node CLI fork)
-        try:
-            adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
-            if adx_data and "adx" in adx_data:
-                pkg["adx_1h"] = float(adx_data.get("adx", 0.0) or 0.0)
-        except Exception as exc:
-            logger.warning("ADX fetch failed for %s: %s", inst_id, exc)
-
-    required_market_data = (
-        pkg["price"] > 0
-        and pkg["bidPx"] > 0
-        and pkg["askPx"] >= pkg["bidPx"]
-        and len(pkg["recent_15m"]) >= 12
-        and len(pkg["recent_1h"]) >= 8
-        and len(pkg["recent_4h"]) >= 8
-        and pkg.get("atr_15m", 0) > 0
-        and pkg.get("atr_1h", 0) > 0
-        and "structure_1h" in pkg
-        and "macro_4h" in pkg
+    门面保留同名壳：调用点（`execute_batch_ai_brain_cycle` 里的线程池提交）
+    与其他模块的引用都按全局名查找，故调用点无需改动。
+    两个行情函数在**调用时**注入，而不是被子模块 import 期烘焙 ——
+    `pin_baseline_risk_env()` 的重载名单不含子模块，import 期绑定会让
+    `patch.object(门面, "fetch_candles")` 失效。详见该模块 docstring。
+    """
+    return _fetch_single_instrument_package(
+        item,
+        fetch_candles=fetch_candles,
+        fetch_single_indicator=fetch_single_indicator,
     )
-    try:
-        from calculus_engine import calculate_multi_timeframe
-        pkg["calculus"] = calculate_multi_timeframe({
-            "15M": pkg["recent_15m"],
-            "1H": pkg["recent_1h"],
-            "4H": pkg["recent_4h"],
-        })
-    except Exception as exc:
-        pkg["calculus"] = {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0, "error": str(exc)}
-        logger.warning("calculus engine failed for %s: %s", inst_id, exc)
-    pkg["data_quality"] = "valid" if required_market_data else "invalid"
-    if not required_market_data:
-        logger.warning(
-            "market data incomplete for %s: price=%s bid=%s ask=%s 15m=%d 1h=%d 4h=%d",
-            inst_id, pkg["price"], pkg["bidPx"], pkg["askPx"],
-            len(pkg["recent_15m"]), len(pkg["recent_1h"]), len(pkg["recent_4h"]),
-        )
-    return pkg
 
 # ── SYSTEM_PROMPT · v7.6 优质预设基线 ──────────────────────────────────────
 # 设计契约：
@@ -441,15 +376,15 @@ _SYSTEM_CORE = """==== 【系统角色定位与核心使命】 ====
 
 ==== 【核心军规：反割肉·反磨损·选优开单五大铁律】 ====
 1. 宽止损隔绝杂波：止损必须放在市场结构失效点之外，距离 1.8x~2.2x 1H ATR（或现价外 1.8%~3.0% 安全垫）。严禁把止损设在 15M/5M 噪音区间被插针扫损；宁可压低杠杆与保证金，也绝不压缩止损呼吸空间。
-2. 三阶利润棘轮（绝不让盈利单变亏损单）：
-   阶梯1（浮盈 < 0.8R）：保持原宽止损给波段充分展开时间，禁止微小浮盈过早移损被杂波扫出；
-   阶梯2（浮盈 ≥ 0.8R 或 ROI ≥ +1.5%）：输出 UPDATE_SL 将止损移至保本位（开仓成本 +0.20%），彻底切断本金风险；
-   阶梯3（浮盈 ≥ 1.5R 或 ROI ≥ +3.0%）：输出 UPDATE_SL 锁定成本上方至少 +0.6R，保底锁定 35%~50% 扎实波段利润。
-   主动止盈三道防线（坚决杜绝坐过山车倒亏割肉）：① 峰值回撤——最高浮盈曾达 ROI ≥ +2.5% 或 ≥ 1.0R，当前浮盈较极值回撤超 35%~45% 且 1H 未二次放量突破时，果断 CLOSE_MARKET 或紧贴现价 UPDATE_SL 锁定剩余利润；② 动能耗散——浮盈状态（ROI ≥ +1.5%）下 1H 做功功率 Φ = v · a < -0.12（速度加速度反向耗散）或曲率 κ ≥ 1.5（高位急刹车力竭、长上影假突破受挫）时，提前落袋为安，死等极远挂单是禁止行为；③ 阻力锚定——止盈价优先锚定前方关键阻力/支撑位或 1.8~2.2x ATR 可达位，确定性利润优先落袋。
+2. 三阶利润棘轮（兼顾波段奔跑与胜率锁定，杜绝赢小输大）：
+   阶梯1（浮盈 < 1.0R）：保持原宽止损给波段充分展开时间，禁止微小浮盈过早提至成本位被杂波扫出；
+   阶梯2（浮盈 ≥ 1.5R 且 ROI ≥ +2.2%）：输出 UPDATE_SL 将止损移至保本位（开仓成本 +0.20%），彻底切断本金风险；
+   阶梯3（浮盈 ≥ 2.2R 且 ROI ≥ +3.5%）：输出 UPDATE_SL 锁定成本上方至少 +1.0R，扎实锁定波段核心利润。
+   主动止盈三道防线（兼顾大波段奔跑与落袋防倒亏）：① 峰值回撤——最高浮盈曾达 ROI ≥ +3.5% 或 ≥ 1.8R，当前浮盈较极值回撤超 45%~55% 且 1H 动能明显破位时，果断 CLOSE_MARKET 或紧贴现价 UPDATE_SL 锁定剩余利润，严禁在微幅浮盈（<1.5R）的正常日内回踩中恐慌砸盘提前出局；② 动能耗散——浮盈充沛（ROI ≥ +2.5%）下 1H 做功功率 Φ = v · a < -0.15 且曲率 κ ≥ 1.8（高位急刹车力竭、长上影假突破受挫）时，提前落袋为安，死等极远挂单是禁止行为；③ 阻力锚定——止盈价优先锚定前方关键阻力/支撑位或 2.0~2.8x ATR 可达位，确保实现高盈亏比正期望，充分享受波段主浪溢价。
 3. 敞口纪律（执行层硬拦截，不得试探边界）：
    - 全系统同向持仓上限、单笔保证金占比硬顶、杠杆上限与当日亏损熔断线，一律以每轮用户消息【本周期风险预算】的实时声明为准（执行层硬拦截，不得试探边界）；同向已有 2 笔时，新开同向单的置信度必须自律提升至 85% 以上；严禁在 BTC/ETH/SOL/DOGE 等高相关标的上无节制同向堆叠单边敞口；
    - 标的一旦止损出局，【本周期风险预算】声明的冷静期分钟数内不得再申请该标的，严禁情绪化盲目反手；开仓逻辑必须能在声明的最长持仓时间（时间止损）量级内兑现——超时横盘仓位将被执行层强制离场，禁止寄希望于死扛。
-4. 选优开单契约：空仓且候选池存在合法顺势形态时，从概率期望与微积分动能最优的标的中果断输出 BUY_LONG 或 SELL_SHORT 限价单；置信度自信标定：形态达标且空间充足时果断给出 **78% ~ 88%**（低于执行层新开仓置信度门禁的报价会被物理拦截，门禁值见【本周期风险预算】）；只有全部候选均触发明确硬否决或优势不足时才全体 WAIT。目标 R:R ≥ 2.2，绝对盈亏比底线见【本周期风险预算】。
+4. 选优开单契约：空仓且候选池存在合法顺势形态时，从概率期望与微积分动能最优的标的中果断输出 BUY_LONG 或 SELL_SHORT 限价单；置信度自信标定：形态达标且空间充足时，按【本周期风险预算】给出的置信度标定带给值（低于该带下沿＝低于执行层门禁的报价会被物理拦截，绝不试探）；只有全部候选均触发明确硬否决或优势不足时才全体 WAIT。目标 R:R 与绝对盈亏比底线一律以【本周期风险预算】声明的目标盈亏比/硬底线为准。
 5. 反磨损意识：入场优先用 Maker 限价单锚定支撑/阻力位附近，拒绝市价追单；震荡市拒绝为 1% 以内微小差价支付手续费与滑点。
 
 ==== 【决策优先级：高层级永远覆盖低层级】 ====
@@ -462,9 +397,9 @@ P3 执行定位：15M K线、盘口与 Maker 限价挂单位置。P3 优化入�
 ==== 【三大底层数理基石：强化概率优势与微积分因果审计】 ====
 本系统坚决破除感性猜单与盲目猜顶抄底，决策逻辑由纯数理统计驱动，并必须在输出中明确引用具体数值：
 1. ⚅ 概率论与统计风险（最高权重核心）：使用偏度、超额峰度、条件延续概率 continuation_prob_pct、击穿概率 breakdown_prob_pct、Cornish-Fisher 95% VaR 与 CVaR。
-   - 【胜率数学期望定价】：当条件延续概率 P续 ≥ 50%~55%（做多）或击穿概率 P破 ≥ 50%~55%（做空），且具备 R:R ≥ 2.2 空间时，单笔数学期望已具备极高正 Alpha，果断作为首选发单依据；
+   - 【胜率数学期望定价】：当条件延续概率 P续 ≥ 50%~55%（做多）或击穿概率 P破 ≥ 50%~55%（做空），且具备【本周期风险预算】声明的目标盈亏比空间时，单笔数学期望已具备极高正 Alpha，果断作为首选发单依据；
    - 【概率优势定方向】：P续 显著高于 P破（差值 ≥ 15%）时概率天平全面向多头倾斜，严禁开空，专注找回踩低吸；P破 显著占优时反之，专注找反弹承压做空；
-   - 【极端肥尾折减】：超额峰度过大或 CVaR 偏高代表潜在波动剧烈，应把保证金降至可用余额 5%~10%、止损放宽至 2.0~2.2x ATR 抵御噪音，或直接 WAIT 放弃该机会。
+   - 【极端肥尾折减】：超额峰度过大或 CVaR 偏高代表潜在波动剧烈，应把保证金降至【本周期风险预算】常规区间的下沿、止损按其止损基准适当放宽以抵御噪音，或直接 WAIT 放弃该机会。
 2. ∂ 因果微积分动力学：只使用已闭合历史 K 线，解释对数价格速度 v、加速度 a、冲击 j 与指数衰减累计冲量 I。1H 是硬阈值与波段裁决周期。
    BULL_DECELERATING/BEAR_DECELERATING 表示趋势失速与回抽，不等于已经反转：在 4H 顺势大浪中，1H 减速回抽正是触碰支撑均线（EMA21/55）时的极佳打折买点，当 a 由负转正、j 趋缓（回踩企稳）必须果断顺势做多；在 4H 空头通道中，1H 弱反弹减速遇阻正是逢高做空的极佳卖点。
    模型输出必须在 calculus_dynamics 中明确列出当前标的 1H 的 v 与 a 真实数值，严禁只写空泛定性词句！
@@ -481,12 +416,12 @@ P3 执行定位：15M K线、盘口与 Maker 限价挂单位置。P3 优化入�
    ② 顺势空头反弹承压阻力位遇阻回落（Throwback to Resistance / 做空）；
    ③ 假跌破流动性掠夺后迅速收回（Liquidity Sweep & Reclaim / 诱空收网做多）；
    ④ 假突破流动性衰竭后迅速跌回（Liquidity Sweep & Fail / 诱多受挫做空）。
-3. 选优开单纪律：只要形态达标且风险收益比 R:R ≥ 2.2，置信度果断给出 78% ~ 88% 进场盈利；不得以“再等等完美共振”为由放弃合法机会。
+3. 选优开单纪律：只要形态达标且风险收益比达到【本周期风险预算】的目标盈亏比，置信度按该小节的标定带给值；不得以“再等等完美共振”为由放弃合法机会。
 
 ==== 【开仓参数与科学价格几何】 ====
 - 顺势铁律（Fail-Closed）：4H_MACRO_BULL 大级别多头通道下 100% 严禁输出 SELL_SHORT 逆势摸顶；4H_MACRO_BEAR 大级别空头承压下 100% 严禁输出 BUY_LONG 逆势抄底！
 - 震荡过滤：箱体正中间无序乱跳时一律强制 WAIT，严禁追涨杀跌磨损手续费。
-- 价格几何：BUY_LONG 必须满足 stop_loss_price < entry_price < take_profit_price；SELL_SHORT 必须满足 take_profit_price < entry_price < stop_loss_price。目标 R:R ≥ 2.2；执行层绝对拒绝低于【本周期风险预算】盈亏比硬底线的报价。
+- 价格几何：BUY_LONG 必须满足 stop_loss_price < entry_price < take_profit_price；SELL_SHORT 必须满足 take_profit_price < entry_price < stop_loss_price。目标盈亏比见【本周期风险预算】；执行层绝对拒绝低于其硬底线的报价。
 - 入场一律 Maker 限价：挂在支撑/阻力位附近（如现价下方/上方 0.1%~0.6%），严禁市价追单；止损基于结构性保护点（前低支撑位或箱体边缘下方 0.3%~0.5%），参考 1.8~2.2x 1H ATR，绝不贴脸设损。
 - 保证金与杠杆：常规取【本周期风险预算】给出的常规区间，强信号（P0 全通过 + 概率优势 ≥ 15% + ADX ≥ 22）可上浮至其单笔保证金硬顶；杠杆不超过其声明的杠杆上限。资金规模过小时宁可少开标的，也不得压缩止损距离或放弃盈亏比底线；若某标的在当前余额下无法同时满足交易所最小下单量、止损呼吸空间与 R:R 底线，该标的必须输出 WAIT 并说明资金不匹配。
 """
@@ -545,341 +480,257 @@ _SYSTEM_JSON_CONTRACT = """==== 【严格 JSON 规范契约与完整输出骨架
 - decisions 只包含有明确结论的标的，未涉及的标的不得出现；
 - 每个决策的 calculus_dynamics 与 math_prob_rationale 必须明确引用具体 1H v, a 与概率数值，严禁只写空泛定性词句！"""
 
+# ---------------------------------------------------------------------------
+# 跨所比对矩阵（Phase 2 · 币安/Gate 只读备源）
+# 纯证据增益：任何失败一律 fail-soft，绝不阻塞决策主循环。
+# 熔断开关 R20_XVENUE_PROMPT=0 时整段跳过（网络故障预案/测试封闭性）。
+# ---------------------------------------------------------------------------
+
+# 跨所取数健康度状态：**刻意留在门面**（不是实现细节）——
+# `tests/venues/test_xvenue_prompt.py:120` 直接断言 `abt._XV_HEALTH`，且门面被
+# `pin_baseline_risk_env()` 原地重载后，子模块 import 期持有的引用会与门面的
+# 那个不再是同一个对象。实现模块 scripts/brain/xvenue.py 只保留保护它的锁。
+_XV_HEALTH: Dict[str, Dict[str, Any]] = {}
+
+
+def _xvenue_enabled() -> bool:
+    """跨所提示词总开关。实现见 scripts/brain/xvenue.py。"""
+    return _xvenue_enabled_impl()
+
+
+def _xv_record(venue: str, name: str, ok: bool, latency_ms: float, err: str = "") -> None:
+    """记录场所级取数健康度（写入门面的 `_XV_HEALTH`）。实现见 scripts/brain/xvenue.py。
+
+    `_XV_HEALTH` 必须留在门面：`tests/venues/test_xvenue_prompt.py:120` 直接断言
+    `abt._XV_HEALTH`，且门面被 `pin_baseline_risk_env()` 原地重载后
+    子模块持有的引用会与门面的那个不再是同一个对象。
+    """
+    _xv_record_impl(_XV_HEALTH, venue, name, ok, latency_ms, err)
+
+
+def _xv_flush_health(packages: List[Dict[str, Any]]) -> None:
+    """健康度 + 逐币跨所快照落盘。实现见 scripts/brain/xvenue.py。
+
+    依赖一律在**调用时**从门面全局取名（而不是 import 期绑定或设默认参数）——
+    目的是让 `patch.object(abt, "VENUE_HEALTH_FILE", …)` 与
+    `patch.object(abt, "atomic_write_json", …)` 在调用时被读到；
+    同时 `abt._xv_flush_health([...])` 这种只传 packages 的既有调用
+    （`tests/venues/test_xvenue_prompt.py:129/144`）照旧成立。
+
+    注：不要把默认值写成同名形参（`safe_float=None` 之类）—— 那会让函数体里的
+    裸名解析到形参而不是模块全局，等于把补丁缝静默关掉。
+    """
+    _xv_flush_health_impl(
+        packages,
+        health=_XV_HEALTH,
+        safe_float=safe_float,
+        atomic_write_json=atomic_write_json,
+        venue_health_file=VENUE_HEALTH_FILE,
+    )
+
+
+def _get_xvenue_adapter(venue: str):
+    """适配器获取。实现见 scripts/brain/xvenue.py。
+
+    保留在门面：这是 `tests/venues/test_xvenue_prompt.py` 4 处
+    `patch.object(abt, "_get_xvenue_adapter", …)` 的**既定 mock 缝**
+    （模块注释原话：「测试与故障注入缝：mock 此函数即可完全离线」）。
+    """
+    return _get_xvenue_adapter_impl(venue)
+
+
+def _xv_binance_snapshot(base: str):
+    """单点取币安现价/大户比/费率。实现见 scripts/brain/xvenue.py。"""
+    return _xv_binance_snapshot_impl(
+        base,
+        get_adapter=_get_xvenue_adapter,
+        record=lambda venue, name, ok, ms, err="": _xv_record(venue, name, ok, ms, err),
+    )
+
+
+def _xv_gate_snapshot(base: str):
+    """单点取 Gate 现价/大户比/费率。实现见 scripts/brain/xvenue.py。"""
+    return _xv_gate_snapshot_impl(
+        base,
+        get_adapter=_get_xvenue_adapter,
+        record=lambda venue, name, ok, ms, err="": _xv_record(venue, name, ok, ms, err),
+    )
+
+
+def fetch_cross_venue_matrix(packages: List[Dict[str, Any]]) -> None:
+    """给每个 pkg 就地挂 xvenue（US-003 对称化）。实现见 scripts/brain/xvenue.py。"""
+    _fetch_cross_venue_matrix_impl(
+        packages,
+        enabled=_xvenue_enabled(),
+        snapshot_binance=_xv_binance_snapshot,
+        snapshot_gate=_xv_gate_snapshot,
+        flush_health=_xv_flush_health,
+    )
+
+
+def _xv_divergence_notes(xv: Dict[str, Any]) -> str:
+    """跨所分歧自动标注。实现见 scripts/brain/xvenue.py。"""
+    return _xv_divergence_notes_impl(xv)
+
+
+def _xvenue_prompt_line(p: Dict[str, Any]) -> str:
+    """归一跨所证据行。实现见 scripts/brain/xvenue.py。
+
+    `safe_float` 在调用时注入（它定义在本门面，不是共享叶子函数）。
+    """
+    return _xvenue_prompt_line_impl(p, safe_float=safe_float)
+
+
+
+
 # System 宪法保持静态：全部动态风控阈值由每轮 construct_full_market_prompt 注入的
 # 【本周期风险预算】小节实时携带（该小节直接从 risk_constants 推导，永不进快照）。
 # 这样即使策略快照布局缓存了本节文本，风控改参也不会造成「提示词口径过期」。
 SYSTEM_PROMPT = _SYSTEM_CORE + _PYRAMID + "\n" + _SYSTEM_JSON_CONTRACT
 
 
-def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: str = "[MISSING_CONTEXT:account_positions]", active_positions_detail: List[Dict[str, Any]] = None, pending_orders_detail: List[Dict[str, Any]] = None, current_time_str: str = "", usdt_available: float = None, runtime_context_out: Dict[str, Any] = None, policy_snapshot: Dict[str, Any] = None) -> str:
-    tz_bj = datetime.timezone(datetime.timedelta(hours=8))
-    now_bj_str = current_time_str or datetime.datetime.now(tz_bj).strftime("%Y-%m-%d %H:%M:%S (北京时间)")
-    market_lines = []
-    for p in packages:
-        k15 = p.get("recent_15m", [])
-        k1h = p.get("recent_1h", [])
-        k4h = p.get("recent_4h", [])
-        quality = p.get("data_quality", "invalid")
+def build_risk_budget_text(usdt_available: float = None) -> str:
+    """【本周期风险预算】小节（审计 P1-1，2026-09-13）。
 
-        sm = p.get("smart_money", {})
-        adx_val = p.get("adx_1h", "--")
-        calc = p.get("calculus", {})
-        calc_tfs = calc.get("timeframes", {}) if isinstance(calc, dict) else {}
-        d_int = calc.get("definite_integrals", {}) if isinstance(calc, dict) else {}
-        p_th = calc.get("probability_theory", {}) if isinstance(calc, dict) else {}
-        calc_1h = calc_tfs.get("1H", {}) if isinstance(calc_tfs.get("1H", {}), dict) else {}
-        int_1h = calc_1h.get("definite_integrals", {}) if isinstance(calc_1h, dict) else {}
-        prob_1h = calc_1h.get("probability_theory", {}) if isinstance(calc_1h, dict) else {}
+    旧实现自己算「权益×5% / 权益×30%」，漏掉了绝对封顶，于是模型看到
+    单标的 1496.82U / 日亏 −249.47U，而引擎执行 `min(600, 1496.82)`=600U、
+    `min(150, 249.47)`=150U（虚高 2.49× / 1.66×）——偏偏 SYSTEM PROMPT 要求模型
+    "一切金额类参数一律以【本周期风险预算】小节为准"，模型据此规划的是不存在的空间。
 
-        calc_line = (
-            f"动力学态={calc.get('regime', 'DATA_UNRELIABLE')} | 速度={calc.get('velocity', '--')} "
-            f"| 加速度={calc.get('acceleration', '--')} | 累计冲量={calc.get('impulse', '--')} "
-            f"| 冲击变化={calc.get('max_abs_jerk', '--')} | 质量={calc.get('quality', 0)}"
-        )
-        integral_line = (
-            f"多周期净做功积分={d_int.get('energy_integral', 'UNKNOWN')} | 路径偏离面积积分={d_int.get('deviation_area_integral', 'UNKNOWN')} "
-            f"| 量价作用积分={d_int.get('volume_action_integral', 'UNKNOWN')} | 能量态={d_int.get('regime', 'UNKNOWN')}"
-        )
-        prob_line = (
-            f"多头延续估计概率={p_th.get('continuation_prob_pct', 'UNKNOWN')}% | 空头击穿估计概率={p_th.get('breakdown_prob_pct', 'UNKNOWN')}% "
-            f"| 偏度S={p_th.get('skewness', 'UNKNOWN')} | 超额峰度K={p_th.get('kurtosis', 'UNKNOWN')} "
-            f"| 95%VaR={p_th.get('var_95_pct', 'UNKNOWN')}% | 95%CVaR={p_th.get('cvar_95_pct', 'UNKNOWN')}% "
-            f"| 尾部风险态={p_th.get('regime', 'UNKNOWN')}"
-        )
-        core_math_line = (
-            f"1H:v={calc_1h.get('velocity', 'UNKNOWN')},a={calc_1h.get('acceleration', 'UNKNOWN')},"
-            f"j={calc_1h.get('jerk', 'UNKNOWN')},I={calc_1h.get('impulse', 'UNKNOWN')},态={calc_1h.get('regime', 'UNKNOWN')} "
-            f"| E={int_1h.get('energy_integral', 'UNKNOWN')},A={int_1h.get('deviation_area_integral', 'UNKNOWN')} "
-            f"| P续={prob_1h.get('continuation_prob_pct', 'UNKNOWN')}%,P破={prob_1h.get('breakdown_prob_pct', 'UNKNOWN')}%,"
-            f"VaR={prob_1h.get('var_95_pct', 'UNKNOWN')}%,CVaR={prob_1h.get('cvar_95_pct', 'UNKNOWN')}%"
-        )
-        calc_tf_line = "；".join(
-            f"{tf}:v={v.get('velocity', '--')},a={v.get('acceleration', '--')},I={v.get('impulse', '--')},态={v.get('regime', '--')}"
-            for tf, v in calc_tfs.items() if isinstance(v, dict)
-        )
-        info = f"""---------------------------------------------------------
-【{p['name']} ({p['instId']})】| 数据质量: {quality} | 现价: {p['price']} | 24H涨跌: {p['chg24h']}% | 盘口买/卖: {p['bidPx']}/{p['askPx']}
-- 🏛️ 三重滤网宏观结构: 4H宏观大势={p.get('macro_4h', '4H_MACRO_RANGE')} | 1H波段结构={p.get('structure_1h', '1H_SWING_CHOP')}
-- 👑 顶级聪明钱 (SmartMoney Top100): 加权做多占比={sm.get('weighted_long_pct', 50)}% | 24H净流入={sm.get('net_flow_usdt', '--')} | 多头均价={sm.get('avg_long_entry', '--')} | 空头均价={sm.get('avg_short_entry', '--')} | {sm.get('top_win_rate', '')}
-- 📐 1H核心波段指标: 1H ATR(14)={p.get('atr_1h', p.get('atr', '--'))} (止损基准: 1.5~2.0x 1H ATR) | 1H RSI(14)={p.get('rsi_1h', '--')} | 1H ADX趋势强度={adx_val} (注:<20无趋势垃圾市, ≥22强单边)
-- ⚡ 15M微观执行参考: 15M ATR={p.get('atr_15m', '--')} | 15M RSI={p.get('rsi_15m', '--')} | VWAP乖离={p.get('vwap_bias', '--')}% | 15M量比={p.get('vol_ratio', '--')}x | OBV资金流={p.get('obv_flow', '--')}
-- 📐 1H三大数理基石硬证据: {core_math_line}
-- ∂ 多周期微积分动力学摘要: {calc_line}
-- ∫ 定积分能量学: {integral_line}
-- ⚅ 概率论与统计风险: {prob_line}
-- ∂ 分周期速度/加速度/冲量: {calc_tf_line or 'UNKNOWN'}
-- 衍生品博弈: 资金费率: {p['fundingRate']}% | OI未平仓: {p['oiUsd']} | 多空比: {p['lsRatio']} | 5M主动吃单净差: {p['takerNetUsd']}
-- 15M K线(已收盘，倒序12根 [O,H,L,C,V]): {k15}
-- 1H K线(已收盘，倒序12根 [O,H,L,C,V]): {k1h}
-- 4H K线(已收盘，倒序8根 [O,H,L,C,V]): {k4h}"""
-        market_lines.append(info)
-
-    all_market_str = "\n".join(market_lines)
-
-    pos_lines = []
-    if active_positions_detail and len(active_positions_detail) > 0:
-        for p in active_positions_detail:
-            inst_name = p.get('name') or p.get('instId')
-            side = p.get('side') or p.get('posSide', 'long')
-            is_long = "long" in str(side).lower()
-            entry_px = safe_float(p.get('avgPx', 0))
-            cur_px = safe_float(p.get('markPx') or p.get('lastPx') or entry_px)
-            hwm = safe_float(p.get('highWaterMark', 0))
-            lwm = safe_float(p.get('lowWaterMark', 0))
-            tp_px = p.get('takeProfitPx', '--')
-            stage_desc = p.get('stage_desc', '持有监控中')
-
-            profit_desc = ""
-            if is_long and hwm > entry_px and entry_px > 0:
-                peak_gain_pct = round((hwm - entry_px) / entry_px * 100, 2)
-                dd_from_peak = round((hwm - cur_px) / (hwm - entry_px) * 100, 1) if hwm > entry_px else 0.0
-                profit_desc = f" | 曾最高到: {hwm} (极值浮盈 +{peak_gain_pct}%, 现已从极值回撤 {dd_from_peak}%)"
-            elif not is_long and lwm > 0 and lwm < entry_px and entry_px > 0:
-                peak_gain_pct = round((entry_px - lwm) / entry_px * 100, 2)
-                dd_from_peak = round((cur_px - lwm) / (entry_px - lwm) * 100, 1) if lwm < entry_px else 0.0
-                profit_desc = f" | 曾最低到: {lwm} (极值浮盈 +{peak_gain_pct}%, 现已从极值回撤 {dd_from_peak}%)"
-
-            pos_lines.append(
-                f"- 标的: {inst_name} | 方向: {side} {p.get('lever', '3')}x | 开仓均价: {p.get('avgPx')} | 当前价: {cur_px} | 浮盈: {p.get('upl')} U (ROI: {round(safe_float(p.get('uplRatio')) * 100, 2)}%){profit_desc} | 动态止损线: {p.get('trailingStopPx', p.get('trailingSl', '--'))} | 目标止盈: {tp_px} | 状态: {stage_desc}"
-            )
-    else:
-        pos_lines.append("[MISSING_CONTEXT:account_positions]" if active_positions_detail is None else "当前无任何在途持仓敞口 (100% 现金空仓状态)")
-
-    active_pos_text = "\n".join(pos_lines)
-
-    # Format Pending Limit Orders
-    pending_lines = []
-    if pending_orders_detail and len(pending_orders_detail) > 0:
-        for o in pending_orders_detail:
-            c_ts = int(o.get("cTime", 0) or 0) / 1000.0
-            c_time_str = datetime.datetime.fromtimestamp(c_ts, tz=tz_bj).strftime("%Y-%m-%d %H:%M:%S") if c_ts > 0 else "--"
-            inst_id = o.get("instId", "")
-            side_raw = str(o.get("side", "")).lower()
-            pos_side = str(o.get("posSide", "net")).lower()
-            reduce_only = str(o.get("reduceOnly", "false")).lower() == "true"
-            ord_type = str(o.get("ordType", "limit")).lower()
-
-            if reduce_only:
-                side_str = "市价平多" if (side_raw == "sell" and ord_type == "market") else ("限价平多" if side_raw == "sell" else ("市价平空" if ord_type == "market" else "限价平空"))
-            else:
-                side_str = "限价买多" if (side_raw == "buy" and ord_type != "market") else ("市价买多" if side_raw == "buy" else ("限价卖空" if ord_type != "market" else "市价卖空"))
-
-            raw_px = str(o.get("px") or "").strip()
-            px_val = raw_px if raw_px and raw_px != "0" else ("市价" if ord_type == "market" else "--")
-            sz_val = str(o.get("sz", "--"))
-            ord_id = str(o.get("ordId", ""))
-
-            attach_list = o.get("attachAlgoOrds", [])
-            tp_sl_info = ""
-            if attach_list and len(attach_list) > 0:
-                att = attach_list[0]
-                tp_p = att.get("tpTriggerPx", "--")
-                sl_p = att.get("slTriggerPx", "--")
-                tp_sl_info = f" | 附带云端止盈: {tp_p} / 止损: {sl_p}"
-
-            pending_lines.append(
-                f"- [挂单ID: {ord_id}] {inst_id} | {side_str} {sz_val}张 @ {px_val} | 挂单时间: {c_time_str}{tp_sl_info}"
-            )
-    else:
-        pending_lines.append("[MISSING_CONTEXT:pending_orders]" if pending_orders_detail is None else "当前无任何在途未成交限价挂单 (挂单池为空)")
-
-    pending_orders_text = "\n".join(pending_lines)
-
-    from scripts.evolution_shield import render_trading_memory
-    # Damaged authority raises; empty authority never falls back to legacy text.
-    memory_lessons = render_trading_memory(AI_MEMORY_MD_FILE, AI_MEMORY_FILE)
-
-    # Harvest Latest Live News & Multi-Coin Sentiment
-    news_briefs = []
-    macro_env = "中性平衡"
-    if os.path.exists(NEWS_SENTIMENT_FILE):
-        try:
-            with open(NEWS_SENTIMENT_FILE, "r", encoding="utf-8") as f:
-                ns_data = json.load(f)
-                macro_env = ns_data.get("macro_sentiment", "中性平衡")
-                for n in ns_data.get("latest_news", [])[:6]:
-                    news_briefs.append(f"- [{n.get('time', '')}] {n.get('title', '')} ({n.get('summary', '')[:80]}...)")
-        except Exception:
-            pass
-
-    news_text = "\n".join(news_briefs) if news_briefs else "无可验证新闻输入；不得据此推断市场平稳或不存在事件风险"
-
-    avail_balance_str = f"{usdt_available:.2f} USDT" if usdt_available is not None and usdt_available >= 0 else "[MISSING_CONTEXT:account_balance]"
+    现在两个封顶值直接取 `risk_constants.effective_*`（与执行层同一函数对象），
+    并把此前对模型完全不可见的 5 个旋钮一并披露：组合风险总预算、并发持仓上限、
+    单标的绝对封顶、日亏绝对封顶、时间止损带宽。
+    """
+    if usdt_available is None or usdt_available < 0:
+        return "[MISSING_CONTEXT:risk_budget]"
+    # 动态取单一事实源对象（支持后台热重载与多用例隔离）
+    import scripts.risk_constants as rc
 
     # 风险预算按「实际可用余额」自适应推导：预设绝不写死绝对金额，避免与小资金账户(如 80U)冲突。
-    if usdt_available is None or usdt_available < 0:
-        risk_budget_text = "[MISSING_CONTEXT:risk_budget]"
-    else:
-        _eq = float(usdt_available)
-        _m_lo = round(_eq * 0.03, 2)
-        _m_hi = round(_eq * min(0.12, MAX_MARGIN_EQUITY_RATIO), 2)
-        _m_strong = round(_eq * MAX_MARGIN_EQUITY_RATIO, 2)
-        _asset_cap = round(_eq * SINGLE_ASSET_EQUITY_RATIO, 2)
-        _daily_stop = round(max(_eq * DAILY_LOSS_EQUITY_RATIO, 1.0), 2)
-        risk_budget_text = (
-            f"【本周期风险预算｜按实际可用余额 {_eq:.2f} USDT 与后台风控配置自适应推导，严禁套用任何固定绝对金额】:\n"
-            f"- 常规单笔保证金: {_m_lo} ~ {_m_hi} USDT (可用余额 3%~{min(0.12, MAX_MARGIN_EQUITY_RATIO):.0%})\n"
-            f"- 强信号单笔保证金上限: {_m_strong} USDT ({MAX_MARGIN_EQUITY_RATIO:.0%}，执行层硬顶)\n"
-            f"- 单标的累计保证金上限(含金字塔加仓): {_asset_cap} USDT ({SINGLE_ASSET_EQUITY_RATIO:.0%})\n"
-            f"- 单笔最大可承受亏损: 以 1.0R 为基准，且不超过可用余额 {RISK_PER_TRADE_EQUITY_RATIO:.0%}\n"
-            f"- 当日累计亏损熔断线: -{_daily_stop} USDT (可用余额 {DAILY_LOSS_EQUITY_RATIO:.0%})\n"
-            f"- 全系统同向持仓上限: {MAX_SAME_DIRECTION_POSITIONS} 笔 (多/空各自封顶，执行层硬拦截)\n"
-            f"- 最长持仓时间: {TIME_STOP_HOURS:g} 小时 (超时且横盘无突破将被时间止损离场)\n"
-            f"- 单笔杠杆上限: {MAX_LEVERAGE:g}x (超出部分执行层自动钳制)\n"
-            f"- 盈亏比 R:R 硬底线: {MIN_RISK_REWARD_RATIO:.1f} (低于此值的报价执行层物理拒绝)\n"
-            f"- 新开仓最低置信度门禁: {MIN_ENTRY_CONFIDENCE:g}% (低于此值禁止新开仓)\n"
-            + (
-                f"- 金字塔加仓: 已禁用 (最大加仓次数 0，在途持仓仅可 HOLD/UPDATE_SL/CLOSE_MARKET)\n"
-                if MAX_SCALE_IN_COUNT <= 0 else
-                f"- 金字塔加仓门禁: 最多 {MAX_SCALE_IN_COUNT} 次 · 底仓浮盈 ≥ {MIN_SCALE_IN_PROFIT_RATIO:.1%} 且已保本 · 置信度 ≥ {MIN_SCALE_IN_CONFIDENCE:g}%\n"
-            )
-            + f"- 止损后同标的冷静期: {STOP_COOLDOWN_MINUTES} 分钟"
+    _eq = float(usdt_available)
+    _m_lo = round(_eq * 0.03, 2)
+    _m_hi = round(_eq * min(0.12, rc.MAX_MARGIN_EQUITY_RATIO), 2)
+    _m_strong = round(_eq * rc.MAX_MARGIN_EQUITY_RATIO, 2)
+    # 单标的累计 = min(绝对封顶 600U, 权益×30%)；日亏熔断 = min(绝对封顶 150U, 权益×5%)
+    _asset_cap = rc.effective_single_asset_margin(_eq)
+    _daily_stop = rc.effective_daily_loss_limit(_eq)
+    # 单笔上限同样受单标的累计封顶约束（首笔即计入累计）：min(权益×20%, 单标的封顶)
+    _m_strong_cap = min(_m_strong, _asset_cap)
+    _asset_cap_note = (f"min({rc.MAX_SINGLE_ASSET_MARGIN:g} 绝对封顶, 可用余额 {rc.SINGLE_ASSET_EQUITY_RATIO:.0%})"
+                       if _asset_cap < round(_eq * rc.SINGLE_ASSET_EQUITY_RATIO, 2) else f"可用余额 {rc.SINGLE_ASSET_EQUITY_RATIO:.0%}")
+    _daily_stop_note = (f"min({rc.MAX_DAILY_LOSS_USDT:g} 绝对封顶, 可用余额 {rc.DAILY_LOSS_EQUITY_RATIO:.0%})"
+                        if _daily_stop < round(max(_eq * rc.DAILY_LOSS_EQUITY_RATIO, 1.0), 2) else f"可用余额 {rc.DAILY_LOSS_EQUITY_RATIO:.0%}")
+    text = (
+        f"【本周期风险预算｜按实际可用余额 {_eq:.2f} USDT 与后台风控配置自适应推导，严禁套用任何固定绝对金额】:\n"
+        f"- 常规单笔保证金: {_m_lo} ~ {_m_hi} USDT (可用余额 3%~{min(0.12, rc.MAX_MARGIN_EQUITY_RATIO):.0%})\n"
+        f"- 强信号单笔保证金上限: {round(_m_strong_cap, 2)} USDT "
+        f"(min(权益 {rc.MAX_MARGIN_EQUITY_RATIO:.0%}={_m_strong}, 单标的封顶 {round(_asset_cap, 2)})，执行层硬顶)\n"
+        f"- 单标的累计保证金上限(含金字塔加仓): {_asset_cap} USDT ({_asset_cap_note}，执行层已按同一 min() 硬夹)\n"
+        f"- 单笔最大可承受亏损: 以 1.0R 为基准，且不超过可用余额 {rc.RISK_PER_TRADE_EQUITY_RATIO:.0%}\n"
+        f"- 当日累计亏损熔断线: -{_daily_stop} USDT ({_daily_stop_note}，执行层已按同一 min() 硬夹)\n"
+        f"- 全系统同向持仓上限: {rc.MAX_SAME_DIRECTION_POSITIONS} 笔 (多/空各自封顶，执行层硬拦截)\n"
+        f"- 全系统并发持仓上限: "
+        + (f"{rc.MAX_CONCURRENT_POSITIONS_CAP} 笔 (执行层硬拦截)\n" if rc.MAX_CONCURRENT_POSITIONS_CAP > 0
+           else "未单独设限 (0=不额外收紧；实际受标的池容量与同向上限约束)\n")
+        + (
+            f"- 组合风险总预算(跨所合算): {rc.PORTFOLIO_RISK_BUDGET_USDT:.2f} USDT (执行层按总名义敞口强制)\n"
+            if rc.PORTFOLIO_RISK_BUDGET_USDT > 0 else
+            "- 组合风险总预算(跨所合算): 未设上限 (0=引擎不封顶，仅受单标的/同向/并发上限约束)\n"
         )
-        if _eq < 200.0:
-            risk_budget_text += (
-                "\n- ⚠️ 小资金账户提示: 可用余额偏小，按百分比推导的保证金可能低于部分永续合约的交易所最小下单名义价值"
-                "（如高单价币种 BTC 一张合约的名义价值就可能超过账户余额）。此时应当【减少同时持有的标的数量】、"
-                "优先选择最小名义价值与账户规模匹配的标的，或适度提高单笔保证金占比；"
-                "绝不允许通过压缩止损距离或降低盈亏比来迁就资金规模。"
-                "若某标的在当前余额下无法同时满足最小下单量、止损呼吸空间与 R:R≥2.0，该标的必须输出 WAIT 并说明资金不匹配。"
-            )
+        # 审计 P2-1：跨所同向敞口上限现已真执行（execution_router 发送前拒开），
+        # 这里必须同源披露，否则"提示词口径 == 代码口径"又多一处例外。
+        + (
+            f"- 跨所同向敞口上限: {rc.MAX_TOTAL_EXPOSURE_USDT:.2f} USDT (同一标同方向跨所合计名义额，含本单；超出执行层拒开)\n"
+            if rc.MAX_TOTAL_EXPOSURE_USDT > 0 else
+            "- 跨所同向敞口上限: 未设上限 (0=不限制；仍受单标的/同向/并发上限约束)\n"
+        )
+        + f"- 最长持仓时间: {rc.TIME_STOP_HOURS:g} 小时 (超时且横盘无突破将被时间止损离场；横盘判定带宽 ±{rc.TIME_STOP_ATR_BAND:.0%} ATR)\n"
+        f"- 单笔杠杆区间: {rc.MIN_LEVERAGE:g}x ~ {rc.MAX_LEVERAGE:g}x (在区间内按信号强度自主裁决；区间外执行层自动钳制)\n"
+        f"- 盈亏比 R:R 硬底线: {rc.MIN_RISK_REWARD_RATIO:.1f} (低于此值的报价执行层物理拒绝)\n"
+        # 审计 P3-4：宪法里的"目标 R:R ≥2.2/2.5"与"置信度 78%~88%"是硬编码，
+        # 与可配的硬底线/门禁冲突（稳健套件门禁 85 → 78~88 一带整片必拒）。
+        # 目标与标定带统一在此派生，宪法只指向本节。
+        f"- 目标盈亏比 R:R: ≥ {max(2.2, float(rc.MIN_RISK_REWARD_RATIO or 0.0)):.1f} "
+        f"(= max(2.2, 硬底线 {rc.MIN_RISK_REWARD_RATIO:.1f})；报价低于硬底线一律被拒)\n"
+        f"- 置信度标定带: {max(float(rc.MIN_ENTRY_CONFIDENCE or 0.0), 78.0):.0f}% ~ "
+        f"{max(float(rc.MIN_ENTRY_CONFIDENCE or 0.0), 78.0) + 8.0:.0f}% "
+        f"(下沿=执行层新开仓门禁 {rc.MIN_ENTRY_CONFIDENCE:.0f}%，低于下沿必被物理拦截)\n"
+        f"- 新开仓最低置信度门禁: {rc.MIN_ENTRY_CONFIDENCE:g}% (低于此值禁止新开仓)\n"
+        + (
+            "- 金字塔加仓: 已禁用 (最大加仓次数 0，在途持仓仅可 HOLD/UPDATE_SL/CLOSE_MARKET)\n"
+            if rc.MAX_SCALE_IN_COUNT <= 0 else
+            f"- 金字塔加仓门禁: 最多 {rc.MAX_SCALE_IN_COUNT} 次 · 底仓浮盈 ≥ {rc.MIN_SCALE_IN_PROFIT_RATIO:.1%} 且已保本 · 置信度 ≥ {rc.MIN_SCALE_IN_CONFIDENCE:g}%\n"
+        )
+        + (
+            f"- 分批止盈机制: 【已启用】(底仓浮盈达到 {rc.SCALE_OUT_TRIGGER_ATR:g}x ATR 时，执行层自动市价平仓 {rc.SCALE_OUT_RATIO:.0%} 锁定现金利润并提损保本；模型可让剩余仓位充分奔跑博取大波段)\n"
+            if rc.SCALE_OUT_ENABLED else
+            "- 分批止盈机制: 【已禁用】(全仓奔跑至目标止盈位或触发动态追踪止损)\n"
+        )
+        + f"- 止损后同标的冷静期: {rc.STOP_COOLDOWN_MINUTES} 分钟"
+    )
+    if _eq < 200.0:
+        text += (
+            "\n- ⚠️ 小资金账户提示: 可用余额偏小，按百分比推导的保证金可能低于部分永续合约的交易所最小下单名义价值"
+            "（如高单价币种 BTC 一张合约的名义价值就可能超过账户余额）。此时应当【减少同时持有的标的数量】、"
+            "优先选择最小名义价值与账户规模匹配的标的，或适度提高单笔保证金占比；"
+            "绝不允许通过压缩止损距离或降低盈亏比来迁就资金规模。"
+            "若某标的在当前余额下无法同时满足最小下单量、止损呼吸空间与 R:R≥2.0，该标的必须输出 WAIT 并说明资金不匹配。"
+        )
+    return text
 
-    prompt = f"""======================= 【当前决策时间戳与市场时效】 =======================
-【推演基准时间】: {now_bj_str}
-【当前账户可用资金】: {avail_balance_str}
-{risk_budget_text}
 
-======================= 【全网实时重大快讯与宏观情报】 =======================
-【宏观环境基调】: {macro_env}
-【最新核心资讯要闻】:
-{news_text}
+def construct_full_market_prompt(
+    packages: List[Dict[str, Any]],
+    pos_summary: str = "[MISSING_CONTEXT:account_positions]",
+    active_positions_detail: List[Dict[str, Any]] = None,
+    pending_orders_detail: List[Dict[str, Any]] = None,
+    current_time_str: str = "",
+    usdt_available: float = None,
+    runtime_context_out: Dict[str, Any] = None,
+    policy_snapshot: Dict[str, Any] = None,
+) -> str:
+    """把本轮全市场数据渲染成用户提示词。实现见 scripts/brain/prompt.py。
 
-======================= 【账户当前持仓与风险敞口全景】 =======================
-【账户持仓概况】: {pos_summary}
-【当前活动在途持仓明细】:
-{active_pos_text}
+    15 项依赖在**调用时**从门面全局取名 —— 其中风控常量必须与执行层同源
+    （`risk_constants` 改参后由门面重载刷新），文件路径与 `safe_float` 则是
+    既有测试缝。理由逐一列在 scripts/brain/prompt.py 的 docstring。
 
-======================= 【在途未成交限价挂单 (Pending Maker Orders)】 =======================
-【当前在途挂单列表】:
-{pending_orders_text}
-
-{memory_lessons}
-
-======================= 【全标的池原生行情、技术指标与筹码矩阵】 =======================
-{all_market_str}
-
-================================================================================
-【推演与决策任务】:
-你只能在 System Prompt 的 P0 硬约束内进行综合裁决。按“数据有效性 → 4H方向 → 1H三大数理基石 → 量能/OI/聪明钱 → 15M执行位置”的顺序逐项检查；任一硬条件失败或证据无法闭环时，开仓输出 WAIT：
-1. 【在途持仓管理 (科学持仓与动态风控)】：
-   - 逐一分析当前在途持仓：
-     • 若 1H 波段趋势完好且微积分动能平稳，坚决坚定持有 (HOLD)，给大波段充分呼吸空间；
-     • 若出现【1H 结构破位 / 动能加速度严重逆转 / 聪明钱反向出逃】等真实趋势逆转信号且置信度 ≥ 85%，果断输出 CLOSE_MARKET 提前斩仓止损，杜绝死等硬止损；
-     • 若底仓浮盈已超过 1.2x 1H ATR 且需锁定利润，输出 UPDATE_SL 并确保新止损与现价保留 0.7x 1H ATR 安全缓冲，严禁贴脸移动止损。
-2. 【在途限价挂单生命周期审查与裁决 (Pending Orders Management)】：
-   - 仔细审查上述在途未成交挂单：若挂单价格已大幅偏离最新盘口、或者行情动能/突发要闻已转变导致原挂单计划失效，必须在 pending_orders_management 中为该挂单输出 CANCEL 立即撤单指令，防止挂单成交在不利价格；若原计划仍然有效且价格合适，输出 KEEP 维持挂单。
-3. 【多空开仓与顺势浮盈加仓全权裁决 (Opening & Pyramiding)】：
-   - 【首发开仓】：自主判断未持仓品种是否具备确定性爆发机会，结合最新资讯、多周期形态与筹码，决定多空方向 (action: BUY_LONG / SELL_SHORT / WAIT)；
-   - 【顺势浮盈金字塔加仓申请】：已有多仓仅可输出同向 BUY_LONG，已有空仓仅可输出同向 SELL_SHORT；这只是加仓申请，执行层仍将复核底仓 ROI/保本、最多{MAX_SCALE_IN_COUNT}次、累计保证金≤【本周期风险预算】单标的上限、置信度≥{MIN_SCALE_IN_CONFIDENCE:g}%、加速度与延续/击穿概率门禁。任何不确定均输出 WAIT；
-   - 自主规划拟开仓/加仓保证金 (margin_usdt: 可用余额的 5%~{MAX_MARGIN_EQUITY_RATIO:.0%}，且不得超过系统上限) 与杠杆 (2~{MAX_LEVERAGE:g}x)；
-   - 自主规划 entry_price、take_profit_price 与 stop_loss_price；目标 R:R ≥ 2.5，且任何 R:R < {MIN_RISK_REWARD_RATIO:g} 的报价会被执行层拒绝。
-4. 必须输出严格 JSON，格式如下：
-{{
-  "macro_assessment": "30字内全市场宏观流动性与情绪总结",
-  "position_management": [
-    {{
-      "instId": "LINK-USDT-SWAP",
-      "action": "HOLD" | "CLOSE_MARKET" | "UPDATE_SL",
-      "suggested_sl_price": float (若调整止损填具体价格，否则0),
-      "confidence": 0~100,
-      "reason": "30字内持仓调整原因与当前动能分析"
-    }}
-  ],
-  "pending_orders_management": [
-    {{
-      "ordId": "3879092142614409217",
-      "instId": "LINK-USDT-SWAP",
-      "action": "KEEP" | "CANCEL",
-      "reason": "30字内撤单或维持挂单原因"
-    }}
-  ],
-  "decisions": {{
-    "BTC-USDT-SWAP": {{
-      "action": "BUY_LONG" | "SELL_SHORT" | "WAIT",
-      "confidence": 0~100,
-      "leverage": 3 (推荐杠杆2~5),
-      "margin_usdt": float (必须取自上方【本周期风险预算】的常规单笔区间；示例: 可用余额 80U → 2.4~9.6，可用余额 4000U → 120~480。严禁套用任何固定绝对金额),
-      "entry_price": float,
-      "take_profit_price": float,
-      "stop_loss_price": float,
-      "summary_reason": "30字内核心逻辑",
-      "market_structure": "4H/1H趋势与15M短线形态",
-      "calculus_dynamics": "必须引用1H具体 v/a/j/I、状态及方向解释；WAIT也需说明冲突或缺失",
-      "math_prob_rationale": "必须引用具体 E/A、延续或击穿估计概率、VaR/CVaR与肥尾风险",
-      "volume_and_oi": "量能/筹码流向简述"
-    }},
-    ... (依次包含全部标的)
-  }}
-}}
-"""
-    runtime_vars = {
-        "decision_timestamp": f"【推演基准时间】: {now_bj_str}",
-        "account_balance": f"【当前账户可用资金】: {avail_balance_str}",
-        "risk_budget": risk_budget_text,
-        "account_positions": f"【账户持仓概况】: {pos_summary}\n【当前活动在途持仓明细】:\n{active_pos_text}",
-        "pending_orders": f"【当前在途挂单列表】:\n{pending_orders_text}",
-        "news_intelligence": f"【宏观环境基调】: {macro_env}\n【最新核心资讯要闻】:\n{news_text}",
-        "trading_memory": memory_lessons.strip(),
-        "market_matrix": all_market_str,
-    }
-    _sys_ver = __version__
-    profile = active_profile()
-    policy_ver = (policy_snapshot or {}).get("policy_version") or os.getenv("R20_VERSION", f"v{_sys_ver}")
-    policy_hash = (policy_snapshot or {}).get("policy_hash") or ""
-    runtime_vars.update({
-        "timestamp": now_bj_str, "timezone": "Asia/Shanghai",
-        "active_instruments": ",".join(str(p.get("name") or p.get("instId") or "") for p in packages),
-        "strategy_version": policy_ver,
-        "policy_version": policy_ver,
-        "policy_hash": policy_hash,
-        "profile_name": profile.get("name", ""),
-    })
-    if runtime_context_out is not None:
-        runtime_context_out.update(runtime_vars)
-        if policy_snapshot:
-            runtime_context_out["policy_snapshot"] = policy_snapshot
-    return apply_module_layout(prompt, profile, "trading_user", f"{profile.get('name', '稳健')}交易用户提示词模板", context=runtime_vars)
-
-from r20_backend import analysis_capture
-
-def validate_and_filter_decision(p: Dict[str, Any], d_item: Dict[str, Any], active_inst_ids: set, active_position_sides: Dict[str, str]) -> tuple[str, str, float]:
+    注：不要把默认值写成同名形参（`safe_float=None` 之类）—— 那会让函数体里的
+    裸名解析到形参、静默关掉这些缝（同类教训见 scripts/brain/xvenue.py）。
     """
-    Fail-closed execution layer gatekeeper powered by pluggable interceptors.
-    1. Base pre-checks: data completeness & opposing position collision
-    2. Dynamic interceptor pipeline: runs all enabled Python interceptor plugins
+    return _construct_full_market_prompt_impl(
+        packages, pos_summary, active_positions_detail, pending_orders_detail,
+        current_time_str, usdt_available, runtime_context_out, policy_snapshot,
+        safe_float=safe_float,
+        sl_atr_mult_for=_sl_atr_mult_for,
+        xvenue_prompt_line=_xvenue_prompt_line,
+        build_risk_budget_text=build_risk_budget_text,
+        active_profile=active_profile,
+        apply_module_layout=apply_module_layout,
+        system_version=__version__,
+        ai_memory_md_file=AI_MEMORY_MD_FILE,
+        ai_memory_file=AI_MEMORY_FILE,
+        news_sentiment_file=NEWS_SENTIMENT_FILE,
+        max_leverage=MAX_LEVERAGE,
+        min_leverage=MIN_LEVERAGE,
+        max_scale_in_count=MAX_SCALE_IN_COUNT,
+        min_scale_in_confidence=MIN_SCALE_IN_CONFIDENCE,
+        max_margin_equity_ratio=MAX_MARGIN_EQUITY_RATIO,
+        _build_position_lines=_build_position_lines,
+        _build_pending_order_lines=_build_pending_order_lines,
+    )
+
+
+
+def validate_and_filter_decision(p: Dict[str, Any], d_item: Dict[str, Any],
+                                 active_inst_ids: set,
+                                 active_position_sides: Dict[str, str]) -> tuple[str, str, float]:
+    """单条决策校验。实现见 scripts/brain/decisions.py。
+
+    `safe_float` 在调用时注入（它定义在本门面，不是共享叶子函数）。
     """
-    context = {
-        "active_inst_ids": active_inst_ids,
-        "active_position_sides": active_position_sides,
-    }
-    try:
-        from r20_backend.interceptor_manager import run_interceptor_pipeline
-        return run_interceptor_pipeline(p, d_item, context)
-    except Exception as exc:
-        # Fail-closed fallback in case interceptor manager cannot be reached
-        inst_id = p.get("instId", "")
-        raw_action = str((d_item or {}).get("action", "WAIT")).upper()
-        if raw_action not in {"BUY_LONG", "SELL_SHORT", "WAIT"}:
-            raw_action = "WAIT"
-        entry = safe_float((d_item or {}).get("entry_price"))
-        take_profit = safe_float((d_item or {}).get("take_profit_price"))
-        stop_loss = safe_float((d_item or {}).get("stop_loss_price"))
-        rr = 0.0
-        if raw_action == "BUY_LONG" and entry > stop_loss > 0 and take_profit > entry:
-            rr = (take_profit - entry) / (entry - stop_loss)
-        elif raw_action == "SELL_SHORT" and stop_loss > entry > take_profit > 0:
-            rr = (entry - take_profit) / (stop_loss - entry)
-        return "WAIT", f"拦截插件管线调用异常: {exc}，安全降级为 WAIT", rr
+    return _validate_and_filter_decision_impl(
+        p, d_item, active_inst_ids, active_position_sides, safe_float=safe_float)
 
 
 def assemble_decision_cache(
@@ -890,112 +741,76 @@ def assemble_decision_cache(
     time_str: str,
     macro_summary: str,
     policy_snapshot: Optional[Dict[str, Any]] = None,
+    council_status: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Pure assembly of validated decisions into the standard cache contract, bound to policy snapshot."""
-    policy_snapshot = policy_snapshot or {}
-    p_ver = policy_snapshot.get("policy_version", f"{_get_system_version_tag()}@unknown")
-    p_hash = policy_snapshot.get("policy_hash", "unknown")
-    p_summary = policy_snapshot.get("summary", "")
+    """把已验证决策装配成标准缓存契约。实现见 scripts/brain/decisions.py。
 
-    standard_cache = {}
-    # Load dynamic asset multipliers from self-improvement review if present
-    asset_multipliers = {}
-    try:
-        mult_file = os.path.join(DATA_DIR, "asset_multipliers.json")
-        if os.path.isfile(mult_file):
-            with open(mult_file, "r", encoding="utf-8") as f:
-                mult_data = json.load(f)
-            asset_multipliers = mult_data.get("multipliers") or {}
-    except Exception:
-        pass
+    依赖一律在**调用时**从门面全局取名，以便既有测试缝继续生效：
+    - `patch.object(abt, "DATA_DIR", …)`（test_ai_health_sidecar）
+    - `patch.object(abt, "MAX_LEVERAGE"/"MIN_LEVERAGE", …)`（test_leverage_range_and_council
+      断言"模型给 3 被下限抬到 5"，夹取必须读到补丁值）
+    - `safe_float` / `_get_system_version_tag` 定义在本门面。
 
-    for p in packages:
-        inst_id = p["instId"]
-        analysis_capture.bind_decision(inst_id)
-        d_item = decisions_dict.get(inst_id, {})
-        if not isinstance(d_item, dict):
-            d_item = {}
-        analysis_capture.emit("decision.proposed", {"proposal": d_item, "market": p, "policy_snapshot": policy_snapshot}, "proposed" if d_item.get("action") in ("BUY_LONG", "SELL_SHORT") else "wait")
-        # Smooth field alias normalization (support both standard contract and council desk outputs)
-        entry = safe_float(d_item.get("entry_price") or d_item.get("limit_price"))
-        take_profit = safe_float(d_item.get("take_profit_price") or d_item.get("take_profit"))
-        stop_loss = safe_float(d_item.get("stop_loss_price") or d_item.get("stop_loss"))
-        confidence = max(0.0, min(100.0, safe_float(d_item.get("confidence"))))
-        ai_leverage = int(max(2, min(5, round(safe_float(d_item.get("leverage", 3))))))
-        raw_margin = safe_float(d_item.get("margin_usdt") or d_item.get("margin_usd", 0.0))
+    注：不要把默认值写成同名形参 —— 那会让函数体里的裸名解析到形参、
+    静默关掉补丁缝（详见 scripts/brain/xvenue.py 同名教训）。
+    """
+    return _assemble_decision_cache_impl(
+        packages, decisions_dict, active_inst_ids, active_position_sides,
+        time_str, macro_summary,
+        policy_snapshot=policy_snapshot, council_status=council_status,
+        data_dir=DATA_DIR,
+        max_leverage=MAX_LEVERAGE,
+        min_leverage=MIN_LEVERAGE,
+        safe_float=safe_float,
+        get_system_version_tag=_get_system_version_tag,
+        validate=lambda p_, d_, ids_, sides_: _validate_and_filter_decision_impl(
+            p_, d_, ids_, sides_, safe_float=safe_float),
+    )
 
-        # Dynamically apply self-improvement asset multiplier (e.g. BTC 1.2x, DOGE 0.8x)
-        sym_key = inst_id.split("-")[0] if "-" in inst_id else inst_id
-        mult = float(asset_multipliers.get(sym_key, asset_multipliers.get(inst_id, 1.0)))
-        mult = max(0.5, min(1.5, mult))
-        ai_margin = round(raw_margin * mult, 2) if raw_margin > 0 else 0.0
 
-        # Ensure normalized keys exist for downstream interceptors
-        normalized_d_item = dict(d_item)
-        normalized_d_item["entry_price"] = entry
-        normalized_d_item["take_profit_price"] = take_profit
-        normalized_d_item["stop_loss_price"] = stop_loss
-        normalized_d_item["margin_usdt"] = ai_margin
-        normalized_d_item["leverage"] = ai_leverage
-
-        final_action, rejection_reason, rr = validate_and_filter_decision(
-            p, normalized_d_item, active_inst_ids, active_position_sides
-        )
-
-        analysis_capture.emit("decision.filtered", {"original": d_item, "normalized": normalized_d_item, "action": final_action, "reason": rejection_reason, "rr": rr}, "passed" if final_action != "WAIT" else "rejected" if rejection_reason else "wait")
-        standard_cache[inst_id] = {
-            "analysis": analysis_capture.decision_meta(inst_id),
-            "instId": inst_id,
-            "name": p["name"],
-            "timestamp": int(time.time()),
-            "time_str": time_str,
-            "policy_version": p_ver,
-            "policy_hash": p_hash,
-            "policy_snapshot": {
-                "policy_version": p_ver,
-                "policy_hash": p_hash,
-                "summary": p_summary,
-            },
-            "macro_assessment": macro_summary,
-            "thought_process": {
-                "market_structure": d_item.get("market_structure", "多周期结构中性"),
-                "calculus_dynamics": d_item.get("calculus_dynamics", "模型未提供具体微积分证据"),
-                "math_prob_rationale": d_item.get("math_prob_rationale", "模型未提供具体定积分与概率证据"),
-                "volume_and_oi": d_item.get("volume_and_oi", f"OI: {p.get('oiUsd', '--')}, Taker: {p.get('takerNetUsd', '--')}"),
-                "risk_reward_evaluation": "目标 R:R ≥ 2.5；执行底线 2.0"
-            },
-            "smart_money": p.get("smart_money", {}),
-            "adx_1h": p.get("adx_1h", "--"),
-            "decision": {
-                "action": final_action,
-                "confidence": confidence,
-                "leverage": ai_leverage,
-                "margin_usdt": ai_margin,
-                "entry_price": entry,
-                "take_profit_price": take_profit,
-                "stop_loss_price": stop_loss,
-                "risk_reward_ratio": f"{rr:.2f} : 1" if rr > 0 else "--",
-                "summary_reason": rejection_reason or str(d_item.get("summary_reason", "全市场矩阵综合评估中"))[:120]
-            },
-            "data_quality": p.get("data_quality", "invalid"),
-            "raw_ticker": {
-                "last": p.get("price"),
-                "bidPx": p.get("bidPx"),
-                "askPx": p.get("askPx"),
-                "chg24h": p.get("chg24h"),
-                "vol24h": p.get("vol24h", 0.0)
-            },
-            "raw_funding_rate": f"{p['fundingRate']}%" if p.get('fundingRate') else "--",
-            "raw_oi": p.get('oiUsd') or "--",
-            "raw_taker_vol": p.get('takerNetUsd') or "--",
-            "raw_ls_ratio": str(p.get('lsRatio')) if p.get('lsRatio') is not None else "--"
-        }
-
-    return standard_cache
 
 
 @single_brain_cycle
-@analysis_capture.cycle('trading_brain')
+@analysis_capture.cycle("trading_brain")
+def fetch_pending_orders_list() -> Optional[List[Dict[str, Any]]]:
+    """拉取交易所当前全部 SWAP 挂单（V5 直签 REST，US-003）。
+
+    行为契约（对齐历史 CLI 挂单查询）：返回列表=成功；查询失败/未配置
+    凭证（OKXNotConfigured）→ 告警并返回 None。fail-closed：绝不回退命令行子进程。
+    """
+    try:
+        fetched = okx_rest.pending_orders()
+    except Exception as e:
+        print(f"[AI Brain Batch] Pending orders fetch warning: {e}")
+        return None
+    return fetched if isinstance(fetched, list) else None
+
+
+def execute_brain_pending_cancels(pending_mgmt_list: List[Any]) -> List[Dict[str, Any]]:
+    """执行 AI 决策的 CANCEL 清单（V5 直签 REST，US-003）。
+
+    仅当撤单真实成功才打印 🛑（旧 CLI 版失败也无条件打印成功，属假告警，已修正）；
+    单笔失败打印 ⚠️ 并继续处理其余项，返回执行日志供测试与审计。
+    """
+    log: List[Dict[str, Any]] = []
+    for p_order in pending_mgmt_list or []:
+        if not isinstance(p_order, dict):
+            continue
+        p_act = str(p_order.get("action", "")).upper()
+        p_ord_id = str(p_order.get("ordId", ""))
+        p_inst_id = str(p_order.get("instId", ""))
+        p_reason = str(p_order.get("reason", "模型指示撤销该挂单"))
+        if p_act == "CANCEL" and p_ord_id and p_inst_id:
+            try:
+                okx_rest.cancel_order(p_inst_id, p_ord_id)
+                print(f"[AI Brain Batch] 🛑 AI自主撤回失效/过时限价单: {p_inst_id} (ordId={p_ord_id}, 原因={p_reason})")
+                log.append({"ok": True, "instId": p_inst_id, "ordId": p_ord_id, "reason": p_reason})
+            except Exception as exc:
+                print(f"[AI Brain Batch] ⚠️ 撤单失败（直签 REST fail-closed，不做假成功，待下一周期重试）: {p_inst_id} ordId={p_ord_id}: {exc}")
+                log.append({"ok": False, "instId": p_inst_id, "ordId": p_ord_id, "reason": p_reason, "error": str(exc)})
+    return log
+
+
 def execute_batch_ai_brain_cycle(
     pos_summary: str = "[MISSING_CONTEXT:account_positions]",
     active_positions_detail: List[Dict[str, Any]] = None,
@@ -1006,6 +821,7 @@ def execute_batch_ai_brain_cycle(
     base_url, api_key = get_cpa_client_config()
     if not api_key:
         print("[AI Brain Batch] Error: CPA API Key not found")
+        _record_cycle_health("failed", "CPA API Key 未配置")
         return None
 
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
@@ -1013,351 +829,142 @@ def execute_batch_ai_brain_cycle(
     time_str = now_bj.strftime("%Y-%m-%d %H:%M:%S")
 
     # Capture immutable Policy Snapshot at start of decision cycle
-    if policy_snapshot is None:
-        try:
-            from policy_snapshot import generate_policy_snapshot
-            policy_snapshot = generate_policy_snapshot()
-        except Exception:
-            try:
-                from r20_backend.policy_snapshot import generate_policy_snapshot
-                policy_snapshot = generate_policy_snapshot()
-            except Exception as exc:
-                print(f"[AI Brain Batch] Policy snapshot warning: {exc}")
-                policy_snapshot = {
-                    "policy_version": f"{_get_system_version_tag()}@unknown",
-                    "policy_hash": "unknown",
-                    "summary": "policy_snapshot_fallback",
-                    "units": {},
-                }
-    policy_version = policy_snapshot.get("policy_version", f"{_get_system_version_tag()}@unknown")
-    policy_hash = policy_snapshot.get("policy_hash", "unknown")
-    policy_summary = policy_snapshot.get("summary", "")
+    (policy_hash, policy_snapshot, policy_summary, policy_version) = capture_policy_snapshot(
+        _get_system_version_tag=_get_system_version_tag,
+        policy_snapshot=policy_snapshot    )
     print(f"[AI Brain Batch] 📌 当前决策策略快照: {policy_version} ({policy_hash})")
 
     print(f"[AI Brain Batch] 并行获取 {len(TARGET_INSTRUMENTS)} 币种原生行情、技术指标与顶级聪明钱数据...")
     with ThreadPoolExecutor(max_workers=8) as executor:
         packages = list(executor.map(fetch_single_instrument_package, TARGET_INSTRUMENTS))
 
-    # Fetch OKX Smart Money Signals
-    try:
-        instruments_ccy = ",".join([p["name"] for p in packages])
-        sm_cmd = f"okx smartmoney signal-overview-by-filter --instCcyList {instruments_ccy} --json 2>/dev/null"
-        sm_res = subprocess.run(sm_cmd, shell=True, capture_output=True, text=True, timeout=8)
-        if sm_res.stdout:
-            sm_data = json.loads(sm_res.stdout).get("data", [])
-            sm_dict = {item.get("ccy"): item for item in sm_data if item.get("ccy")}
-            for p in packages:
-                ccy = p["name"]
-                if ccy in sm_dict:
-                    item = sm_dict[ccy]
-                    ls = item.get("longShortRatio", {})
-                    notional = item.get("notional", {})
-                    win = item.get("winRate", {})
-                    w_long = round(float(ls.get("weightedLongRatio", 0.5)) * 100, 1)
-                    net_usdt = float(notional.get("netNotionalUsdt", 0) or 0)
-                    net_flow_str = f"{round(net_usdt / 1e4, 1)}万 U" if abs(net_usdt) >= 1e4 else f"{round(net_usdt, 0)} U"
-                    long_cost = notional.get("smartMoneyLongAvgEntry") or "--"
-                    short_cost = notional.get("smartMoneyShortAvgEntry") or "--"
-                    top_win = f"多胜率{round(float(win.get('avgLongWinRate', 0))*100, 1)}%" if win.get('avgLongWinRate') else "--"
+    # 跨所比对（币安/Gate 只读备源，纯证据增益，失败静默跳过不阻塞决策）
+    fetch_cross_venue_matrix(packages)
 
-                    p["smart_money"] = {
-                        "weighted_long_pct": w_long,
-                        "net_flow_usdt": net_flow_str,
-                        "avg_long_entry": str(long_cost)[:10],
-                        "avg_short_entry": str(short_cost)[:10],
-                        "top_win_rate": top_win
-                    }
-    except Exception as e:
-        print(f"[AI Brain Batch] SmartMoney fetch warning: {e}")
+    # 顶级聪明钱与大户持仓数据接入（Binance 公开大户指标 + OKX Rubik 备选双源容灾）
+    try:
+        try:
+            from scripts.factors.smart_money import fetch_smart_money_for_symbol
+        except ImportError:
+            from factors.smart_money import fetch_smart_money_for_symbol
+        for pkg in packages:
+            ccy = pkg.get("ccy") or pkg.get("name") or ""
+            if not ccy and "-" in pkg.get("instId", ""):
+                ccy = pkg["instId"].split("-")[0]
+            sm_data = fetch_smart_money_for_symbol(ccy, price=float(pkg.get("price") or 0.0))
+            if sm_data:
+                if pkg.get("lsRatio") == "N/A" and sm_data.get("lsRatio"):
+                    pkg["lsRatio"] = sm_data["lsRatio"]
+                if pkg.get("takerNetUsd") == "N/A" and sm_data.get("takerNetUsd"):
+                    pkg["takerNetUsd"] = sm_data["takerNetUsd"]
+                pkg["smart_money"] = {
+                    "available": True,
+                    "weighted_long_pct": sm_data.get("weighted_long_pct", "--"),
+                    "net_flow_usdt": sm_data.get("takerNetUsd", "--"),
+                    "avg_long_entry": "--",
+                    "avg_short_entry": "--",
+                    "top_win_rate": "--",
+                }
+    except Exception as exc:
+        print(f"[AI Brain Batch] 聪明钱数据注入降级: {exc}")
 
     positions_context = active_positions_detail
     active_positions_detail = active_positions_detail or []
+
+    # 审计 P2-12：跨所 id 归一（模块级 canonical_position_inst_id，含单元测试）
+    def _canonical_inst_id(raw: Any) -> str:
+        return canonical_position_inst_id(raw)
+
     active_inst_ids = {
-        str(p.get("instId", "")) for p in active_positions_detail if p.get("instId")
+        _canonical_inst_id(p.get("instId")) for p in active_positions_detail if p.get("instId")
     }
+    active_inst_ids.discard("")
     active_position_sides = {
-        str(p.get("instId", "")): str(p.get("side", p.get("posSide", ""))).lower()
+        _canonical_inst_id(p.get("instId")): str(p.get("side", p.get("posSide", ""))).lower()
         for p in active_positions_detail if p.get("instId")
     }
-    package_by_id = {p["instId"]: p for p in packages}
+    active_position_sides.pop("", None)
+    # 审计D(2026-09-13)：package_by_id 死构造清除（全函数无消费）
 
     # Automatically Update & Persist Comprehensive Factor Library Snapshot
-    try:
-        sys.path.append(os.path.join(WORKSPACE_DIR, "scripts"))
-        import factor_library
-        factor_library.update_factor_library()
-    except Exception as e:
-        print(f"[AI Brain Batch] Factor Library update warning: {e}")
+    update_factor_library_snapshot(
+        WORKSPACE_DIR=WORKSPACE_DIR,
+        os=os,
+        sys=sys    )
 
-    # Fetch live pending limit orders from exchange
-    pending_orders_list = None
-    try:
-        ord_cmd = okx_private_command("okx swap orders --json 2>/dev/null")
-        ord_res = subprocess.run(ord_cmd, shell=True, capture_output=True, text=True, timeout=8)
-        if ord_res.returncode == 0 and ord_res.stdout:
-            pending_orders_list = json.loads(ord_res.stdout)
-            if not isinstance(pending_orders_list, list):
-                pending_orders_list = None
-    except Exception as e:
-        print(f"[AI Brain Batch] Pending orders fetch warning: {e}")
+    # Fetch live pending limit orders from exchange（V5 直签 REST，行为契约见 fetch_pending_orders_list）
+    pending_orders_list = fetch_pending_orders_list()
 
-    try:
-        calculus_snapshot = {
-            "timestamp": time_str,
-            "engine": "causal-calculus-v1",
-            "instruments": [
-                {"name": p.get("name"), "instId": p.get("instId"), "calculus": p.get("calculus", {})}
-                for p in packages
-            ],
-        }
-        tmp_calc = CALCULUS_SNAPSHOT_FILE + ".tmp"
-        with open(tmp_calc, "w", encoding="utf-8") as f:
-            json.dump(calculus_snapshot, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_calc, CALCULUS_SNAPSHOT_FILE)
-    except Exception as exc:
-        print(f"[AI Brain] Calculus snapshot warning: {exc}")
+    write_calculus_snapshot(
+        CALCULUS_SNAPSHOT_FILE=CALCULUS_SNAPSHOT_FILE,
+        json=json,
+        os=os,
+        packages=packages,
+        time_str=time_str    )
 
     runtime_context = {}
     prompt = construct_full_market_prompt(packages, pos_summary, positions_context, pending_orders_detail=pending_orders_list, current_time_str=time_str, usdt_available=usdt_available, runtime_context_out=runtime_context, policy_snapshot=policy_snapshot)
 
     profile = active_profile()
-    effective_system_prompt = apply_module_layout(
-        get_effective_system_prompt(), profile, "trading_system", f"{profile.get('name', '稳健')}交易系统提示词模板", context=runtime_context
-    )
+    # 审计 P1-3：覆盖层由 get_effective_system_prompt 在布局**之后**追加（此前被布局丢弃）
+    effective_system_prompt = get_effective_system_prompt(profile=profile, context=runtime_context)
 
     analysis_capture.emit("prompt.rendered", {"profile": profile, "variables": runtime_context, "system": effective_system_prompt, "user": prompt, "packages": packages, "positions": positions_context, "pending_orders": pending_orders_list})
 
     # Save Realtime Prompt Snapshot for Web Transparent Inspection
-    try:
-        tmp_prompt = AI_LAST_PROMPT_FILE + ".tmp"
-        with open(tmp_prompt, "w", encoding="utf-8") as f:
-            f.write(f"【SYSTEM PROMPT】:\n{effective_system_prompt.strip()}\n\n{'='*70}\n【USER PROMPT ({time_str})】：\n{prompt.strip()}")
-        os.replace(tmp_prompt, AI_LAST_PROMPT_FILE)
-    except Exception:
-        pass
+    write_prompt_snapshot(
+        AI_LAST_PROMPT_FILE=AI_LAST_PROMPT_FILE,
+        _build_effective_prompt_text=_build_effective_prompt_text,
+        effective_system_prompt=effective_system_prompt,
+        os=os,
+        prompt=prompt,
+        time_str=time_str    )
 
-    model_name = os.environ.get("LLM_MODEL") or ""
-    effort = os.environ.get("LLM_REASONING_EFFORT") or "high"
-    api_format = "openai_chat"
-    thinking_timeout = float(os.environ.get("LLM_THINKING_TIMEOUT", os.environ.get("LLM_TIMEOUT_SECONDS", 120.0)))
-    try:
-        from r20_backend.llm_manager import get_active_llm_runtime, execute_llm_request
-        active_llm = get_active_llm_runtime()
-        model_name = os.environ.get("LLM_MODEL") or active_llm.get("model") or model_name
-        effort = os.environ.get("LLM_REASONING_EFFORT") or active_llm.get("reasoning_effort") or effort
-        api_format = active_llm.get("api_format", "openai_chat")
-        base_url = active_llm.get("base_url") or base_url
-        api_key = active_llm.get("api_key") or api_key
-        thinking_timeout = float(active_llm.get("thinking_timeout") or thinking_timeout)
-    except Exception:
-        execute_llm_request = None
+    (api_format, api_key, base_url, effort, execute_llm_request, model_name, thinking_timeout) = resolve_llm_runtime(
+        api_key=api_key,
+        base_url=base_url,
+        os=os    )
 
     telemetry = ModelCallTelemetry(
         "trading_brain", model_name, str(effort), effective_system_prompt, prompt
     )
-    try:
-        t0 = time.time()
-        raw_res = None
-        brain_output = None
-        content = ""
-
-        # Transparent check: is Multi-Agent Council enabled?
-        council_enabled = False
-        try:
-            from r20_backend.council_manager import load_council_config, execute_council_debate
-            c_cfg = load_council_config()
-            council_enabled = bool(c_cfg.get("enabled"))
-        except Exception:
-            council_enabled = False
-
-        if council_enabled:
-            print(f"[AI Brain Council] 🏛️ 多模型委员会已开启，正在启动各专家参谋现场辩论与首席仲裁...")
-            try:
-                brain_output, council_transcript = execute_council_debate(
-                    market_prompt=prompt,
-                    original_system_prompt=effective_system_prompt,
-                    timeout=float(c_cfg.get("timeout_seconds", 60.0)),
-                )
-                print(f"[AI Brain Council] ✅ 委员会辩论与终审完成，耗时: {council_transcript.get('total_duration_ms', 0)}ms")
-            except Exception as e:
-                print(f"[AI Brain Council] ⚠️ 委员会决策超时或异常: {e}，自动降级为单模型极速决策！")
-                brain_output = None
-
-        if brain_output is None:
-            print(f"[AI Brain Batch] 🚀 正在发起单次全市场大模型宏观决策推演 ({model_name} / {api_format} / 思考上限 {thinking_timeout:.0f}s)...")
-            if execute_llm_request:
-                content, _, usage_dict, _ = execute_llm_request(
-                    messages=[
-                        {"role": "system", "content": effective_system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=model_name,
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_format=api_format,
-                    reasoning_effort=effort,
-                    temperature=0.2,
-                    response_format={"type": "json_object"},
-                    timeout=thinking_timeout,
-                )
-                raw_res = {"usage": usage_dict} if isinstance(usage_dict, dict) else {}
-            else:
-                payload = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": effective_system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.2,
-                    "response_format": {"type": "json_object"}
-                }
-                if effort not in ("none", "auto"):
-                    payload["reasoning_effort"] = effort
-                req = urllib.request.Request(
-                    f"{base_url}/chat/completions",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-                )
-                with analysis_capture.llm_request(req, thinking_timeout, urllib.request.urlopen, legacy_fallback=True) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                    content = res["choices"][0]["message"]["content"].strip()
-                    raw_res = res
-                analysis_capture.emit("llm.response", {"response": res}, "received")
-
-            if content.startswith("```json"): content = content[7:]
-            if content.startswith("```"): content = content[3:]
-            if content.endswith("```"): content = content[:-3]
-
-            brain_output = json.loads(content.strip())
-            if not isinstance(brain_output, dict):
-                raise ValueError("LLM response root must be an object")
-        decisions_dict = brain_output.get("decisions", {})
-        pos_mgmt_list = brain_output.get("position_management", [])
-        macro_summary = str(brain_output.get("macro_assessment", "宏观中性震荡"))[:120]
-        if not isinstance(decisions_dict, dict):
-            decisions_dict = {}
-        if not isinstance(pos_mgmt_list, list):
-            pos_mgmt_list = []
-
-        validated_pos_mgmt = []
-        seen_positions = set()
-        for item in pos_mgmt_list:
-            if not isinstance(item, dict):
-                continue
-            inst_id = str(item.get("instId", ""))
-            if inst_id not in active_inst_ids or inst_id in seen_positions:
-                continue
-            seen_positions.add(inst_id)
-            action = str(item.get("action", "HOLD")).upper()
-            if action not in {"HOLD", "CLOSE_MARKET", "UPDATE_SL"}:
-                action = "HOLD"
-            confidence = max(0.0, min(100.0, safe_float(item.get("confidence"))))
-            suggested_sl = safe_float(item.get("suggested_sl_price"))
-            if action != "UPDATE_SL":
-                suggested_sl = 0.0
-            validated_pos_mgmt.append({
-                "instId": inst_id,
-                "action": action,
-                "suggested_sl_price": suggested_sl,
-                "confidence": confidence,
-                "reason": str(item.get("reason", "模型未提供持仓理由"))[:120]
-            })
-
-        for inst_id in sorted(active_inst_ids - seen_positions):
-            validated_pos_mgmt.append({
-                "instId": inst_id,
-                "action": "HOLD",
-                "suggested_sl_price": 0.0,
-                "confidence": 0.0,
-                "reason": "模型遗漏该持仓，安全降级为 HOLD"
-            })
-        pos_mgmt_list = validated_pos_mgmt
-
-        # Execute Pending Orders Cancellation if AI Brain decides CANCEL
-        pending_mgmt_list = brain_output.get("pending_orders_management", [])
-        if isinstance(pending_mgmt_list, list):
-            for p_order in pending_mgmt_list:
-                if not isinstance(p_order, dict):
-                    continue
-                p_act = str(p_order.get("action", "")).upper()
-                p_ord_id = str(p_order.get("ordId", ""))
-                p_inst_id = str(p_order.get("instId", ""))
-                p_reason = str(p_order.get("reason", "模型指示撤销该挂单"))
-                if p_act == "CANCEL" and p_ord_id and p_inst_id:
-                    cxl_cmd = okx_private_command(f"okx swap cancel {p_inst_id} --ordId {p_ord_id} --json")
-                    cxl_res = subprocess.run(cxl_cmd, shell=True, capture_output=True, text=True, timeout=10)
-                    print(f"[AI Brain Batch] 🛑 AI自主撤回失效/过时限价单: {p_inst_id} (ordId={p_ord_id}, 原因={p_reason})")
-
-        standard_cache = assemble_decision_cache(
-            packages=packages,
-            decisions_dict=decisions_dict,
-            active_inst_ids=active_inst_ids,
-            active_position_sides=active_position_sides,
-            time_str=time_str,
-            macro_summary=macro_summary,
-            policy_snapshot=policy_snapshot,
-        )
-
-        atomic_write_json(AI_DECISION_CACHE_FILE, standard_cache)
-        atomic_write_json(AI_POSITION_MANAGEMENT_FILE, {
-            "timestamp": int(time.time()),
-            "time_str": time_str,
-            "policy_version": policy_version,
-            "policy_hash": policy_hash,
-            "instructions": pos_mgmt_list
-        })
-
-        # Record durable history for Web Audit
-        full_prompt_text = f"【SYSTEM PROMPT ({policy_version})】：\n{effective_system_prompt.strip()}\n\n{'='*70}\n【USER PROMPT ({time_str})】：\n{prompt.strip()}"
-        history_record = {
-            "time": time_str,
-            "policy_version": policy_version,
-            "policy_hash": policy_hash,
-            "policy_snapshot": policy_snapshot,
-            "policy_snapshot_summary": policy_summary,
-            "macro_assessment": macro_summary,
-            "ai_last_prompt": full_prompt_text,
-            "position_management": pos_mgmt_list,
-            "council_transcript": brain_output.get("council_transcript") if isinstance(brain_output, dict) else None,
-            "top_opportunities": [
-                {
-                    "inst": p["name"],
-                    "action": standard_cache[p["instId"]]["decision"]["action"],
-                    "confidence": standard_cache[p["instId"]]["decision"]["confidence"],
-                    "leverage": standard_cache[p["instId"]]["decision"].get("leverage", 3),
-                    "margin_usdt": standard_cache[p["instId"]]["decision"].get("margin_usdt", 0.0),
-                    "risk_reward_ratio": standard_cache[p["instId"]]["decision"]["risk_reward_ratio"],
-                    "data_quality": standard_cache[p["instId"]]["data_quality"],
-                    "policy_version": policy_version,
-                    "reason": standard_cache[p["instId"]]["decision"]["summary_reason"]
-                }
-                for p in packages
-            ]
-        }
-
-        analysis_capture.emit("brain.result", history_record, "completed")
-        history_list = []
-        if os.path.exists(AI_DECISION_HISTORY_FILE):
-            try:
-                with open(AI_DECISION_HISTORY_FILE, "r", encoding="utf-8") as f:
-                    history_list = json.load(f)
-            except Exception:
-                pass
-
-        history_list.insert(0, history_record)
-        history_list = history_list[:50] # Keep recent 50 rounds
-
-        atomic_write_json(AI_DECISION_HISTORY_FILE, history_list)
-
-        latency = round(time.time() - t0, 2)
-        telemetry.finish("success", raw_res, output_chars=len(content))
-        print(f"[AI Brain Batch] ✅ 全标的池({len(packages)} 币种)全景决策完成 (耗时 {latency}s, 宏观基调: {macro_summary})")
-        return standard_cache
-
-    except Exception as e:
-        telemetry.finish("failed", error=e)
-        print(f"[AI Brain Batch] Error in batch inference: {e}")
-        return None
+    return dispatch_llm_and_persist_decisions(
+        AI_DECISION_CACHE_FILE=AI_DECISION_CACHE_FILE,
+        AI_DECISION_HISTORY_FILE=AI_DECISION_HISTORY_FILE,
+        AI_POSITION_MANAGEMENT_FILE=AI_POSITION_MANAGEMENT_FILE,
+        Any=Any,
+        Dict=Dict,
+        _build_effective_prompt_text=_build_effective_prompt_text,
+        _build_history_record=_build_history_record,
+        _normalize_position_management=_normalize_position_management,
+        _record_cycle_health=_record_cycle_health,
+        active_inst_ids=active_inst_ids,
+        active_position_sides=active_position_sides,
+        api_format=api_format,
+        api_key=api_key,
+        assemble_decision_cache=assemble_decision_cache,
+        atomic_write_json=atomic_write_json,
+        base_url=base_url,
+        effective_system_prompt=effective_system_prompt,
+        effort=effort,
+        execute_brain_pending_cancels=execute_brain_pending_cancels,
+        execute_llm_request=execute_llm_request,
+        json=json,
+        model_name=model_name,
+        os=os,
+        packages=packages,
+        policy_hash=policy_hash,
+        policy_snapshot=policy_snapshot,
+        policy_summary=policy_summary,
+        policy_version=policy_version,
+        prompt=prompt,
+        runtime_context=runtime_context,
+        safe_float=safe_float,
+        telemetry=telemetry,
+        thinking_timeout=thinking_timeout,
+        time=time,
+        time_str=time_str,
+        urllib=urllib    )
 
 def get_latest_ai_decision(inst_id: str, max_age_seconds: int = DECISION_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
     """Read a validated decision only while its cache timestamp is fresh."""

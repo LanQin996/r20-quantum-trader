@@ -20,6 +20,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from backup_upload import (
+    calculate_sha256 as _up_calculate_sha256,
+    upload_baidu as _up_upload_baidu,
+    upload_baidu_oauth as _up_upload_baidu_oauth,
+    upload_oss as _up_upload_oss,
+    upload_s3 as _up_upload_s3,
+    upload_webdav as _up_upload_webdav,
+    _credentials as _up_credentials,
+    _multipart_upload as _up_multipart_upload,
+    _urlencoded_json as _up_urlencoded_json,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 BACKUPS = ROOT / "backups"
 LOCAL_DIR = BACKUPS / "local"
@@ -28,14 +40,19 @@ MANIFEST_DIR = BACKUPS / "manifests"
 BJ_TZ = timezone(timedelta(hours=8))
 MAGIC = b"R20GCM2\x00"
 MANDATORY_EXCLUDES = (
-    ".git/**", ".env", ".okx/**", ".bypy/**", "backups/**", "logs/**",
-    "data/r20_admin.db*", "data/*.enc", "data/.*_key", "data/credentials/**",
+    ".git/**", ".env", ".okx/**", ".bypy/**", "backups/**", "*/backups/**", "logs/**",
+    "data/r20_admin.db*", "data/admin_auth.db*", "data/*.enc", "data/.*_key", "data/credentials/**",
+    # 审计修复A3(2026-09-13)：凭证的第二落盘——LLM 明文键嵌在业务 JSON 里，
+    # 旧名单（*.enc/.*_key 等文件名模式）挡不住。中期方案：键迁 secrets 后解禁。
+    "data/llm_models.json", "data/llm_providers.json",
     "data/*.db-wal", "data/*.db-shm", "**/__pycache__/**", "*.pyc",
 )
 SCOPE_PATHS = {
     "data": ("data",),
     "scripts": ("scripts",),
-    "dashboard": ("dashboard",),
+    # 第 143 刀：dashboard/ 已并入 r20_backend/。范围名**保持不变**（任务配置里存的就是这个
+    # 字符串，改名即接口破坏），只把路径指向新位置——否则只勾选该范围的任务会静默备份 0 文件。
+    "dashboard": ("r20_backend/dashboard_cache.py", "r20_backend/templates", "r20_backend/static"),
     "r20_backend": ("r20_backend",),
     "r20_gateway": ("r20_gateway",),
     "tests": ("tests",),
@@ -53,7 +70,10 @@ def clean_stale_staging(max_age_seconds: int = 3600) -> int:
     now_ts = time.time()
     for item in staging.glob("r20_backup_*"):
         try:
-            if item.is_file() and ((now_ts - item.stat().st_mtime > max_age_seconds) or item.stat().st_size == 0):
+            # 审计③(2026-09-13)：旧条件 `size==0 或 过期` 会把并发另一个备份任务
+            # 「刚 mkstemp、还在写」的在途归档当垃圾 unlink。只按年龄清理，
+            # 空文件过期后自然被回收，误删窗口关闭。
+            if item.is_file() and (now_ts - item.stat().st_mtime > max_age_seconds):
                 item.unlink(missing_ok=True)
                 cleaned += 1
         except OSError:
@@ -87,7 +107,12 @@ def retain_local_archive(source: Path, retention: int, destination_dir: Path | N
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / source.name
     shutil.copy2(source, destination)
-    prune((p for p in destination_dir.glob("r20_backup_*") if p.is_file()), retention)
+    # 审计③(2026-09-13)：prune 必须按 job 隔离——旧实现对整个目录的 r20_backup_*
+    # 排序截断，任务 B（retention=1）一跑就把任务 A 刚生成的最新归档裁掉，
+    # manifest 还报 success（灾备覆盖静默塌陷）。归档名 r20_backup_{safe_id}_{日期}_{时间}，
+    # 取前三段作本 job 专属前缀。
+    _prefix = "_".join(source.name.split("_")[:3])
+    prune((p for p in destination_dir.glob(f"{_prefix}_*") if p.is_file()), retention)
     return destination
 
 
@@ -131,13 +156,13 @@ def sqlite_hot_backups(timestamp: str, retention: int, destination_dir: Path | N
 
 
 def calculate_sha256(path: Path) -> str:
-    if not path.exists() or not path.is_file():
-        raise RuntimeError(f"文件不存在，无法计算 SHA256: {path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """薄壳：转调 `scripts/backup_upload.py`（结构优化阶段 4·B3 第五十二刀）。
+
+    ⚠️ 本名字**必须**留在门面：`patch.object(backup_runtime, "calculate_sha256")`
+    是既有接缝（`tests/core/test_open_source_control.py`），且门面内
+    `verify_archive` / `run_backup_job` 按全局名调用它。
+    """
+    return _up_calculate_sha256(path)
 
 
 def _excluded(relative: str, patterns: list[str]) -> bool:
@@ -291,203 +316,65 @@ def verify_archive(path: Path, expected_sha256: str = "", key_env: str = "") -> 
             temp.unlink(missing_ok=True)
 
 
-def upload_baidu(source: Path, remote_path: str, retries: int) -> dict[str, Any]:
-    try:
-        import bypy
-    except ImportError:
-        return {"success": False, "attempts": 1, "destination": remote_path, "error": "系统未安装 bypy 模块"}
-    remote = "/".join(part for part in Path(remote_path).parts if part not in {"/", "."})
-    destination = f"{remote}/{source.name}" if remote else source.name
-    last = ""
-    for attempt in range(1, retries + 1):
-        try:
-            code = bypy.ByPy().upload(str(source), destination)
-            if code == 0:
-                return {"success": True, "attempts": attempt, "destination": f"/apps/bypy/{destination}"}
-            last = f"ByPy 返回 {code}"
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
-        if attempt < retries:
-            time.sleep(min(attempt * 5, 30))
-    return {"success": False, "attempts": retries, "destination": destination, "error": last}
+def upload_baidu(source: Path, target: dict[str, Any]) -> dict[str, Any]:
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀）。"""
+    return _up_upload_baidu(source, target)
 
 
 def _credentials(target: dict[str, Any]) -> dict[str, str]:
-    from r20_backend.backup_secrets import load_credentials
-    return load_credentials(str(target.get("credential_ref") or f"backup:{target['id']}"))
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀）。
+
+    ⚠️ 保留在本模块：`upload_*` 薄壳在调用时把它作为实参注入共享实现，
+    故这里的全局名仍是被 patch 的目标。
+    """
+    return _up_credentials(target)
 
 
 def _urlencoded_json(url: str, data: dict[str, Any] | None = None, timeout: int = 60) -> dict[str, Any]:
-    body = urllib.parse.urlencode(data).encode() if data is not None else None
-    request = urllib.request.Request(url, data=body, headers={"User-Agent": "R20-Backup/6.2.0"}, method="POST" if body is not None else "GET")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
-    payload = json.loads(raw or "{}")
-    if payload.get("errno") not in (None, 0) or payload.get("error"):
-        raise RuntimeError(str(payload.get("errmsg") or payload.get("error_description") or payload))
-    return payload
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀）。
+
+    ⚠️ 本名字**必须**留在门面：`tests/audit/test_audit_batch5_d_tails.py`
+    用 `patch.object(br, "_urlencoded_json", …)` 拦百度 OAuth 的网络调用。
+    """
+    return _up_urlencoded_json(url, data, timeout)
 
 
-def _multipart_upload(url: str, field_name: str, filename: str, content: bytes, timeout: int = 180) -> dict[str, Any]:
-    boundary = f"----R20{hashlib.sha256(os.urandom(16)).hexdigest()[:24]}"
-    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "R20-Backup/6.2.0"}, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8") or "{}")
-    if payload.get("errno") not in (None, 0):
-        raise RuntimeError(str(payload.get("errmsg") or payload))
-    return payload
+def _multipart_upload(*args: Any, **kwargs: Any) -> Any:
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀）。
+
+    ⚠️ 本名字**必须**留在门面：`tests/audit/test_audit_batch5_d_tails.py`
+    用 `patch.object(br, "_multipart_upload", …)`。
+    """
+    return _up_multipart_upload(*args, **kwargs)
 
 
 def upload_baidu_oauth(source: Path, target: dict[str, Any]) -> dict[str, Any]:
-    from r20_backend.backup_secrets import save_credentials
-    creds = _credentials(target)
-    app_key = creds.get("app_key", "")
-    app_secret = creds.get("app_secret", "")
-    refresh_token = creds.get("refresh_token", "")
-    if not app_key or not app_secret or not refresh_token:
-        raise RuntimeError("百度官方 OAuth 需要 App Key、App Secret 与 Refresh Token")
-    token_url = "https://openapi.baidu.com/oauth/2.0/token?" + urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": app_key, "client_secret": app_secret})
-    token = _urlencoded_json(token_url)
-    access_token = str(token.get("access_token") or "")
-    if not access_token:
-        raise RuntimeError("百度 OAuth 未返回 Access Token")
-    if token.get("refresh_token") and token["refresh_token"] != refresh_token:
-        save_credentials(str(target.get("credential_ref")), {"refresh_token": token["refresh_token"]})
-    chunk_size = 4 * 1024 * 1024
-    block_list: list[str] = []
-    with source.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(chunk_size), b""):
-            block_list.append(hashlib.md5(chunk).hexdigest())
-    remote_dir = str(target.get("remote_path") or "R20_Backups").strip("/")
-    remote_path = f"/apps/R20QuantumTrader/{remote_dir}/{source.name}" if remote_dir else f"/apps/R20QuantumTrader/{source.name}"
-    precreate_url = "https://pan.baidu.com/rest/2.0/xpan/file?method=precreate&access_token=" + urllib.parse.quote(access_token, safe="")
-    common = {"path": remote_path, "size": source.stat().st_size, "isdir": 0, "autoinit": 1, "rtype": 3, "block_list": json.dumps(block_list)}
-    precreated = _urlencoded_json(precreate_url, common)
-    upload_id = str(precreated.get("uploadid") or "")
-    if not upload_id:
-        raise RuntimeError("百度网盘预创建未返回 uploadid")
-    with source.open("rb") as handle:
-        for part_seq in range(len(block_list)):
-            chunk = handle.read(chunk_size)
-            upload_url = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2?" + urllib.parse.urlencode({"method": "upload", "type": "tmpfile", "access_token": access_token, "path": remote_path, "uploadid": upload_id, "partseq": part_seq})
-            uploaded = _multipart_upload(upload_url, "file", source.name, chunk)
-            if uploaded.get("md5") and uploaded["md5"] != block_list[part_seq]:
-                raise RuntimeError(f"百度分片 {part_seq} MD5 校验失败")
-    create_url = "https://pan.baidu.com/rest/2.0/xpan/file?method=create&access_token=" + urllib.parse.quote(access_token, safe="")
-    created = _urlencoded_json(create_url, {**common, "uploadid": upload_id})
-    return {"success": True, "attempts": 1, "destination": remote_path, "fs_id": str(created.get("fs_id") or "")}
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀），依赖调用时注入。"""
+    return _up_upload_baidu_oauth(
+        source, target,
+        _credentials=_credentials,
+        _urlencoded_json=_urlencoded_json,
+        _multipart_upload=_multipart_upload,
+    )
 
 
 def upload_s3(source: Path, target: dict[str, Any]) -> dict[str, Any]:
-    """S3-compatible SigV4 upload without a mandatory boto3 dependency."""
-    import hmac
-    creds = _credentials(target)
-    access = creds.get("access_key_id", "")
-    secret = creds.get("secret_access_key", "")
-    if not access or not secret:
-        raise RuntimeError("S3 Access Key / Secret Key 未配置")
-    endpoint = str(target.get("endpoint", "")).rstrip("/")
-    bucket = str(target.get("bucket", ""))
-    if not endpoint or not bucket:
-        raise RuntimeError("S3 Endpoint 或 Bucket 未配置")
-    region = str(target.get("region") or "us-east-1")
-    key = "/".join(x for x in [str(target.get("remote_path") or "").strip("/"), source.name] if x)
-    parsed = urllib.parse.urlparse(endpoint)
-    host = parsed.netloc
-    path = f"/{bucket}/{urllib.parse.quote(key, safe='/')}" if target.get("force_path_style") else f"/{urllib.parse.quote(key, safe='/')}"
-    if not target.get("force_path_style"):
-        host = f"{bucket}.{host}"
-    now = datetime.now(timezone.utc)
-    amzdate = now.strftime("%Y%m%dT%H%M%SZ")
-    datestamp = now.strftime("%Y%m%d")
-    payload_hash = calculate_sha256(source)
-    headers = {"host": host, "x-amz-content-sha256": payload_hash, "x-amz-date": amzdate, "content-length": str(source.stat().st_size)}
-    if creds.get("session_token"):
-        headers["x-amz-security-token"] = creds["session_token"]
-    signed_headers = ";".join(sorted(headers))
-    canonical_headers = "".join(f"{k}:{headers[k]}\n" for k in sorted(headers))
-    canonical = f"PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    scope = f"{datestamp}/{region}/s3/aws4_request"
-    string_to_sign = f"AWS4-HMAC-SHA256\n{amzdate}\n{scope}\n{hashlib.sha256(canonical.encode()).hexdigest()}"
-    sign = lambda key, msg: hmac.new(key, msg.encode(), hashlib.sha256).digest()
-    signing = sign(sign(sign(sign(("AWS4" + secret).encode(), datestamp), region), "s3"), "aws4_request")
-    headers["authorization"] = f"AWS4-HMAC-SHA256 Credential={access}/{scope}, SignedHeaders={signed_headers}, Signature={hmac.new(signing, string_to_sign.encode(), hashlib.sha256).hexdigest()}"
-    import http.client
-    connection = (http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection)(host, timeout=300)
-    connection.putrequest("PUT", path, skip_host=True)
-    for k, v in headers.items():
-        connection.putheader(k, v)
-    connection.endheaders()
-    with source.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            connection.send(chunk)
-    response = connection.getresponse()
-    response.read()
-    connection.close()
-    if response.status not in (200, 201):
-        raise RuntimeError(f"S3 HTTP {response.status}")
-    return {"success": True, "attempts": 1, "destination": f"s3://{bucket}/{key}"}
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀），依赖调用时注入。"""
+    return _up_upload_s3(
+        source, target,
+        calculate_sha256=calculate_sha256,
+        _credentials=_credentials,
+    )
 
 
 def upload_oss(source: Path, target: dict[str, Any]) -> dict[str, Any]:
-    try:
-        import oss2
-    except ImportError:
-        raise RuntimeError("系统未安装 oss2 模块，请先安装 oss2 (pip install oss2)")
-    creds = _credentials(target)
-    access = creds.get("access_key_id", "")
-    secret = creds.get("secret_access_key", "")
-    if not access or not secret:
-        raise RuntimeError("OSS AccessKey ID / Secret 未配置")
-    endpoint = str(target.get("endpoint", "")).strip()
-    bucket_name = str(target.get("bucket", "")).strip()
-    if not endpoint or not bucket_name:
-        raise RuntimeError("OSS Endpoint 或 Bucket 未配置")
-    key = "/".join(x for x in [str(target.get("remote_path") or "").strip("/"), source.name] if x)
-    bucket = oss2.Bucket(oss2.Auth(access, secret), endpoint, bucket_name)
-    bucket.put_object_from_file(key, str(source))
-    return {"success": True, "attempts": 1, "destination": f"oss://{bucket_name}/{key}"}
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀），依赖调用时注入。"""
+    return _up_upload_oss(source, target, _credentials=_credentials)
 
 
 def upload_webdav(source: Path, target: dict[str, Any]) -> dict[str, Any]:
-    creds = _credentials(target)
-    endpoint = str(target["endpoint"]).rstrip("/")
-    remote = str(target.get("remote_path") or "").strip("/")
-    auth = ""
-    username = creds.get("username", "")
-    password = creds.get("password", "")
-    if username:
-        auth = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
-    current = endpoint
-    for part in [x for x in remote.split("/") if x]:
-        current += "/" + urllib.parse.quote(part, safe="")
-        req = urllib.request.Request(current, headers={"Authorization": auth} if auth else {}, method="MKCOL")
-        try:
-            urllib.request.urlopen(req, timeout=20).close()
-        except urllib.error.HTTPError as exc:
-            if exc.code not in (301, 302, 405):
-                raise
-    url = current + "/" + urllib.parse.quote(source.name, safe="")
-    parsed = urllib.parse.urlparse(url)
-    import http.client
-    connection = (http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection)(parsed.netloc, timeout=300)
-    path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-    connection.putrequest("PUT", path)
-    connection.putheader("Content-Type", "application/octet-stream")
-    connection.putheader("Content-Length", str(source.stat().st_size))
-    if auth:
-        connection.putheader("Authorization", auth)
-    connection.endheaders()
-    with source.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            connection.send(chunk)
-    response = connection.getresponse()
-    response.read()
-    connection.close()
-    if response.status not in (200, 201, 204):
-        raise RuntimeError(f"WebDAV HTTP {response.status}")
-    return {"success": True, "attempts": 1, "destination": url}
+    """薄壳：转调 `scripts/backup_upload.py`（第五十二刀），依赖调用时注入。"""
+    return _up_upload_webdav(source, target, _credentials=_credentials)
 
 
 def deliver_target(source: Path, target: dict[str, Any]) -> dict[str, Any]:

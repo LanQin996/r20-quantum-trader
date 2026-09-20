@@ -15,7 +15,7 @@ export const enAdminShell = {
   section: { required: 'Required', invalidNumber: 'Number expected', range: 'Range {min} ~ {max}' },
   danger: {
     title: 'Danger zone',
-    desc: 'These actions touch the live trading pipeline or data integrity. Proceed with care.',
+    desc: 'These actions change production or data; confirm first',
     confirmHint: 'Type {phrase} to unlock',
   },
   table: { search: 'Search…', sort: 'Sort', actions: 'Actions' },

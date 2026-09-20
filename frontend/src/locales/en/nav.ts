@@ -10,7 +10,6 @@ export const enNav = {
     console: 'Console',
     docs: 'Docs',
     about: 'About & Community',
-    search: 'Search / commands',
     theme: 'Theme',
     language: 'Language',
     settings: 'Preferences',

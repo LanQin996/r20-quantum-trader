@@ -47,7 +47,15 @@ fi
 # 4. Create required runtime directories
 mkdir -p data logs backups
 
-# 5. Check Node.js and build frontend if dist doesn't exist
+# 3.1 Initialize default instrument pool if not present (prevents untrusted pool blocking entry)
+if [ ! -f "data/instrument_pool.json" ]; then
+    echo "📋 Initializing default instrument pool..."
+    if [ -x ".venv/bin/python" ]; then
+        .venv/bin/python -c "from scripts.instrument_pool import save_instruments, DEFAULT_INSTRUMENTS; save_instruments(DEFAULT_INSTRUMENTS)" 2>/dev/null || true
+    fi
+fi
+
+# 4. Check Node.js and build frontend if dist doesn't exist
 if [ ! -d "frontend/dist" ]; then
     echo "📦 Frontend production bundle not detected. Building Vue 3 SPA..."
     if command -v npm &> /dev/null; then

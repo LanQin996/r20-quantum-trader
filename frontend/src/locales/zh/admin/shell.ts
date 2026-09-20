@@ -20,7 +20,7 @@ export const zhAdminShell = {
   },
   danger: {
     title: '危险操作区',
-    desc: '以下操作直接影响生产交易链路或数据完整性，执行前请确认风险',
+    desc: '以下操作直接改动生产链路或数据，请确认风险',
     confirmHint: '输入 {phrase} 解锁',
   },
   table: {

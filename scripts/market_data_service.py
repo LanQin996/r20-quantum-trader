@@ -1,15 +1,15 @@
 """High-Performance Zero-Process Direct Public Market Data Service (market_data_service.py).
 
-Eliminates repetitive Node CLI / OKX CLI process fork overhead during public market
-data harvesting (tickers, orderbooks, indicators, candles).
-Uses persistent connection-pooled HTTP Keep-Alive sessions with pure-Python fallbacks.
+Public market data harvesting (tickers, orderbooks, indicators, candles) runs on
+persistent connection-pooled HTTP Keep-Alive sessions with pure-Python fallbacks.
+Failover chain: www.okx.com -> aws.okx.com -> alt-venue adapters -> local math.
+Zero process-spawning layers; public endpoints need no credentials.
 """
 from __future__ import annotations
 
 import json
 import logging
 import math
-import subprocess
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -132,30 +132,195 @@ def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Op
 
 
 # ---------------------------------------------------------------------------
+# 0b. 多场所只读备源（Phase 2 · 2026-09-09）
+#     仅当 OKX 双域直连（www→aws）全断时兜底，保「价格连续性」优先。
+#     量/张数单位随场所原生语义（币安=币量、Gate=张数），与 OKX 口径不同，
+#     消费方仅得相对量级用于放量检测；大陆受限 IP 上自然失败落空，无副作用。
+# ---------------------------------------------------------------------------
+
+ALT_VENUES = ("binance", "gate")
+
+# 健康文件与 ai_brain_trader 的 VENUE_HEALTH_FILE 同源目录（scripts/../data/）
+import pathlib as _pathlib  # noqa: E402  （0b 段局部引入，避免动头部 import 块）
+VENUE_HEALTH_FILE = str(_pathlib.Path(__file__).resolve().parents[1] / "data" / "venue_health.json")
+
+_ALT_ORDER_CACHE = {"ts": 0.0, "order": None}
+_ALT_ORDER_LOCK = threading.Lock()
+
+
+def _alt_venue_order() -> tuple:
+    """健康感知备源顺序（US-004）：本轮 failed 数升序 → 延迟后置（差 >5x 才翻转）→ 静态原序。
+
+    与 AC「近3条记录内 failed 多的场所后置」的语义对应：
+    ai_brain_trader._xv_flush_health 每周期整文件覆盖写，文件内容即「最近记录」
+    级别的本轮快照（failed 为 name->reason dict，无逐次历史）——故以本轮 failed
+    数为主排序键，不另造历史文件。avg_ms 仅当与全场最快所差距 >5 倍时才参与
+    翻转（防毫秒级抖动让备源序反复横跳）；avg_ms 缺失/为 0（该所本周期无延迟
+    样本）视为中性，不降权。
+
+    缓存理由：备源路径在 OKX 全断时会爆发几十次请求（因子轮询/brain/回测），
+    而健康文件每 15 分钟周期至多更新一次——60s TTL 读内存吸收 IO，防放大。
+    任何缺失/损坏/结构异常一律回退静态 ALT_VENUES，绝不抛（热文件纪律：本模块
+    被生产 trader 子进程直接加载；OKX 正常时本函数根本不被调用，主路径零感知）。
+    """
+    try:
+        now = time.time()
+        with _ALT_ORDER_LOCK:
+            cached = _ALT_ORDER_CACHE["order"]
+            if cached is not None and now - _ALT_ORDER_CACHE["ts"] < 60.0:
+                return cached
+        order = None
+        try:
+            p = _pathlib.Path(VENUE_HEALTH_FILE)
+            if p.exists():
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                venues = raw.get("venues") if isinstance(raw, dict) else None
+                if isinstance(venues, dict):
+                    base_idx = {v: i for i, v in enumerate(ALT_VENUES)}
+                    stats: Dict[str, Any] = {}
+                    for v in ALT_VENUES:
+                        rec = venues.get(v)
+                        rec = rec if isinstance(rec, dict) else {}
+                        failed = rec.get("failed")
+                        nf = len(failed) if isinstance(failed, (dict, list)) else 0
+                        try:
+                            avg = float(rec.get("avg_ms"))
+                        except (TypeError, ValueError):
+                            avg = 0.0
+                        stats[v] = (nf, avg if avg > 0 else 0.0)
+                    samples = [a for _, a in stats.values() if a > 0]
+                    min_lat = min(samples) if samples else 0.0
+
+                    def _key(v):
+                        nf, avg = stats[v]
+                        slow = 1 if (avg > 0 and min_lat > 0 and avg > 5.0 * min_lat) else 0
+                        return (nf, slow, base_idx.get(v, 99))
+
+                    order = tuple(sorted(ALT_VENUES, key=_key))
+        except Exception:
+            order = None
+        if order is None:
+            order = ALT_VENUES
+        with _ALT_ORDER_LOCK:
+            _ALT_ORDER_CACHE["ts"] = time.time()
+            _ALT_ORDER_CACHE["order"] = order
+        return order
+    except Exception:
+        return ALT_VENUES
+
+
+def _alt_venue_allowed() -> bool:
+    """离线/测试熔断开关：R20_ALT_VENUE_FALLBACK=0 时备源路径完全不发网络请求。"""
+    import os
+    return str(os.environ.get("R20_ALT_VENUE_FALLBACK", "1")).strip().lower() not in ("0", "off", "false")
+
+
+def _get_venue_adapter(venue: str):
+    """懒导入 r20_backend.exchanges（scripts 入口的 sys.path 引导）。"""
+    import sys
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from r20_backend.exchanges import get_adapter
+    return get_adapter(venue)
+
+
+def _alt_venue_ticker(inst_id: str) -> Optional[Dict[str, Any]]:
+    if not _alt_venue_allowed():
+        return None
+    for venue in _alt_venue_order():
+        try:
+            ad = _get_venue_adapter(venue)
+            t = ad.fetch_ticker(ad.canonical(inst_id))
+        except Exception:
+            t = None
+        if t and t.get("last"):
+            logger.warning("Multi-venue fallback: ticker %s served by %s", inst_id, venue)
+            return {
+                "instId": inst_id, "venue": venue,
+                "last": str(t["last"]),
+                "bidPx": str(t.get("bid") or ""),
+                "askPx": str(t.get("ask") or ""),
+                "open24h": str(t.get("open_24h") or ""),
+                "high24h": str(t.get("high_24h") or ""),
+                "low24h": str(t.get("low_24h") or ""),
+                "vol24h": str(t.get("vol_24h_base") or ""),
+                "volCcy24h": str(t.get("vol_24h_base") or ""),
+                "ts": str(t.get("ts_ms") or ""),
+            }
+    return None
+
+
+def _alt_venue_candles(inst_id: str, bar: str, limit: int) -> List[List[str]]:
+    if not _alt_venue_allowed():
+        return []
+    for venue in _alt_venue_order():
+        try:
+            ad = _get_venue_adapter(venue)
+            kl = ad.fetch_candles(ad.canonical(inst_id), bar, limit)
+        except Exception:
+            kl = None
+        if kl:
+            # Alternate adapters expose six OHLCV columns, without OKX's
+            # confirmation field. Normalize seconds to milliseconds and mark
+            # only bars whose entire interval has elapsed as closed.
+            normalized = []
+            units = {"m": 60, "H": 3600, "D": 86400, "W": 604800}
+            interval = normalize_bar(bar)
+            try:
+                seconds = int(interval[:-1]) * units[interval[-1]]
+            except (ValueError, KeyError, IndexError):
+                seconds = None
+            now_ms = time.time() * 1000
+            for row in kl:
+                if not isinstance(row, (list, tuple)) or len(row) < 6:
+                    continue
+                try:
+                    timestamp = int(row[0])
+                except (TypeError, ValueError):
+                    continue
+                if venue == "gate" and timestamp < 100_000_000_000:
+                    timestamp *= 1000
+                converted = list(row)
+                converted[0] = str(timestamp)
+                if len(converted) < 9:
+                    closed = seconds is not None and timestamp + seconds * 1000 <= now_ms
+                    converted = converted[:6] + ["0", "0", "1" if closed else "0"]
+                normalized.append(converted)
+            kl = normalized
+            kl = kl[-limit:]
+            kl.reverse()  # 适配器升序 → OKX 契约「最新在前」
+            logger.warning("Multi-venue fallback: candles %s %s served by %s (%d rows)",
+                           inst_id, bar, venue, len(kl))
+            return kl
+    return []
+
+
+def _alt_funding_rate(inst_id: str) -> Optional[float]:
+    if not _alt_venue_allowed():
+        return None
+    for venue in _alt_venue_order():
+        try:
+            ad = _get_venue_adapter(venue)
+            r = ad.fetch_funding_rate(ad.canonical(inst_id))
+        except Exception:
+            r = None
+        if r is not None:
+            return round(float(r) * 100, 4)  # 对齐 OKX 路径的百分数口径
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 1. Ticker & Bulk Tickers
 # ---------------------------------------------------------------------------
 
 def fetch_ticker(inst_id: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Fetch single instrument ticker via direct REST. Fallback to CLI on failure."""
+    """Fetch one instrument ticker: www→aws 双域 REST 直连，失败落异所备源。"""
     data = _public_get("/api/v5/market/ticker", params={"instId": inst_id}, timeout=timeout)
     if data and data.get("data"):
         return data["data"][0]
-
-    # Emergency CLI fallback
-    try:
-        res = subprocess.run(
-            f"okx market ticker {inst_id} --json 2>/dev/null",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            out = json.loads(res.stdout.strip())
-            return out[0] if isinstance(out, list) and out else (out if isinstance(out, dict) else None)
-    except Exception:
-        pass
-    return None
+    return _alt_venue_ticker(inst_id)
 
 
 def fetch_tickers_bulk(inst_type: str = "SWAP", timeout: float = 4.0) -> Dict[str, Dict[str, Any]]:
@@ -171,28 +336,12 @@ def fetch_tickers_bulk(inst_type: str = "SWAP", timeout: float = 4.0) -> Dict[st
 # ---------------------------------------------------------------------------
 
 def fetch_orderbook_depth(inst_id: str, sz: int = 5, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Fetch orderbook depth directly via REST. Returns {'bids': [...], 'asks': [...]}.
-    Replaces repetitive `okx market orderbook ...` CLI process launches.
+    """Fetch orderbook depth directly via REST. Returns {'bids': [...], 'asks': [...]} —
+    双域直连零进程，无备源（深度语义场所间不可比）。
     """
     data = _public_get("/api/v5/market/books", params={"instId": inst_id, "sz": sz}, timeout=timeout)
     if data and data.get("data"):
         return data["data"][0]
-
-    # Emergency CLI fallback
-    try:
-        res = subprocess.run(
-            f"okx market orderbook {inst_id} --sz {sz} --json 2>/dev/null",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=4,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            out = json.loads(res.stdout.strip())
-            if isinstance(out, list) and out:
-                return out[0]
-    except Exception:
-        pass
     return None
 
 
@@ -205,8 +354,8 @@ def _local_math_indicators(
     indicators: List[str],
     bar: str = "1H",
 ) -> Dict[str, Dict[str, str]]:
-    """三级兜底：当 OKX MCP 指标接口与 CLI 均不可用时（部署环境常见），
-    用本地蜡烛（自带 www→aws→CLI 双源容灾）纯 Python 计算 ADX/KDJ/BBWIDTH/CMF。
+    """末级兜底：当 OKX MCP 指标接口与 REST 均不可用时（部署环境常见），
+    用本地蜡烛（自带 www→aws→异所多级容灾）纯 Python 计算 ADX/KDJ/BBWIDTH/CMF。
     输出与 OKX 官方口径对齐的字符串数值；样本不足时返回空 dict 让上层维持缺省。"""
     rows = fetch_candles(inst_id, bar=bar, limit=120)
     if not rows:
@@ -286,8 +435,8 @@ def fetch_indicators_batch(
     timeout: float = 4.0,
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch multiple technical indicators in ONE SINGLE HTTP POST request.
-
-    Replaces 4x-6x Node CLI process invocations per instrument with 1 fast call.
+    
+    Batches 4-6 per-instrument indicator queries into 1 fast call.
     Returns: {"ADX": {"adx": "20.1", ...}, "KDJ": {"k": "...", "d": "...", "j": "..."}, ...}
     """
     bar = normalize_bar(bar)
@@ -321,8 +470,8 @@ def fetch_indicators_batch(
             val = fetch_single_indicator(inst_id, ind, bar=bar, timeout=timeout)
             if val:
                 result[key] = val
-
-    # 三级兜底：MCP/CLI 全灭（部署环境未装 okx CLI 时最常见）→ 本地蜡烛纯 Python 计算
+    
+    # 末级兜底：MCP 批量接口与逐指标 REST 全灭 → 本地蜡烛纯 Python 计算
     missing = [ind for ind in indicators if ind.upper().replace("-", "") not in result]
     if missing:
         for k, v in _local_math_indicators(inst_id, missing, bar).items():
@@ -337,7 +486,7 @@ def fetch_single_indicator(
     bar: str = "1H",
     timeout: float = 3.5,
 ) -> Dict[str, Any]:
-    """Fetch or compute a single indicator without launching Node CLI."""
+    """Fetch or compute a single indicator: MCP REST，失败落纯 Python 本地数学。"""
     key = indicator.upper().replace("-", "").replace("_", "")
     bar = normalize_bar(bar)
     payload = {
@@ -354,27 +503,7 @@ def fetch_single_indicator(
                 return items[0].get("values", {})
         except Exception:
             pass
-
-    # Emergency CLI fallback
-    try:
-        res = subprocess.run(
-            f"okx market indicator {indicator.lower()} {inst_id} --bar {bar} --json 2>/dev/null",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=4,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            ind_res = json.loads(res.stdout.strip())
-            if isinstance(ind_res, list) and ind_res:
-                tfs = ind_res[0].get("data", [{}])[0].get("timeframes", {}).get(bar, {}).get("indicators", {})
-                items = tfs.get(key, [])
-                if items and isinstance(items[0], dict):
-                    return items[0].get("values", {})
-    except Exception:
-        pass
-
-    # 三级兜底：本地蜡烛 + 纯 Python 数学（部署环境无 CLI / MCP 端点不可达时的最后防线）
+    # 末级兜底：本地蜡烛 + 纯 Python 数学（MCP 端点不可达时的最后防线）
     return _local_math_indicators(inst_id, [key], bar).get(key, {})
 
 
@@ -408,23 +537,8 @@ def fetch_candles(
     )
     if data and data.get("data"):
         return (closed_okx_candles(data["data"]) if closed_only else data["data"])[:limit]
-
-    # Emergency CLI fallback
-    try:
-        res = subprocess.run(
-            f"okx market candles {inst_id} --bar {bar} --limit {request_limit} --json 2>/dev/null",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            parsed = json.loads(res.stdout.strip())
-            if isinstance(parsed, list):
-                return (closed_okx_candles(parsed) if closed_only else parsed)[:limit]
-    except Exception:
-        pass
-    return []
+    rows = _alt_venue_candles(inst_id, bar, request_limit)
+    return (closed_okx_candles(rows) if closed_only else rows)[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +553,7 @@ def fetch_funding_rate(inst_id: str, timeout: float = 3.5) -> Optional[float]:
             return round(float(data["data"][0].get("fundingRate", 0.0)) * 100, 4)
         except (ValueError, TypeError):
             pass
-    return None
+    return _alt_funding_rate(inst_id)
 
 
 def fetch_open_interest(inst_id: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:

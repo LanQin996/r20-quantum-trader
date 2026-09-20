@@ -14,6 +14,7 @@ import importlib.util
 import json
 import logging
 import os
+import tempfile
 import re
 import sys
 import time
@@ -64,11 +65,25 @@ def load_config(create_if_missing: bool = True) -> dict[str, Any]:
 
 
 def save_config(config: dict[str, Any]) -> None:
+    """拦截器配置写入口（审计 P3-6 家族收口）。
+
+    旧实现无锁 + 固定 `.tmp` 名：两个并发保存（面板保存 / 插件启用 / 排序）会写同一个
+    临时文件，后写者覆盖先写者，甚至出现"临时文件已被对方 replace 掉"的丢失写入。
+    现在整段 RMW 持可重入 flock，临时文件用唯一名。"""
     ensure_plugins_dir()
-    tmp = CONFIG_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, CONFIG_FILE)
+    from r20_backend.file_locks import file_lock
+
+    with file_lock(CONFIG_FILE):
+        fd, tmp = tempfile.mkstemp(prefix=".interceptors-", suffix=".tmp", dir=CONFIG_FILE.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, CONFIG_FILE)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
 
 def parse_plugin_metadata(file_path: Path) -> dict[str, Any]:
@@ -275,16 +290,23 @@ def _load_module_from_file(file_path: Path) -> Any:
 
 
 def _conf_floor_for(inst_id: str) -> float:
-    """置信度安全底线：读标的池每标的 conf_floor（如 DOGE=80），未配置回退全局 75。
-    池文件读取失败时同样 fail-closed 到 75（不低于历史全局底线）。"""
+    """置信度安全底线：读标的池每标的 conf_floor（如 DOGE=80），未配置回退全局。
+    池文件读取失败时同样 fail-closed（不低于全局底线）。"""
     try:
         from scripts.instrument_pool import load_instruments
         for item in load_instruments():
             if str(item.get("instId", "")).upper() == inst_id.upper():
-                return float(item.get("conf_floor", 75.0) or 75.0)
+                if item.get("conf_floor"):
+                    return float(item["conf_floor"])
     except Exception:
         pass
-    return 75.0
+    if "DOGE" in inst_id.upper():
+        return 80.0
+    try:
+        from scripts.risk_constants import MIN_ENTRY_CONFIDENCE
+        return float(MIN_ENTRY_CONFIDENCE)
+    except Exception:
+        return 75.0
 
 
 def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], context: dict[str, Any]) -> tuple[str, str, float]:

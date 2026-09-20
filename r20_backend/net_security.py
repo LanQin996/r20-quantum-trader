@@ -2,7 +2,9 @@
 from __future__ import annotations
 import ipaddress
 import socket
+import urllib.error
 import urllib.parse
+import urllib.request
 
 
 def validate_outbound_url(url: str, *, allow_private: bool = False, allowed_hosts: set[str] | None = None) -> str:
@@ -29,3 +31,34 @@ def validate_outbound_url(url: str, *, allow_private: bool = False, allowed_host
 
 def validate_wechat_base_url(url: str) -> str:
     return validate_outbound_url(url, allowed_hosts={"ilinkai.weixin.qq.com"})
+
+
+class _RedirectDenied(urllib.error.HTTPError):
+    """端点回 3xx——本工具链一律视为拒发，绝不自动跟随。"""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """审计D(2026-09-13)·重定向 SSFR 兜闸。
+
+    validate_outbound_url 只核**首跳** URL 的主机/IP；而 urllib 默认**自动跟随**
+    3xx——一个首跳合法、却回 302→http://169.254.169.254/（云元数据）或
+    http://127.0.0.1/ 的端点，凭 validate 后即借道打内网（校验时序与真实去向
+    脱节的 TOCTOU）。凭证类出站（备份投递/通知）没有任何场景需要跟随重定向，
+    故对这些链路统一禁跳：遇 3xx 直接抛，交由上层按失败重试/上报。
+
+    残余风险如实记：DNS 重绑定（getaddrinfo 校验与 connect 各自解析）在纯标准库
+    下无法根除，需要自定义 connect/sock 层钉 IP——留待网络层专项，勿以本闸宣称
+    已彻底闭环。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise _RedirectDenied(newurl, code, f"重定向被安全策略拒绝：{newurl}", headers, fp)
+        return None
+
+
+_SAFE_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
+def safe_urlopen(request, *, timeout: int):
+    """凭证类出站统一入口：禁跟随重定向的 urlopen。"""
+    return _SAFE_OPENER.open(request, timeout=timeout)

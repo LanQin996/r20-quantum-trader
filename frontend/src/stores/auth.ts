@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { useI18n } from '../composables/useI18n'
 
 const SESSION_TOKEN_KEY = 'r20.admin.session.id'
 const SESSION_USER_KEY = 'r20.admin.session.user'
@@ -10,6 +11,8 @@ export interface AdminUser {
 }
 
 export const useAuthStore = defineStore('auth', () => {
+  // 批 76：错误文案改走 i18n
+  const { t } = useI18n()
   const token = ref<string>('')
   const user = ref<AdminUser | null>(null)
   const error = ref<string>('')
@@ -27,7 +30,7 @@ export const useAuthStore = defineStore('auth', () => {
       })
       const data = await resp.json()
       if (!resp.ok) {
-        error.value = data.detail || `登录失败 (HTTP ${resp.status})`
+        error.value = data.detail || `${t('common.loginFailed')} (HTTP ${resp.status})`
         return false
       }
       token.value = data.session_token
@@ -36,7 +39,7 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem(SESSION_USER_KEY, JSON.stringify(user.value))
       return true
     } catch (e: any) {
-      error.value = e.message || '网络错误'
+      error.value = e.message || t('common.networkError')
       return false
     }
   }

@@ -162,16 +162,23 @@ def _stable_python() -> str:
             return False
 
     exe = sys.executable or "python3"
-    resolved = Path(exe).resolve().as_posix() if is_file(exe) else ""
+    try:
+        resolved = Path(exe).resolve().as_posix() if is_file(exe) else ""
+    except OSError:
+        resolved = ""
     if resolved and "/.cache/uv/" not in resolved and "/tmp/" not in resolved and ".venv" not in resolved:
         return exe
-    for cand in ("/app/venv/bin/python3", "/usr/bin/python3", getattr(sys, "_base_executable", "")):
-        if not is_file(cand):
-            continue
-        resolved = Path(cand).resolve().as_posix()
-        if "/.cache/uv/" not in resolved and "/tmp/" not in resolved and ".venv" not in resolved:
-            return cand
-    return "python3"
+    root = Path(__file__).resolve().parents[1]
+    venv_py = root / ".venv" / "bin" / "python"
+    for cand in (str(root / ".venv" / "Scripts" / "python.exe"), str(venv_py),
+                 "/app/venv/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3",
+                 getattr(sys, "_base_executable", "")):
+        try:
+            if is_file(cand) and "/.cache/uv/" not in Path(cand).resolve().as_posix():
+                return cand
+        except OSError:
+            pass
+    return sys.executable or "python3"
 
 
 def ensure_qq_gateway_daemon_running() -> None:

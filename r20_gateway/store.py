@@ -1,6 +1,7 @@
 """SQLite-backed durable event and per-channel delivery queue."""
 from __future__ import annotations
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -119,21 +120,32 @@ class GatewayStore:
                 )
         return event.event_id
 
-    def claim_due(self, limit: int = 20) -> list[dict[str, Any]]:
-        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    def claim_due(self, limit: int = 20, lease_seconds: int = 120) -> list[dict[str, Any]]:
+        """领取到点投递；带**租约老化**（审计#11 2026-09-13）：领取同时把
+        next_attempt_at 推到 now+lease，崩溃/被杀遗留的 'processing' 行在租约到期后
+        可被重新领取——旧实现只在进程启动时 recover_processing() 一次性收编，
+        运行中挂掉的行永久卡死（不重启就永不重投）。
+        与慢发送的竞态按 at-least-once 语义容忍（重复投优于永久漏投）。"""
+        now_dt = datetime.now(BJ_TZ)
+        now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        lease_until = (now_dt + timedelta(seconds=max(30, lease_seconds))).strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT d.id, d.channel, d.attempts, e.* FROM deliveries d
                    JOIN events e ON e.event_id=d.event_id
-                   WHERE d.status IN ('pending','retry') AND d.next_attempt_at<=?
+                   WHERE (d.status IN ('pending','retry')
+                          OR (d.status='processing' AND d.next_attempt_at<=?))
+                     AND d.next_attempt_at<=?
                    ORDER BY e.priority DESC, d.id ASC LIMIT ?""",
-                (now, limit),
+                (now, now, limit),
             ).fetchall()
             ids = [row["id"] for row in rows]
             if ids:
                 marks = ",".join("?" for _ in ids)
-                connection.execute(f"UPDATE deliveries SET status='processing' WHERE id IN ({marks})", ids)
+                connection.execute(
+                    f"UPDATE deliveries SET status='processing', next_attempt_at=? WHERE id IN ({marks})",
+                    [lease_until, *ids])
             return [dict(row) for row in rows]
 
     def complete(self, delivery_id: int, status: str = "delivered", detail: str = "") -> None:
@@ -209,6 +221,16 @@ class GatewayStore:
             cursor = connection.execute("INSERT INTO job_runs(job_name,status,started_at) VALUES (?,'running',?)", (job_name, now))
             return int(cursor.lastrowid)
 
+    def recover_stale_job_runs(self) -> int:
+        """审计#12(2026-09-13)：worker 被杀/崩溃时 running 行无人收尾——面板「运行中」
+        永久假亮。新 worker 启动时收编为 interrupted（诚实标注，不冒充 success/failed）。"""
+        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE job_runs SET status='interrupted', finished_at=?, detail='进程终止未收尾——worker 启动时收编僵尸 running 行'"
+                " WHERE status='running'", (now,))
+            return cursor.rowcount
+
     def finish_job(self, run_id: int, return_code: int, detail: str) -> None:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         status = "success" if return_code == 0 else "failed"
@@ -217,6 +239,41 @@ class GatewayStore:
                 "UPDATE job_runs SET status=?, finished_at=?, return_code=?, detail=? WHERE id=?",
                 (status, now, return_code, detail[-2000:], run_id),
             )
+
+    def prune_job_runs(self, keep_days: int | None = None,
+                       vacuum: bool = True) -> dict[str, Any]:
+        """删除超过保留期的**已结束**作业历史行，并按需 VACUUM 回收空间。
+
+        设计约束（每条都有实测理由，勿放宽）：
+
+        - **绝不删 `running` 行**，哪怕它很老：worker 启动时靠
+          `recover_stale_job_runs()` 把僵尸 running 行收编为 interrupted，
+          删掉等于销毁"进程崩过"的证据，面板「运行中」也会失真；
+        - **只动 `job_runs`**：`events` / `deliveries` / `model_calls` 各有消费方；
+        - 时间戳是 `%Y-%m-%d %H:%M:%S` 的**字符串**（北京时区）⇒ 直接按字符串比较
+          （该格式字典序 == 时间序）；
+        - 只有真删了行才 VACUUM；VACUUM 需独占写锁，可能被并发写挤掉 ⇒ 失败不算错误，
+          返回 `vacuumed=False`，下一个周期还有机会回收；
+        - 保留天数默认 **7 天**，可用 `R20_JOB_RUNS_KEEP_DAYS` 覆盖（**每次调用读取**，
+          便于测试与运行期调整）。
+        """
+        days = keep_days if keep_days is not None else int(os.getenv("R20_JOB_RUNS_KEEP_DAYS", "7"))
+        if days < 1:
+            raise ValueError("keep_days 必须 >= 1：0 或负数会清空全部历史")
+        cutoff = (datetime.now(BJ_TZ) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM job_runs WHERE started_at < ? AND status <> 'running'", (cutoff,))
+            deleted = cursor.rowcount or 0
+        vacuumed = False
+        if deleted and vacuum:
+            try:
+                with self.connect() as connection:      # VACUUM 必须是该连接的首条语句
+                    connection.execute("VACUUM")
+                vacuumed = True
+            except sqlite3.Error:
+                vacuumed = False
+        return {"deleted": deleted, "vacuumed": vacuumed, "keep_days": days, "cutoff": cutoff}
 
     def job_runs(self, limit: int = 30) -> list[dict[str, Any]]:
         with self.connect() as connection:

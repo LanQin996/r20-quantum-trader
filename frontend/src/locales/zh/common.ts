@@ -20,6 +20,8 @@ export const zhCommon = {
     search: '搜索',
     filter: '筛选',
     all: '全部',
+    expandAll: '全部展开',
+    collapseAll: '全部折叠',
     retry: '重试',
     back: '返回',
     more: '更多',
@@ -37,9 +39,26 @@ export const zhCommon = {
     noRecords: '暂无记录',
     networkError: '网络异常，请检查连接后重试',
     sessionExpired: '会话已过期，请重新登录',
+    requestFailed: '请求失败',
+    networkRetry: '网络错误，请稍后重试',
+    loginFailed: '登录失败',
+    dashboardScanning: '全市场宏观多周期多因子矩阵扫描中...',
+    dashboardLoadFailed: '获取数据失败',
     pageInfo: '第 {page} / {pages} 页 · 共 {total} 条',
+    pageNav: '分页导航',
     prevPage: '上一页',
     nextPage: '下一页',
+    remove: '移除',
+    restore: '恢复',
+    load: '载入',
+    execute: '执行',
+    rollback: '回滚',
+    unlock: '解锁',
+    overwriteRestore: '覆盖恢复',
+    rollbackRun: '执行回滚',
+    confirmWrite: '确认写入',
+    resetBaseline: '重置基线',
+    switchLive: '切换实盘',
     confirmPhraseHint: '此操作不可逆。输入 {phrase} 以确认：',
     usdt: 'USDT',
     times: '次',
@@ -58,6 +77,28 @@ export const zhCommon = {
     dir: { long: '做多', short: '做空', flat: '观望' },
     conf: { high: '高置信', mid: '中置信', low: '低置信' },
     side: { all: '全部方向', long: '仅多', short: '仅空' },
+    // 批 39：全角标点曾写死在模板里，英文界面因此出现全角冒号/括号。
+    // 改为按语言取值：中文全角；英文半角，且冒号自带一个尾空格（模板不加空格）。
+    punct: {
+      colon: '：',
+      parenOpen: '（',
+      parenClose: '）',
+      semicolon: '；',
+    },
+    // 批 44：语言选择组的可访问名（登录页 role=group）
+    language: '界面语言',
+    // 批 45：404 兜底页
+    // 批 45：跳过重复导航块（WCAG 2.4.1）
+    skipToContent: '跳到主内容',
+    notFound: {
+      title: '页面不存在',
+      desc: '没有找到 {path}。地址可能拼错了，或该页面已经下线。',
+      home: '回到工作台',
+      docs: '查看使用文档',
+    },
+    // ── 批 68：外链一律 target="_blank" 静默开新标签，读屏与键盘用户在
+    //    触发前无从得知；补一条视觉隐藏提示（sr-only），不改变视觉排版。
+    opensInNewTab: '（在新标签页中打开）',
   },
   status: {
     normal: '正常',
@@ -81,6 +122,8 @@ export const zhCommon = {
     hoursAgo: '{n} 小时前',
     daysAgo: '{n} 天前',
     inSeconds: '{n} 秒后',
+    beijingTime: '北京时间 UTC+8',
+    siteTimeTip: '全站时间：Asia/Shanghai (UTC+8)',
   },
   brand: {
     name: 'R20 量子交易系统',
@@ -89,4 +132,7 @@ export const zhCommon = {
     official: 'Official',
     license: 'MIT License',
   },
+  // 批 39：全角标点曾写死在模板里（`}}：{{`、`（{{ ... }}）`），
+  // 英文界面因此出现全角冒号/括号。改为按语言取值：中文用全角，
+  // 英文用半角且冒号带一个尾空格（模板里没有空格）。,
 };

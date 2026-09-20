@@ -9,4 +9,12 @@ export const enAdminLogin = {
   rateHint: '5 consecutive failures lock the account for 15 minutes; every attempt is audit-logged.',
   backToScreen: 'Back to live screen',
   secured: 'Session token stays in this browser only',
+  showPwd: 'Show password',
+  hidePwd: 'Hide password',
+  panelTitle: 'Admin console',
+  panelDesc: 'Configure the trading engine, decision brain, data pipeline and physical risk gates. Order execution never happens inside the console.',
+  factVersion: 'Version',
+  factSession: 'Session',
+  factAudit: 'Audit',
+  auditValue: 'Every sign-in attempt is audit-logged',
 };

@@ -3,11 +3,13 @@
  * 右侧滑出抽屉 —— 详情透视专用：列表上下文不丢，看完即关。
  * 规则：任何"看详情"一律 Drawer，禁止全屏跳转或嵌套弹窗。
  */
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { onBeforeUnmount, ref, watch, useId } from 'vue';
 import { X } from 'lucide-vue-next';
 import { useI18n } from '../../composables/useI18n';
+import { useModalFocus } from '../../composables/useModalFocus';
 
 const { t } = useI18n();
+const titleId = useId();
 
 const props = withDefaults(
   defineProps<{
@@ -23,34 +25,13 @@ const props = withDefaults(
 const emit = defineEmits<{ (e: 'close'): void }>();
 
 const panel = ref<HTMLElement | null>(null);
-let lastFocused: Element | null = null;
 
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    e.stopPropagation();
-    emit('close');
-  }
-}
+/* 批 42：与 BaseDialog / TrajectoryPanel 共用同一份焦点管理（见 useModalFocus 头注）。 */
+const { sync: syncModalFocus, release: releaseModalFocus } = useModalFocus(panel, () => emit('close'));
 
-watch(
-  () => props.open,
-  async (open) => {
-    if (open) {
-      lastFocused = document.activeElement;
-      document.body.style.overflow = 'hidden';
-      await nextTick();
-      panel.value?.addEventListener('keydown', onKeydown);
-      panel.value?.focus?.();
-    } else {
-      document.body.style.overflow = '';
-      (lastFocused as HTMLElement | null)?.focus?.();
-    }
-  },
-);
+watch(() => props.open, syncModalFocus);
 
-onBeforeUnmount(() => {
-  document.body.style.overflow = '';
-});
+onBeforeUnmount(releaseModalFocus);
 </script>
 
 <template>
@@ -65,6 +46,7 @@ onBeforeUnmount(() => {
             tabindex="-1"
             role="dialog"
             aria-modal="true"
+            :aria-labelledby="title || $slots.title ? titleId : undefined"
             class="absolute inset-y-0 right-0 flex flex-col outline-none"
             :style="{
               width: `min(${width}, 96vw)`,
@@ -78,7 +60,7 @@ onBeforeUnmount(() => {
               style="border-bottom: 1px solid var(--line-1)"
             >
               <div class="min-w-0">
-                <h3 class="truncate text-md font-semibold" style="color: var(--ink-strong)">
+                <h3 :id="titleId" class="truncate text-md font-semibold" style="color: var(--ink-strong)">
                   <slot name="title">{{ title }}</slot>
                 </h3>
                 <p v-if="subtitle || $slots.subtitle" class="mt-0.5 truncate text-xs" style="color: var(--ink-2)">
@@ -87,7 +69,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="flex items-center gap-1 shrink-0">
                 <slot name="actions" />
-                <button class="btn btn-quiet btn-icon" :aria-label="t('common.close')" @click="emit('close')"><X /></button>
+                <button type="button" class="btn btn-quiet btn-icon" :title="`${t('common.close')} (Esc)`" :aria-label="t('common.close')" @click="emit('close')"><X /></button>
               </div>
             </header>
             <div class="scroll-y flex-1 px-5 py-4">

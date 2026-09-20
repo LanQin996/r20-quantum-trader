@@ -24,14 +24,21 @@ def check_risk(package: dict, decision: dict, context: dict) -> tuple[bool, str]
     except (ValueError, TypeError):
         conf = 0.0
 
+    # 动态读取全局最低开仓置信度（优先 context，默认 75.0% 胜率质量基准，高波动标的 80.0% 门禁）
+    try:
+        base_conf = float(context.get("min_confidence", 0) or 75.0)
+    except Exception:
+        base_conf = 75.0
+
     name = str(package.get("name", "")).upper()
     tier = str(package.get("tier") or "")
     is_high_noise = (tier in _HIGH_NOISE_TIERS) if tier else (name in _LEGACY_HIGH_NOISE_SYMBOLS)
-    if is_high_noise and conf < 80.0:
+    high_noise_threshold = max(base_conf + 5.0, 80.0)
+    if is_high_noise and conf < high_noise_threshold:
         label = f"{tier or name} 高杂波分级标的" if tier else f"{name} 高杂波标的"
-        return False, f"{label}置信度 {conf:.1f}% 未达 80% 防破位门禁，安全降级为 WAIT。"
+        return False, f"{label}置信度 {conf:.1f}% 未达 {high_noise_threshold:.0f}% 防破位门禁，安全降级为 WAIT。"
 
-    if conf < 75.0:
-        return False, f"置信度 {conf:.1f}% 低于 75% 胜率质量基准门禁，安全降级为 WAIT。"
+    if conf < base_conf:
+        return False, f"置信度 {conf:.1f}% 低于全局基准门禁 {base_conf:.0f}%，安全降级为 WAIT。"
 
     return True, ""

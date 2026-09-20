@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,12 @@ def _default_job() -> dict[str, Any]:
 
 def _default() -> dict[str, Any]:
     return {"version": 2, "jobs": [_default_job()]}
+
+
+# 审计③(2026-09-13)：损坏 ≠ 空库。旧实现 JSONDecodeError→_default()，随后任一
+# create/update_job 的 RMW 会把「最多 12 个自定义任务 + 凭证引用」以默认档静默
+# 清零。现置标志，写面拒绝以默认为底覆盖。
+_LOAD_WAS_CORRUPT = False
 
 
 def _atomic_write(payload: dict[str, Any]) -> None:
@@ -165,14 +172,26 @@ def _migrate(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_backup_config() -> dict[str, Any]:
+    global _LOAD_WAS_CORRUPT
     try:
         raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        _LOAD_WAS_CORRUPT = False
         return _migrate(raw if isinstance(raw, dict) else {})
-    except (OSError, json.JSONDecodeError, ValueError):
+    except FileNotFoundError:
+        _LOAD_WAS_CORRUPT = False  # 从未配置 = 合法默认档
+        return _default()
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        # 文件存在但读不出/解不开 → 损坏，写面熔断
+        _LOAD_WAS_CORRUPT = True
+        print(f"[backup_store] CRITICAL backup_methods.json 损坏不可读（任务保存已熔断，"
+              f"防止以默认档覆盖既有任务与凭证引用）: {exc}", file=sys.stderr)
         return _default()
 
 
 def save_backup_config(payload: dict[str, Any]) -> None:
+    if _LOAD_WAS_CORRUPT:
+        raise ValueError("灾备配置文件当前损坏不可读：拒绝以默认配置覆盖（既有任务与凭证引用"
+                         "可能被静默清零）。请先人工恢复 data/backup_methods.json。")
     jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
     if not jobs:
         raise ValueError("至少保留一个灾备任务")

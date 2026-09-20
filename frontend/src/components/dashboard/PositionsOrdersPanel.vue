@@ -1,13 +1,20 @@
 <script setup lang="ts">
-/** 持仓 ⇄ 挂单 分段面板：行点击联动图表选币；OCO 状态白盒呈现 */
+/**
+ * PositionsOrdersPanel.vue · DeepSeek Harness 开发者工作台持仓与挂单面板
+ * 侧栏/工位双向联动，低饱和黑白/深灰主题，高密度表格与清晰订单状态
+ */
 import { computed, ref } from 'vue';
 import { useDashboardStore } from '../../stores/dashboard';
 import { useI18n } from '../../composables/useI18n';
+import { useRovingTabs } from '../../composables/useRovingTabs';
 import { fmtNum, fmtSigned, fmtPct, fmtPrice, arrow } from '../../utils/format';
+import { venueToneCls } from '../../utils/venueMeta';
+import { ShieldCheck, ShieldAlert } from 'lucide-vue-next';
 import BaseSegmented from '../base/BaseSegmented.vue';
 import BaseEmpty from '../base/BaseEmpty.vue';
 import DirTag from '../base/DirTag.vue';
 import TimeAgo from '../base/TimeAgo.vue';
+import CryptoLogo from './CryptoLogo.vue';
 
 const emit = defineEmits<{ (e: 'pick-symbol', instId: string): void }>();
 
@@ -16,8 +23,51 @@ const { t } = useI18n();
 
 const tab = ref<'positions' | 'orders'>('positions');
 
+type VenueFilter = 'all' | 'okx' | 'binance' | 'gate';
+const selectedVenue = ref<VenueFilter>('all');
+
+/** 批 66：场所过滤胶囊的选项表（原为模板内联字面量，无法索引，故上提为 computed）。 */
+const venueTabs = computed<{ key: VenueFilter; label: string }[]>(() => [
+  { key: 'all', label: t('common.all') },
+  { key: 'okx', label: 'OKX' },
+  { key: 'binance', label: 'Binance' },
+  { key: 'gate', label: 'Gate' },
+]);
+
+// 漫游 tabindex + ←/→/Home/End：此前一组 4 个 role="tab" 全在 Tab 键顺序里且方向键无响应。
+const { setRef: setVenueRef, onKeydown: onVenueKey, roving: venueRoving } = useRovingTabs(
+  () => venueTabs.value.length,
+  (i) => { selectedVenue.value = venueTabs.value[i].key; },
+);
+
 const positions = computed(() => store.positions);
 const orders = computed(() => store.pendingOrders);
+
+function getVenueOf(item: any): string {
+  const v = String(item?.venue || item?.exchange || '').toLowerCase();
+  if (v.includes('binance')) return 'binance';
+  if (v.includes('gate')) return 'gate';
+  return 'okx';
+}
+
+function getModeOf(item: any): 'LIVE' | 'DEMO' {
+  if (item?.account_mode) return item.account_mode.toUpperCase() === 'LIVE' ? 'LIVE' : 'DEMO';
+  if (item?.environment) return item.environment.toLowerCase() === 'live' ? 'LIVE' : 'DEMO';
+  if (item?.is_simulated !== undefined) return item.is_simulated ? 'DEMO' : 'LIVE';
+  const storeEnv = (store.data as any)?.environment || (store.account as any)?.environment;
+  if (storeEnv) return String(storeEnv).toLowerCase() === 'live' ? 'LIVE' : 'DEMO';
+  return 'DEMO';
+}
+
+const filteredPositions = computed(() => {
+  if (selectedVenue.value === 'all') return positions.value;
+  return positions.value.filter((p) => getVenueOf(p) === selectedVenue.value);
+});
+
+const filteredOrders = computed(() => {
+  if (selectedVenue.value === 'all') return orders.value;
+  return orders.value.filter((o) => getVenueOf(o) === selectedVenue.value);
+});
 
 function posPnl(p: any): number {
   return Number(p.upl ?? 0);
@@ -34,73 +84,145 @@ function orderDir(o: any): 'long' | 'short' {
 function symOf(x: { instId?: string; name?: string }): string {
   return x.name || String(x.instId || '').split('-')[0];
 }
+function getTp1(p: any): string | null {
+  if (p?.scaleOutTp) return String(p.scaleOutTp);
+  const desc = String(p?.stageDesc || '');
+  const m = desc.match(/TP1:\s*([0-9.]+)/i);
+  return m ? m[1] : null;
+}
 </script>
 
 <template>
-  <div class="card flex h-full flex-col overflow-hidden">
-    <!-- 面板头：分段 + 计数 -->
-    <div class="flex items-center gap-2 border-b px-3 py-2.5" style="border-color: var(--line-1)">
-      <BaseSegmented
-        v-model="tab"
-        :options="[
-          { value: 'positions', label: `${t('dash.matrix.positions.tab')} ${positions.length}` },
-          { value: 'orders', label: `${t('dash.matrix.orders.tab')} ${orders.length}` },
-        ]"
-      />
-      <span v-if="tab === 'positions' && !positions.length" class="t-faint ms-auto hidden text-xs sm:block">
-        {{ t('dash.matrix.positions.aiManaged') }}
-      </span>
-    </div>
+  <div class="dsh-card pop-panel flex h-full max-h-[58dvh] flex-col overflow-hidden xl:max-h-none">
+    <!-- 面板头部：选项卡与场所过滤条 -->
+    <header class="dsh-card-header flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+      <div class="flex items-center gap-2">
+        <BaseSegmented
+          v-model="tab"
+          :label="t('dash.matrix.positionsOrders.tabsAria')"
+          :options="[
+            { value: 'positions', label: `${t('dash.matrix.positions.tab')} ${filteredPositions.length}` },
+            { value: 'orders', label: `${t('dash.matrix.orders.tab')} ${filteredOrders.length}` },
+          ]"
+        />
+        <span v-if="tab === 'positions' && !filteredPositions.length" class="text-3xs text-[var(--ink-3)] hidden sm:block">
+          {{ t('dash.matrix.positions.aiManaged') }}
+        </span>
+      </div>
 
-    <!-- 持仓表 -->
-    <div v-if="tab === 'positions'" class="scroll-y flex-1 overflow-x-auto">
-      <BaseEmpty v-if="!positions.length" :text="t('dash.matrix.positions.empty')" />
-      <table v-else class="table">
+      <!-- 交易所过滤小胶囊 -->
+      <div class="seg w-full sm:w-auto" role="tablist" :aria-label="t('dash.matrix.pop.venueLabel')">
+        <button
+          v-for="(v, vi) in venueTabs"
+          :key="v.key"
+          :ref="setVenueRef(vi)"
+          type="button"
+          role="tab"
+          :aria-selected="selectedVenue === v.key"
+          :tabindex="venueRoving(selectedVenue === v.key)"
+          :class="{ 'seg-on': selectedVenue === v.key }"
+          @click="selectedVenue = v.key"
+          @keydown="onVenueKey($event, vi)"
+        >
+          {{ v.label }}
+        </button>
+      </div>
+    </header>
+
+    <!-- 持仓列表 -->
+    <div v-if="tab === 'positions'" class="scroll-y flex-1 min-h-0 overflow-x-auto">
+      <BaseEmpty v-if="!filteredPositions.length" :text="t('dash.matrix.positions.empty')" />
+      <table v-else class="table pop-table w-full" :aria-label="t('dash.matrix.positions.title')">
         <thead>
           <tr>
-            <th>{{ t('dash.matrix.positions.col.symbol') }}</th>
-            <th class="col-num">{{ t('dash.matrix.positions.col.entry') }}</th>
-            <th class="col-num">{{ t('dash.matrix.positions.col.mark') }}</th>
-            <th class="col-num">{{ t('dash.matrix.positions.col.lev') }}</th>
-            <th class="col-num">{{ t('dash.matrix.positions.col.pnl') }}</th>
-            <th class="col-num hidden 2xl:table-cell">{{ t('dash.matrix.positions.col.sl') }} / {{ t('dash.matrix.positions.col.tp') }}</th>
-            <th class="text-center">{{ t('dash.matrix.positions.col.oco') }}</th>
+            <th scope="col" class="min-w-[140px]">{{ t('dash.matrix.positions.col.symbol') }}</th>
+            <th scope="col" class="col-num min-w-[85px]">{{ t('dash.matrix.positions.col.entry') }} / {{ t('dash.matrix.positions.col.mark') }}</th>
+            <th scope="col" class="col-num min-w-[75px]">{{ t('dash.matrix.positions.col.lev') }} / {{ t('dash.matrix.positions.col.margin') }}</th>
+            <th scope="col" class="col-num min-w-[85px]">{{ t('dash.matrix.positions.col.pnl') }}</th>
+            <th scope="col" class="col-num min-w-[85px]">{{ t('dash.matrix.positions.col.sl') }} / {{ t('dash.matrix.positions.col.tp') }}</th>
+            <th scope="col" class="text-center min-w-[50px]">{{ t('dash.matrix.positions.col.oco') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr
-            v-for="p in positions"
+            v-for="p in filteredPositions"
             :key="p.instId + p.side"
-            class="clickable"
+            class="clickable transition-colors hover:bg-[var(--surface-2)]"
             :title="t('dash.matrix.chart.pickHint')"
+            tabindex="0"
             @click="emit('pick-symbol', p.instId)"
+            @keydown.enter="emit('pick-symbol', p.instId)"
+            @keydown.space.prevent="emit('pick-symbol', p.instId)"
           >
             <td>
-              <div class="flex items-center gap-2">
-                <span class="num font-semibold" style="color: var(--ink-strong)">{{ symOf(p) }}</span>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <CryptoLogo :symbol="symOf(p)" :size="16" />
+                <span class="num font-mono font-semibold text-xs text-[var(--ink-strong)]">{{ symOf(p) }}</span>
                 <DirTag :dir="p.side" />
+                <span
+                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold uppercase border"
+                  :class="venueToneCls(getVenueOf(p))"
+                >
+                  {{ getVenueOf(p).toUpperCase() }}
+                </span>
+                <span
+                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-medium border"
+                  :class="getModeOf(p) === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
+                >
+                  {{ getModeOf(p) }}
+                </span>
+                <span
+                  v-if="(p.scaleOutPhase ?? 0) >= 1"
+                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold border text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]"
+                  :title="t('dash.matrix.positions.scaleOutTitle')"
+                >
+                  🎯 {{ t('dash.matrix.positions.scaleOutPill') }}
+                </span>
               </div>
-              <p v-if="p.stageDesc" class="t-faint text-2xs leading-tight">{{ p.stageDesc }}</p>
+              <p
+                v-if="p.stageDesc"
+                class="text-3xs leading-tight mt-0.5 truncate max-w-[170px]"
+                :class="(p.scaleOutPhase ?? 0) >= 1 ? 'text-[var(--up)] font-medium' : 'text-[var(--ink-3)]'"
+                :title="p.stageDesc"
+              >{{ p.stageDesc }}</p>
             </td>
-            <td class="col-num">{{ fmtPrice(p.avgPx) }}</td>
-            <td class="col-num">{{ fmtPrice(p.markPx ?? p.last) }}</td>
-            <td class="col-num">{{ p.lever }}x</td>
-            <td class="col-num" :class="posPnl(p) >= 0 ? 'up' : 'down'">
-              {{ arrow(posPnl(p)) }} {{ fmtSigned(posPnl(p)) }}
-              <span class="t-faint block text-2xs">{{ fmtPct(posRoi(p)) }}</span>
+            <td class="col-num font-mono">
+              <span class="block text-xs font-medium text-[var(--ink-strong)]">{{ fmtPrice(p.avgPx) }}</span>
+              <span class="block text-3xs text-[var(--ink-3)]">{{ fmtPrice(p.markPx ?? p.last) }}</span>
             </td>
-            <td class="col-num t-faint hidden 2xl:table-cell">
-              <span class="down">{{ fmtPrice(p.exchangeSl ?? p.displayStop) }}</span>
-              <span class="mx-1">/</span>
-              <span class="up">{{ fmtPrice(p.exchangeTp ?? p.displayTakeProfit) }}</span>
+            <td class="col-num font-mono">
+              <span class="block text-xs font-bold text-[var(--ink-strong)]">{{ p.lever }}x</span>
+              <span class="block text-3xs text-[var(--ink-2)] font-medium">{{ p.margin_usdt ? `${fmtNum(p.margin_usdt, 2)}U` : '--' }}</span>
+            </td>
+            <td class="col-num font-mono" :class="posPnl(p) >= 0 ? 'up' : 'down'">
+              <span class="block text-xs font-semibold">{{ arrow(posPnl(p)) }} {{ fmtSigned(posPnl(p)) }}</span>
+              <span class="text-3xs block" :class="posPnl(p) >= 0 ? 'text-[var(--up)]' : 'text-[var(--down)]'">{{ fmtPct(posRoi(p)) }}</span>
+            </td>
+            <td class="col-num font-mono text-3xs">
+              <span class="down block">SL {{ fmtPrice(p.exchangeSl ?? p.displayStop) }}</span>
+              <span v-if="getTp1(p)" class="up block font-medium" :title="p.stageDesc || t('dash.matrix.positions.scaleOutTitle')">
+                TP1 {{ fmtPrice(getTp1(p)) }}
+              </span>
+              <span class="up block" :class="getTp1(p) ? 'text-[var(--ink-2)]' : ''">
+                {{ getTp1(p) ? 'TP2' : 'TP' }} {{ fmtPrice(p.exchangeTp ?? p.displayTakeProfit) }}
+              </span>
             </td>
             <td class="text-center">
-              <span v-if="ocoOk(p)" class="badge badge-up" :title="t('dash.matrix.positions.ocoOk')">
-                <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
-                {{ t('dash.matrix.positions.ocoOk') }}
+              <span
+                v-if="ocoOk(p)"
+                class="inline-flex items-center gap-1 text-3xs text-[var(--up)]"
+                :title="t('dash.matrix.positions.ocoOk')"
+              >
+                <ShieldCheck class="h-3.5 w-3.5" />
+                <span class="hidden sm:inline">{{ t('dash.matrix.positions.ocoOk') }}</span>
               </span>
-              <span v-else class="badge badge-warn" :title="t('dash.matrix.positions.ocoMissHint')">
-                {{ t('dash.matrix.positions.ocoMiss') }}
+              <span
+                v-else
+                class="inline-flex items-center gap-1 text-3xs text-[var(--warn)]"
+                :title="t('dash.matrix.positions.ocoMissHint')"
+              >
+                <ShieldAlert class="h-3.5 w-3.5" />
+                <span class="hidden sm:inline">{{ t('dash.matrix.positions.ocoMiss') }}</span>
               </span>
             </td>
           </tr>
@@ -108,49 +230,111 @@ function symOf(x: { instId?: string; name?: string }): string {
       </table>
     </div>
 
-    <!-- 挂单表 -->
-    <div v-else class="scroll-y flex-1 overflow-x-auto">
-      <BaseEmpty v-if="!orders.length" :text="t('dash.matrix.orders.empty')" />
-      <table v-else class="table">
+    <!-- 挂单列表 -->
+    <div v-else class="scroll-y flex-1 min-h-0 overflow-x-auto">
+      <BaseEmpty v-if="!filteredOrders.length" :text="t('dash.matrix.orders.empty')" />
+      <table v-else class="table pop-table w-full" :aria-label="t('dash.matrix.orders.title')">
         <thead>
           <tr>
-            <th>{{ t('dash.matrix.orders.col.symbol') }}</th>
-            <th class="col-num">{{ t('dash.matrix.orders.col.price') }}</th>
-            <th class="col-num">{{ t('dash.matrix.orders.col.qty') }}</th>
-            <th class="col-num">{{ t('dash.matrix.orders.col.sl') }} / {{ t('dash.matrix.orders.col.tp') }}</th>
-            <th>{{ t('dash.matrix.orders.col.placed') }}</th>
-            <th class="text-center">{{ t('dash.matrix.orders.col.state') }}</th>
+            <th scope="col" class="min-w-[140px]">{{ t('dash.matrix.orders.col.symbol') }}</th>
+            <th scope="col" class="col-num min-w-[85px]">{{ t('dash.matrix.orders.col.price') }}</th>
+            <th scope="col" class="col-num min-w-[75px]">{{ t('dash.matrix.orders.col.qty') }} / {{ t('dash.matrix.positions.col.lev') }}</th>
+            <th scope="col" class="col-num min-w-[85px]">{{ t('dash.matrix.orders.col.sl') }} / {{ t('dash.matrix.orders.col.tp') }}</th>
+            <th scope="col" class="pop-col-time text-right min-w-[80px]">{{ t('dash.matrix.orders.col.placed') }}</th>
+            <th scope="col" class="text-center min-w-[60px]">{{ t('dash.matrix.orders.col.state') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr
-            v-for="o in orders"
+            v-for="o in filteredOrders"
             :key="o.ordId"
-            class="clickable"
+            class="clickable transition-colors hover:bg-[var(--surface-2)]"
             :title="t('dash.matrix.chart.pickHint')"
+            tabindex="0"
             @click="emit('pick-symbol', o.instId)"
+            @keydown.enter="emit('pick-symbol', o.instId)"
+            @keydown.space.prevent="emit('pick-symbol', o.instId)"
           >
             <td>
-              <div class="flex items-center gap-2">
-                <span class="num font-semibold" style="color: var(--ink-strong)">{{ symOf(o) }}</span>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <CryptoLogo :symbol="symOf(o)" :size="16" />
+                <span class="num font-mono font-semibold text-xs text-[var(--ink-strong)]">{{ symOf(o) }}</span>
                 <DirTag :dir="orderDir(o)" />
+                <span
+                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold uppercase border"
+                  :class="venueToneCls(getVenueOf(o))"
+                >
+                  {{ getVenueOf(o).toUpperCase() }}
+                </span>
+                <span
+                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-medium border"
+                  :class="getModeOf(o) === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
+                >
+                  {{ getModeOf(o) }}
+                </span>
               </div>
             </td>
-            <td class="col-num">{{ fmtPrice(o.px) }}</td>
-            <td class="col-num">{{ fmtNum(Number(o.sz), 0) }}</td>
-            <td class="col-num t-faint">
-              <span class="down">{{ o.slTriggerPx ? fmtPrice(o.slTriggerPx) : '--' }}</span>
-              <span class="mx-1">/</span>
-              <span class="up">{{ o.tpTriggerPx ? fmtPrice(o.tpTriggerPx) : '--' }}</span>
+            <td class="col-num font-mono text-xs font-semibold text-[var(--ink-strong)]">
+              {{ fmtPrice(o.px) }}
             </td>
-            <td><TimeAgo :time="Number(o.cTime) || o.cTime" /></td>
-            <td class="text-center"><span class="badge">{{ o.state === 'live' ? t('status.waiting') : o.state }}</span></td>
+            <td class="col-num font-mono">
+              <span class="block text-xs font-medium text-[var(--ink-strong)]">{{ fmtNum(Number(o.sz), 0) }}</span>
+              <span class="block text-3xs text-[var(--ink-2)]">{{ o.lever || '3x' }}</span>
+            </td>
+            <td class="col-num font-mono text-3xs">
+              <span class="down block">SL {{ o.slTriggerPx ? fmtPrice(o.slTriggerPx) : (o.sl_px && String(o.sl_px) !== '--' ? fmtPrice(o.sl_px) : '--') }}</span>
+              <span class="up block">TP {{ o.tpTriggerPx ? fmtPrice(o.tpTriggerPx) : (o.tp_px && String(o.tp_px) !== '--' ? fmtPrice(o.tp_px) : '--') }}</span>
+            </td>
+            <td class="pop-col-time text-3xs text-right text-[var(--ink-3)]">
+              <TimeAgo :time="Number(o.cTime) || o.cTime" />
+            </td>
+            <td class="text-center">
+              <span class="inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-3xs border border-[var(--line-1)] bg-[var(--surface-2)] text-[var(--ink-2)]">
+                {{ o.state === 'live' ? t('status.waiting') : o.state }}
+              </span>
+            </td>
           </tr>
         </tbody>
       </table>
-      <p v-if="orders.length" class="t-faint border-t px-3.5 py-2 text-xs" style="border-color: var(--line-1)">
+      <p v-if="filteredOrders.length" class="text-3xs text-[var(--ink-3)] border-t px-3.5 py-2" style="border-color: var(--line-1)">
         {{ t('dash.matrix.orders.aiManaged') }}
       </p>
     </div>
   </div>
 </template>
+
+<style scoped>
+.pop-panel {
+  container-type: inline-size;
+}
+
+.pop-table {
+  table-layout: auto;
+}
+
+.pop-table th,
+.pop-table td {
+  padding-left: var(--sp-3);
+  padding-right: var(--sp-3);
+}
+
+@container (max-width: 480px) {
+  .pop-col-time {
+    display: none;
+  }
+}
+
+/* 极窄（手机）：仍可能出现横向滚动，此时把标的列钉在左侧，滚到哪都认得出是谁 */
+@container (max-width: 419px) {
+  .pop-table th:first-child,
+  .pop-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background-color: var(--ds-color-bg-surface-card);
+  }
+  .pop-table tbody tr:hover td:first-child {
+    background-color: var(--ds-color-bg-surface-2);
+  }
+}
+</style>

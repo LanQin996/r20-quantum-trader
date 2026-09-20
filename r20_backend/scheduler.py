@@ -22,17 +22,30 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 DATA = ROOT / "data"
 LOGS = ROOT / "logs"
-LOGS.mkdir(exist_ok=True)
-DATA.mkdir(exist_ok=True)
+_BJ = timezone(timedelta(hours=8))
+logger = logging.getLogger(__name__)
 
-# Held exclusively by r20_gateway.worker while the gateway scheduler is alive.
 GATEWAY_LOCK = DATA / ".r20_gateway.lock"
 
-logging.basicConfig(
-    filename=LOGS / "r20_scheduler.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+class BeijingFormatter(logging.Formatter):
+    """Convert each record's creation epoch, never the formatting wall clock."""
+
+    @staticmethod
+    def converter(timestamp):
+        return datetime.fromtimestamp(timestamp, _BJ).timetuple()
+
+
+def configure_logging() -> None:
+    # Only this scheduler's handler uses Beijing time; leave global logging alone.
+    LOGS.mkdir(exist_ok=True)
+    if not logger.handlers:
+        handler = logging.FileHandler(LOGS / "r20_scheduler.log", encoding="utf-8")
+        handler.setFormatter(BeijingFormatter(
+            "%(asctime)s +08:00 %(levelname)s %(message)s"
+        ))
+        logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 JOBS = {
     "trader": ("ai_factor_trader.py", 15 * 60),
@@ -77,9 +90,9 @@ def run_script(name: str) -> bool:
         logging.error("job=%s timeout=%ss expired; killed", name, timeout)
         return False
     if result.returncode:
-        logging.error("job=%s rc=%s stderr=%s", name, result.returncode, result.stderr[-1000:])
+        logger.error("job=%s rc=%s stderr=%s", name, result.returncode, result.stderr[-1000:])
     else:
-        logging.info("job=%s completed stdout=%s", name, result.stdout[-500:])
+        logger.info("job=%s completed stdout=%s", name, result.stdout[-500:])
     return result.returncode == 0
 
 
@@ -97,14 +110,14 @@ def run_interval_job(name: str, interval: float, now: datetime, last: dict[str, 
         return False
     retry.pop(name, None)
     if is_retry:
-        logging.warning("job=%s retrying after failure", name)
+        logger.warning("job=%s retrying after failure", name)
     succeeded = run_script(name)
     last[name] = now
     if not succeeded and not is_retry:
-        logging.warning("job=%s failed; scheduling retry in 60s", name)
+        logger.warning("job=%s failed; scheduling retry in 60s", name)
         retry[name] = now.timestamp() + 60
     elif not succeeded:
-        logging.warning("job=%s retry failed; waiting for next interval slot", name)
+        logger.warning("job=%s retry failed; waiting for next interval slot", name)
     return True
 
 
@@ -119,6 +132,8 @@ def due_daily(now: datetime, schedule_time: str, last_run: datetime | None) -> b
 
 
 def main() -> None:
+    configure_logging()
+    DATA.mkdir(exist_ok=True)
     lock_path = DATA / ".r20_scheduler.lock"
     with lock_path.open("a+") as lock:
         try:
@@ -130,7 +145,7 @@ def main() -> None:
         last: dict[str, datetime | None] = {key: None for key in JOBS}
         retry: dict[str, float] = {}
         gateway_active = False
-        logging.info("R20 standalone scheduler v6.6.2 started")
+        logger.info("R20 standalone scheduler v6.6.2 started")
         while True:
             # The gateway scheduler owns these jobs; defer while it is alive
             # so jobs like ai_factor_trader.py do not fire twice.

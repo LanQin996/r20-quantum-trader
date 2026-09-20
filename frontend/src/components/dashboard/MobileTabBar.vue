@@ -13,16 +13,19 @@ const activeKey = computed(() => (route.meta?.tab as string) || 'trading');
 
 <template>
   <nav
-    class="fixed inset-x-0 bottom-0 z-[var(--z-header)] border-t backdrop-blur-xl md:hidden"
+    class="fixed inset-x-0 bottom-0 z-[var(--z-header)] border-t md:hidden"
     style="background-color: var(--surface-header); border-color: var(--line-1); padding-bottom: env(safe-area-inset-bottom)"
     aria-label="mobile primary"
   >
     <div class="mx-auto flex max-w-md items-stretch justify-around">
-      <button
+      <button type="button"
         v-for="tab in publicTabs"
         :key="tab.key"
         class="flex flex-1 cursor-pointer flex-col items-center gap-0.5 py-1.5 text-2xs font-medium transition-colors"
-        :style="{ color: activeKey === tab.key ? 'var(--accent)' : 'var(--ink-2)' }"
+        :class="
+          activeKey === tab.key ? 'text-[var(--accent)]' : 'text-[var(--ink-2)] hover:text-[var(--ink-1)]'
+        "
+        :aria-current="activeKey === tab.key ? 'page' : undefined"
         @click="router.push(tab.path)"
       >
         <component :is="tab.icon" class="h-[18px] w-[18px]" />

@@ -1,10 +1,14 @@
 /** 实盘矩阵：KPI 带 / 持仓 / 挂单 / K线工作站 / 因子矩阵 */
 export const zhMatrix = {
   title: '实盘矩阵',
-  desc: '账户、持仓、挂单与全标的因子动能同屏监控，AI 主脑每 15 分钟裁决一次',
+  desc: '账户、持仓、挂单与因子矩阵同屏监控',
 
   kpi: {
     equity: '账户总权益',
+    multiEquity: '多所组合资产分布',
+    venuesConnected: '{n} 所接入',
+    comboEquity: '组合总权益 (U)',
+    comboEquityTip: '多所聚合权益',
     todayPnl: '今日已实现',
     floatPnl: '持仓浮动盈亏',
     ls: '多空持仓比',
@@ -14,17 +18,20 @@ export const zhMatrix = {
     todayTip: '今日 00:00（UTC+8）以来平仓实现的净盈亏',
     floatTip: '在途持仓按标记价计算的未实现盈亏',
     marginTip: '已用保证金 / 账户总权益',
-    ocoTip: '每笔持仓必须 100% 覆盖交易所云端止盈止损（Fail-Closed）',
+    ocoTip: '云端止盈止损覆盖率',
     allCovered: '全覆盖',
     missN: '{n} 笔缺失',
     day14: '近 14 日',
     vsYesterday: '较昨日',
   },
 
+  positionsOrders: {
+    tabsAria: '持仓与挂单',
+  },
   positions: {
     tab: '活动持仓',
     title: '活动持仓',
-    empty: '当前空仓，AI 正在等待更好的入场结构',
+    empty: '当前空仓',
     col: {
       symbol: '标的',
       dir: '方向',
@@ -42,15 +49,17 @@ export const zhMatrix = {
     },
     ocoOk: '已挂',
     ocoMiss: '未挂',
-    ocoMissHint: '交易所侧无止盈止损保护，等待下个周期补挂',
-    aiManaged: '持仓生命周期由 AI 自主管理',
+    ocoMissHint: '交易所侧无止盈止损保护',
+    aiManaged: '持仓由 AI 管理',
+    scaleOutPill: '半仓保本',
+    scaleOutTitle: '已分批止盈50%，余仓保本奔跑中',
     detail: '持仓详情',
   },
 
   orders: {
     tab: '在途挂单',
     title: '在途限价挂单',
-    empty: '无在途挂单，AI 将在下个周期按研判重新布单',
+    empty: '无在途挂单',
     col: {
       symbol: '标的',
       dir: '方向',
@@ -64,9 +73,9 @@ export const zhMatrix = {
     },
     decisionTime: '推理时间',
     cancel: '撤销',
-    aiManaged: '挂单由 AI 动态管理：行情偏离或时机变化时会自动撤改',
+    aiManaged: '挂单由 AI 动态管理',
     cancelTitle: '撤销挂单',
-    cancelDesc: '{sym} {dir} 限价单 @ {price} 将被撤销，AI 会在下个周期重新评估入场时机。',
+    cancelDesc: '{sym} {dir} 限价单 @ {price} 将被撤销。',
     canceled: '挂单已撤销',
     typeMaker: '限价',
     typeAlgo: '条件单',
@@ -118,12 +127,15 @@ export const zhMatrix = {
       sl: '最大风险',
       reset: '复位',
       copy: '复制风控参数',
+      /* 批 77：剪贴板文案此前硬编码中文（`【R20 风控测算】` / `入场:` / `SL:` / `TP:`），
+         英文界面下用户复制出来是一段中英混排。 */
+      copySummary: '【R20 风控测算】{sym} 入场:{entry} SL:{sl} TP:{tp} R:R={rr}:1',
     },
   },
 
   matrix: {
     title: '因子动能矩阵',
-    desc: '1H 微积分动力学 × 聪明钱筹码 × AI 终审结论，点击行看完整证据链',
+    desc: '点击任意行查看完整证据链',
     empty: '等待首个因子快照',
     col: {
       symbol: '标的',
@@ -141,6 +153,7 @@ export const zhMatrix = {
     velTip: '价格一阶导（1H）：上涨动能方向',
     accTip: '价格二阶导（1H）：动能加速或衰竭',
     adxTip: '趋势强度：ADX < 18 视为杂波区间，禁止开仓',
+    lsTip: '多空持仓比：多头持仓人数 / 空头持仓人数',
     cmfTip: '资金流方向：正值净流入',
     regime: {
       trendUp: '多头趋势',
@@ -162,4 +175,48 @@ export const zhMatrix = {
     noDecision: '本周期该标的无动作',
     updated: '快照 {t}',
   },
+  venue: {
+    title: '选所决策 · venue_decision',
+    beijing: '北京',
+    selectedPrefix: '中选',
+    notSelected: '未选中',
+    reasonCodeFallback: '原因码 --',
+    manualPrefix: '手选优先',
+    hysteresis: '滞回保留现任',
+    allocPrefix: '分配',
+    rejectedTitle: '被淘汰候选 · {n} 所',
+    thVenue: '交易所',
+    thStage: '淘汰阶段',
+    thReason: '原因',
+    noEvidence: '暂无选所决策证据——该信号本周期未走选所路由链路（接线周期生成后自动展示）。',
+    crossTitle: '跨所 · Binance / Gate',
+    crossLs: 'L/S 币安/Gate',
+    crossFund: 'Fund% 币安/Gate',
+    crossEmpty: '该币暂无跨所快照——等待下一个 15 分钟决策周期生成。',
+  },
+
+  // ── 批 29：大盘页此前有 6 处中文写死在模板里（多空过滤标签、工位操作表头、
+  //    两个 title 提示），英文模式下仍是中文。 ──
+  filterAll: '全部',
+  filterLong: '做多',
+  filterShort: '做空',
+  filterWait: '观望',
+  colActions: '工位操作',
+  chartTip: '在主图切换到该标的',
+  chartBtn: '看主图',
+  focusTip: '进入纯工位沉浸模式',
+  focusRestoreTip: '恢复全量监控看板',
+  hudProdDynamics: 'PROD · 15M 动力学中枢',
+  focusEnter: '工位沉浸模式',
+  focusExit: '退出工位模式',
+  // ── 批 41：本地化写死文案（FactorDrawer 预算行 / FactorMatrix 搜索框）──
+  searchPlaceholder: '搜索标的 (BTC/ETH)...',
+  budget: {
+    limit: '上限 {v}',
+    before: '预留前占 {v}',
+    this: '本次预留 {v}',
+    state: '态 {v}',
+  },
+  // ── 批 44：场所过滤分段组名 ──
+  pop: { venueLabel: '按交易场所筛选' },
 };

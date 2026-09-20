@@ -22,6 +22,22 @@ import math
 import os
 import sys
 import urllib.request
+
+# ⚠️ 第七十九刀（bootstrap 门抓到的同类真雷）：顶层 import `scripts.` 但
+# 此前**无任何仓库根 bootstrap**（下方 L9x 的 insert 只是函数内给
+# `market_data_service` 的 fallback，且目录不是 repo 根）——
+# `python scripts/backtest_engine.py` 直跑必 ModuleNotFoundError。
+# 补 factor_library 同款（幂等）。
+_BT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BT_ROOT not in sys.path:
+    sys.path.insert(0, _BT_ROOT)
+
+from scripts.backtest.lifecycle import evaluate_position_exit, settle_exit
+from scripts.backtest.metrics import (
+    aggregate_portfolio,
+    build_entry_candidate,
+    compute_performance_metrics,
+)
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -195,48 +211,13 @@ class BacktestEngine:
             # 1. Active Position Lifecycle Management
             if active_position is not None:
                 pos = active_position
-                direction = pos["direction"]
-                entry_px = pos["entry_price"]
-                sl = pos["stop_loss"]
-                tp = pos["take_profit"]
-                sz = pos["size"]
-                r_dist = abs(entry_px - sl)
+                _exit = evaluate_position_exit(
+                    pos=pos, high=h, low=l, close=c, slippage=self.slippage)
 
-                exit_trade = False
-                exit_price = c
-                exit_reason = ""
-
-                if direction == "LONG":
-                    # Break-even lock rule: move stop to entry once reached +0.8R
-                    if h >= entry_px + (r_dist * 0.8) and pos["stop_loss"] < entry_px:
-                        pos["stop_loss"] = entry_px
-
-                    if l <= pos["stop_loss"]:
-                        exit_trade = True
-                        exit_price = pos["stop_loss"] * (1 - self.slippage)
-                        exit_reason = "STOP_LOSS"
-                    elif h >= tp:
-                        exit_trade = True
-                        exit_price = tp * (1 - self.slippage)
-                        exit_reason = "TAKE_PROFIT"
-                else:  # SHORT
-                    if l <= entry_px - (r_dist * 0.8) and pos["stop_loss"] > entry_px:
-                        pos["stop_loss"] = entry_px
-
-                    if h >= pos["stop_loss"]:
-                        exit_trade = True
-                        exit_price = pos["stop_loss"] * (1 + self.slippage)
-                        exit_reason = "STOP_LOSS"
-                    elif l <= tp:
-                        exit_trade = True
-                        exit_price = tp * (1 + self.slippage)
-                        exit_reason = "TAKE_PROFIT"
-
-                if exit_trade:
-                    fee = (entry_px * sz * self.taker_fee) + (exit_price * sz * self.maker_fee)
-                    pnl = ((exit_price - entry_px) if direction == "LONG" else (entry_px - exit_price)) * sz - fee
-                    pnl_pct = pnl / (entry_px * sz) if (entry_px * sz) > 0 else 0.0
-                    r_mult = pnl / (r_dist * sz) if (r_dist * sz) > 0 else 0.0
+                if _exit.should_exit:
+                    pnl, pnl_pct, r_mult = settle_exit(
+                        pos=pos, decision=_exit,
+                        taker_fee=self.taker_fee, maker_fee=self.maker_fee)
 
                     self.capital += pnl
                     trades.append(
@@ -244,13 +225,13 @@ class BacktestEngine:
                             symbol=candle.get("symbol", symbol),
                             entry_time=pos["entry_time"],
                             exit_time=ts,
-                            direction=direction,
-                            entry_price=round(entry_px, 4),
-                            exit_price=round(exit_price, 4),
-                            size=round(sz, 4),
+                            direction=pos["direction"],
+                            entry_price=round(pos["entry_price"], 4),
+                            exit_price=round(_exit.exit_price, 4),
+                            size=round(pos["size"], 4),
                             pnl_usd=round(pnl, 2),
                             pnl_pct=round(pnl_pct * 100, 2),
-                            exit_reason=exit_reason,
+                            exit_reason=_exit.exit_reason,
                             r_multiple=round(r_mult, 2),
                         )
                     )
@@ -281,60 +262,24 @@ class BacktestEngine:
                     continue
 
                 if active_position is None:
-                    direction = "LONG" if sig.get("action") == "BUY" else "SHORT"
-                    atr = sig.get("atr", c * 0.012)
-                    entry_px = c * (1 + self.slippage if direction == "LONG" else 1 - self.slippage)
+                    active_position = build_entry_candidate(
+                        sig=sig, close=c, timestamp=ts, capital=self.capital,
+                        risk_per_trade_pct=self.risk_per_trade_pct,
+                        slippage=self.slippage, rr=rr)
 
-                    # 2.0x ATR wide stop loss & 2.2R take profit
-                    risk_dist = atr * 2.0
-                    if direction == "LONG":
-                        sl = entry_px - risk_dist
-                        tp = entry_px + (risk_dist * rr)
-                    else:
-                        sl = entry_px + risk_dist
-                        tp = entry_px - (risk_dist * rr)
-
-                    risk_usd = self.capital * self.risk_per_trade_pct
-                    size = risk_usd / risk_dist if risk_dist > 0 else 0.0
-
-                    active_position = {
-                        "direction": direction,
-                        "entry_time": ts,
-                        "entry_price": entry_px,
-                        "stop_loss": sl,
-                        "take_profit": tp,
-                        "size": size,
-                    }
-
-        winning = [t for t in trades if t.pnl_usd > 0]
-        losing = [t for t in trades if t.pnl_usd <= 0]
-        win_rate = (len(winning) / len(trades) * 100) if trades else 0.0
-
-        gross_profit = sum(t.pnl_usd for t in winning)
-        gross_loss = abs(sum(t.pnl_usd for t in losing))
-        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0)
-
-        total_return = ((self.capital - self.initial_capital) / self.initial_capital) * 100
-
-        # Sharpe & Sortino (Annualized 1H ~ 8760)
-        if len(returns_list) > 1:
-            mean_ret = sum(returns_list) / len(returns_list)
-            var_ret = sum((r - mean_ret) ** 2 for r in returns_list) / (len(returns_list) - 1)
-            std_ret = math.sqrt(var_ret) if var_ret > 0 else 1e-6
-            sharpe = (mean_ret / std_ret) * math.sqrt(8760)
-
-            downside = [r for r in returns_list if r < 0]
-            if downside:
-                var_down = sum(r**2 for r in downside) / len(downside)
-                sortino = (mean_ret / math.sqrt(var_down)) * math.sqrt(8760)
-            else:
-                sortino = 99.0
-        else:
-            sharpe = 0.0
-            sortino = 0.0
-
-        calmar = (total_return / (max_drawdown * 100)) if max_drawdown > 0 else 0.0
-        avg_r = (sum(t.r_multiple for t in trades) / len(trades)) if trades else 0.0
+        _metrics = compute_performance_metrics(
+            trades=trades, capital=self.capital,
+            initial_capital=self.initial_capital,
+            returns_list=returns_list, max_drawdown=max_drawdown)
+        win_rate = _metrics["win_rate"]
+        profit_factor = _metrics["profit_factor"]
+        total_return = _metrics["total_return"]
+        sharpe = _metrics["sharpe"]
+        sortino = _metrics["sortino"]
+        calmar = _metrics["calmar"]
+        avg_r = _metrics["avg_r"]
+        winning_count = _metrics["winning_trades"]
+        losing_count = _metrics["losing_trades"]
 
         # Format trade logs (last 10)
         recent_trades_json = [asdict(t) for t in reversed(trades[-10:])]
@@ -342,8 +287,8 @@ class BacktestEngine:
         return BacktestSummary(
             symbol=symbol,
             total_trades=len(trades),
-            winning_trades=len(winning),
-            losing_trades=len(losing),
+            winning_trades=winning_count,
+            losing_trades=losing_count,
             win_rate_pct=round(win_rate, 1),
             profit_factor=round(profit_factor, 2),
             initial_equity=round(self.initial_capital, 2),
@@ -400,34 +345,11 @@ def run_full_portfolio_backtest(bar: str = "1H", limit: int = 100, capital_per_a
         combined_trades.extend(summary.recent_trades)
 
     # Portfolio combined performance
-    comb_trades_total = sum(res["total_trades"] for res in asset_results.values())
-    comb_win_total = sum(res["winning_trades"] for res in asset_results.values())
-    comb_loss_total = sum(res["losing_trades"] for res in asset_results.values())
-    comb_win_rate = (comb_win_total / comb_trades_total * 100) if comb_trades_total > 0 else 0.0
-    comb_return = ((total_final - total_initial) / total_initial) * 100
-
-    sharpe_avg = sum(res["sharpe_ratio"] for res in asset_results.values()) / len(symbols)
-    max_dd_avg = max(res["max_drawdown_pct"] for res in asset_results.values())
-
-    portfolio_summary = {
-        "symbol": "ALL_PORTFOLIO (6大主流币全组合)",
-        "total_trades": comb_trades_total,
-        "winning_trades": comb_win_total,
-        "losing_trades": comb_loss_total,
-        "win_rate_pct": round(comb_win_rate, 1),
-        "profit_factor": round(sum(res["profit_factor"] for res in asset_results.values()) / len(symbols), 2),
-        "initial_equity": round(total_initial, 2),
-        "final_equity": round(total_final, 2),
-        "total_return_pct": round(comb_return, 2),
-        "max_drawdown_pct": round(max_dd_avg, 2),
-        "sharpe_ratio": round(sharpe_avg, 2),
-        "sortino_ratio": round(sum(res["sortino_ratio"] for res in asset_results.values()) / len(symbols), 2),
-        "calmar_ratio": round(sum(res["calmar_ratio"] for res in asset_results.values()) / len(symbols), 2),
-        "avg_r_multiple": round(sum(res["avg_r_multiple"] for res in asset_results.values()) / len(symbols), 2),
-        "gatekeeper_filtered_count": total_gatekeeper_filtered,
-        "equity_curve": asset_results.get("BTC-USDT-SWAP", {}).get("equity_curve", []),
-        "recent_trades": combined_trades[:15],
-    }
+    portfolio_summary = aggregate_portfolio(
+        asset_results=asset_results, symbols=symbols,
+        total_initial=total_initial, total_final=total_final,
+        total_gatekeeper_filtered=total_gatekeeper_filtered,
+        combined_trades=combined_trades)
 
     full_payload = {
         "updated_at": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S (北京时间)"),

@@ -12,11 +12,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from okx_runtime import replace_cli_prefix as okx_private_command
+from r20_backend.time_utils import beijing_day
 import json
+from typing import Any, Dict, Optional
 import time
 import subprocess
 import datetime
+
+import scripts.okx_rest as okx_rest
+import scripts.okx_runtime as okx_runtime
 
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
@@ -31,15 +35,6 @@ from market_data_service import fetch_tickers_bulk, fetch_ticker
 
 TARGET_INSTRUMENTS = load_instruments()
 
-def run_json_cmd(cmd: str, timeout: int = 15):
-    try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        if res.stdout.strip():
-            return json.loads(res.stdout.strip())
-    except Exception:
-        pass
-    return None
-
 def get_disk_info():
     try:
         import shutil
@@ -53,16 +48,54 @@ def get_disk_info():
     except Exception:
         return {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent": 0}
 
+def _load_json_list(path: str, *, default=None):
+    """读 JSON 并缓存 —— **同一函数内重复读同一文件**是本文件的既有浪费
+    （第六十二刀修）：`generate_trading_data` 里 `snapshots.json` 与
+    `trading_ledger.json` 各被打开、解析**两次**，第二次完全浪费一次磁盘
+    读 + 一次全量 JSON 解析（台账可到数千行）。
+
+    ⚠️ 语义与原实现逐条对齐：
+    - 每处调用**各自** `try/except`（本函数内不捕获）——
+      原代码是两个独立 try，不能合并成一个 try（那会改变异常传播路径）；
+    - 失败/文件缺失一律回落 `default`（原实现是 `pass` 让变量保持初值）；
+    - 返回值**不做拷贝**：缓存对象在调用点只读（已逐处确认无 `del`/`append`/
+      `[i]=` 等原地修改）。
+
+    函数的取值必须**惰性**：原代码只在各自 `os.path.exists(...)` 成立时才读，
+    若改成函数一进来就预读，`disk_usage` 的失败顺序会变。
+    """
+    if _JSON_CACHE.get(path, _CACHE_MISS) is _CACHE_MISS:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                _JSON_CACHE[path] = json.load(f)
+        except Exception:
+            _JSON_CACHE[path] = default
+    cached = _JSON_CACHE[path]
+    # ⚠️ 用哨兵而不是 None 表示"未缓存" —— 否则文件内容恰为 `null`
+    #    （合法 JSON）时，每次都判为未缓存，退化成**每调用一次读一次**。
+    return default if cached is _CACHE_MISS else cached
+
+
+_CACHE_MISS = object()
+_JSON_CACHE: dict = {}
+
+
 def generate_trading_data():
+    # ⚠️ 缓存**只服务于本次调用**：调用方 `daemon_web_sync.py` 是**循环**调用的，
+    #    若让缓存跨调用存活，第二轮就会读到第一轮的文件内容（陈旧数据）。
+    #    原实现每次调用都重新 open，故这里必须逐调用清空。
+    _JSON_CACHE.clear()
+    env = okx_runtime.current_environment()
+    if not env.configured:
+        # fail-closed (2026-09-09 CLI removal): never overwrite the web cache with zeros
+        raise okx_rest.OKXNotConfigured("OKX API Key 未配置 — Web 数据同步 fail-closed（保持既有 trading_data.json 不动）")
+
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now_bj = datetime.datetime.now(tz_bj)
     today_str = now_bj.strftime("%Y-%m-%d")
 
-    auth_data = run_json_cmd("okx auth status --json") or {}
-    is_authenticated = auth_data.get("status") == "logged_in"
-
     # 1. Balance
-    bal_data = run_json_cmd(okx_private_command("okx account balance --json")) or []
+    bal_data = okx_rest.balances()
     usdt_bal = {}
     if bal_data and isinstance(bal_data, list) and "details" in bal_data[0]:
         for d in bal_data[0]["details"]:
@@ -75,8 +108,8 @@ def generate_trading_data():
     cash_bal = float(usdt_bal.get("cashBal", 0) or 0)
     upl_acc = float(usdt_bal.get("upl", 0) or 0)
 
-    # 2. Positions
-    pos_data = run_json_cmd(okx_private_command("okx account positions --json")) or []
+    # 2. Positions (V5 REST, replaces removed CLI)
+    pos_data = okx_rest.positions()
     positions = []
     long_count = 0
     short_count = 0
@@ -110,8 +143,8 @@ def generate_trading_data():
     # Fallback to last valid snapshot if balance is 0
     if total_eq == 0 and os.path.exists(SNAPSHOTS_JSON_FILE):
         try:
-            with open(SNAPSHOTS_JSON_FILE, "r", encoding="utf-8") as f:
-                snaps = json.load(f)
+            snaps = _load_json_list(SNAPSHOTS_JSON_FILE, default=[])
+            if snaps:
                 valid_snaps = [s for s in snaps if s.get("equity", 0.0) > 0]
                 if valid_snaps:
                     last_s = valid_snaps[-1]
@@ -122,7 +155,7 @@ def generate_trading_data():
             pass
 
     # 3. Bills & Today PnL
-    bills_data = run_json_cmd(okx_private_command("okx account bills --limit 100 --json")) or []
+    bills_data = okx_rest.bills(limit=100)
     today_realized_gross = 0.0
     today_fees = 0.0
     today_funding = 0.0
@@ -151,10 +184,15 @@ def generate_trading_data():
         # Load from JSON ledger
         if os.path.exists(LEDGER_JSON_FILE):
             try:
-                with open(LEDGER_JSON_FILE, "r", encoding="utf-8") as f:
-                    t_list = json.load(f)
+                t_list = _load_json_list(LEDGER_JSON_FILE, default=[])
+                if t_list:
                     for t in t_list:
-                        if today_str in str(t.get("time", "")):
+                        # 审计 D5：台账行根本没有 "time" 键（真实键名 close_time）
+                        # ——旧代码 beijing_day(t.get("time")) 恒 None，JSON 兜底
+                        # 分支的当日胜负统计静默归零。同时补结清状态白名单。
+                        if str(t.get("status", "")).strip().lower() not in ("closed", "已平仓", "completed"):
+                            continue
+                        if beijing_day(t.get("close_time") or t.get("time")) == today_str:
                             p = float(t.get("pnl", 0.0) or 0)
                             if p > 0:
                                 today_win_trades += 1
@@ -174,15 +212,13 @@ def generate_trading_data():
     trades = []
     if os.path.exists(SNAPSHOTS_JSON_FILE):
         try:
-            with open(SNAPSHOTS_JSON_FILE, "r", encoding="utf-8") as f:
-                snapshots = json.load(f)[-40:]
+            snapshots = _load_json_list(SNAPSHOTS_JSON_FILE, default=[])[-40:]
         except Exception:
             pass
 
     if os.path.exists(LEDGER_JSON_FILE):
         try:
-            with open(LEDGER_JSON_FILE, "r", encoding="utf-8") as f:
-                trades = list(reversed(json.load(f)))[:60]
+            trades = list(reversed(_load_json_list(LEDGER_JSON_FILE, default=[])))[:60]
         except Exception:
             pass
 
@@ -250,11 +286,10 @@ def generate_trading_data():
         "timestamp": now_bj.strftime("%Y-%m-%d %H:%M:%S (北京时间)"),
         "date": today_str,
         "auth": {
-            "is_logged_in": is_authenticated,
-            "status": auth_data.get("status", "not_logged_in"),
-            "site": auth_data.get("site", "global"),
-            "verificationUri": auth_data.get("verificationUri", "https://www.okx.com/account/oauth?flow=device"),
-            "userCode": auth_data.get("userCode", "FSVD-HJVL")
+            "connection": "static-v5-api-key",
+            "mode": env.mode,
+            "configured": env.configured,
+            "fingerprint": env.fingerprint
         },
         "account": {
             "total_eq": round(total_eq, 2),
@@ -311,6 +346,15 @@ def generate_trading_data():
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(temp_path, DATA_JSON_PATH)
 
+def main():
+    """CLI entry point: missing credentials exit before any cache writes."""
+    try:
+        generate_trading_data()
+        print("✅ Web data and JSON ledger synced successfully.")
+    except okx_rest.OKXNotConfigured as exc:
+        print(f"[NOT READY] {exc}")
+        raise SystemExit(3)
+
+
 if __name__ == "__main__":
-    generate_trading_data()
-    print("✅ Web data and JSON ledger synced successfully.")
+    main()

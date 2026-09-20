@@ -6,6 +6,11 @@ export const enDocs = {
   copied: 'Copied',
   zoomHint: 'Click to zoom',
   editHint: 'Docs ship with each release',
+  backTerminal: 'Back to terminal',
+  backTerminalShort: 'Terminal',
+  tocBtn: 'Contents',
+  closeToc: 'Close contents',
   backHome: 'Back to home',
   openConsole: 'Open console',
+  zoomModalAria: 'Documentation illustration zoom preview',
 };

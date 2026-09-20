@@ -91,13 +91,44 @@ BASELINE_LESSONS = [
 ]
 
 # 宪法红线规则（任何大模型总结出的心法如果触碰以下词汇或逻辑，直接物理阻断）：
+#: (正则, 拒绝原因, 禁止式豁免)。第三列为 True 时，"严禁放宽止损"这类**禁止式**表述
+#: 属安全知识而非风险扩张；方向偏见两条不豁免——"永远不做多"本身就是毒（毁掉多空对称）。
 POISON_PATTERNS = [
-    (r"(永远不|绝对不|严禁|彻底禁止).*(做多|开多|买入)", "EXTREME_DIRECTIONAL_BIAS (极端做多偏见阻断)"),
-    (r"(永远不|绝对不|严禁|彻底禁止).*(做空|开空|卖出)", "EXTREME_DIRECTIONAL_BIAS (极端做空偏见阻断)"),
-    (r"(扩大|放宽|取消|不设).*(止损|SL)", "RISK_EXPANSION_VIOLATION (违规抗单放大止损)"),
-    (r"(加倍|翻倍|加仓|重仓|梭哈).*(亏损|抗单|摊平)", "MARTINGALE_POISONING (马丁格尔赌徒加仓倾向)"),
-    (r"(忽视|不看|废弃).*(4H|宏观|ATR|风控|拦截器)", "GOVERNANCE_OVERRIDE (企图推翻硬风控拦截器)"),
+    (r"(永远不|绝对不|严禁|彻底禁止).*(做多|开多|买入)", "EXTREME_DIRECTIONAL_BIAS (极端做多偏见阻断)", False),
+    (r"(永远不|绝对不|严禁|彻底禁止).*(做空|开空|卖出)", "EXTREME_DIRECTIONAL_BIAS (极端做空偏见阻断)", False),
+    (r"(扩大|放宽|取消|不设|移除|关闭|删除).*(止损|SL)", "RISK_EXPANSION_VIOLATION (违规抗单放大止损)", True),
+    (r"(加倍|翻倍|加仓|重仓|梭哈).*(亏损|抗单|摊平)", "MARTINGALE_POISONING (马丁格尔赌徒加仓倾向)", True),
+    (r"(忽视|不看|废弃|无视|忽略|跳过|绕过|关闭|禁用|停用|移除|删除|突破).*(4H|宏观|ATR|风控|拦截器|熔断|门禁|刹车)",
+     "GOVERNANCE_OVERRIDE (企图推翻硬风控拦截器)", True),
+    # 审计 P1-8(2026-09-13)：子审计实跑证明旧规则对下面三类**全部 PASS**——
+    #   「把单笔杠杆从 5x 提升至 20x」「把单标的累计保证金上限提高到 50%」
+    #   「关闭风控拦截器以绕过 4H 方向否决」（第三类旧词表只认 忽视/不看/废弃）。
+    # 这三条一旦写进记忆就会被注入主脑提示词，等于让模型自己拆掉硬风控。
+    (r"(提高|提升|放大|增加|调高|拉高|加大|上调|放宽|解除).*(杠杆|leverage)",
+     "RISK_EXPANSION_VIOLATION (抬升杠杆上限)", True),
+    (r"(杠杆|leverage)[^。；;\n]{0,24}(提高|提升|放大|增加|调高|拉高|加大|上调|放宽|解除)",
+     "RISK_EXPANSION_VIOLATION (抬升杠杆上限)", True),
+    (r"(提高|提升|放大|增加|调高|拉高|加大|上调|放宽|解除|取消).*(保证金|仓位上限|持仓上限|风险预算|敞口|单笔上限|风险额度)",
+     "RISK_BUDGET_EXPANSION (放宽保证金/持仓/预算上限)", True),
+    (r"(保证金|仓位|持仓|风险预算|敞口|单笔)[^。；;\n]{0,24}(提高|提升|放大|增加|调高|拉高|加大|上调|放宽|解除)",
+     "RISK_BUDGET_EXPANSION (放宽保证金/持仓/预算上限)", True),
+    (r"(降低|下调|放宽|取消|豁免).*(置信度|门槛|阈值|标准|审查|复核|风控参数)",
+     "RISK_THRESHOLD_LOWERING (下调风控阈值/审查标准)", True),
+    (r"(满仓|全仓|梭哈|all[ -]?in)", "OVER_CONCENTRATION (单次满仓/全仓倾向)", True),
 ]
+
+#: 变更类动词 × 风险名词的共现兜底（同句内出现即拒）：覆盖词表未枚举的改写变体。
+_RISK_CHANGE_VERBS = r"(提高|提升|放大|增加|调高|拉高|加大|上调|放宽|解除|取消|关闭|禁用|停用|移除|删除|跳过|绕过|突破|降低|下调|豁免)"
+_RISK_NOUNS = r"(杠杆|leverage|保证金|仓位|持仓上限|风险预算|敞口|止损|风控|熔断|拦截器|置信度|门槛|阈值|硬约束)"
+#: 同句含这些"禁止类"词 = 在**禁止**风险扩张（合法），豁免共现兜底。
+_RISK_PROHIBITIONS = r"(严禁|禁止|不得|绝不|杜绝|防止|防范|严禁将|不允许|拒绝)"
+
+
+def _strip_prohibition_clauses(sentence: str) -> str:
+    """剔除"禁止类"子句，保留其余文本（"严禁逆势加仓，但可放宽止损" → "但可放宽止损"）。"""
+    clauses = [c for c in re.split(r"[，,]", sentence or "") if c.strip()]
+    kept = [c for c in clauses if not re.search(_RISK_PROHIBITIONS, c)]
+    return "，".join(kept)
 
 
 def audit_proposed_lesson(rule_text: str, sample_size: int = 1) -> Tuple[bool, str]:
@@ -108,10 +139,23 @@ def audit_proposed_lesson(rule_text: str, sample_size: int = 1) -> Tuple[bool, s
     if not rule_text or len(rule_text.strip()) < 10:
         return False, "心法文本过短，缺乏明确可复用的交易情境依据"
 
-    # 1. Check Constitution Red-Lines
-    for pattern, reason in POISON_PATTERNS:
-        if re.search(pattern, rule_text):
-            return False, f"触发宪法红线拦截: {reason}"
+    # 1. 宪法红线：逐句判定（跨句不误伤），禁止式子句按需剥离后再匹配。
+    for sentence in re.split(r"[。；;\n]", rule_text):
+        if not sentence.strip():
+            continue
+        exempt_text = _strip_prohibition_clauses(sentence)
+        for pattern, reason, prohibitive_exempt in POISON_PATTERNS:
+            target = exempt_text if prohibitive_exempt else sentence
+            if target and re.search(pattern, target, re.IGNORECASE):
+                return False, f"触发宪法红线拦截: {reason}"
+
+    # 1b. 共现兜底：同一句里既有"变更类动词"又有"风险名词" → 一律拒（禁止式子句先剥离）。
+    for sentence in re.split(r"[。；;\n]", rule_text):
+        remainder = _strip_prohibition_clauses(sentence)
+        if not remainder:
+            continue
+        if re.search(_RISK_CHANGE_VERBS, remainder) and re.search(_RISK_NOUNS, remainder, re.IGNORECASE):
+            return False, "触发宪法红线拦截: RISK_PARAMETER_TAMPERING (疑似修改杠杆/保证金/风控阈值/拦截器)"
 
     # 2. Outlier / Single-Event Rejection Gate
     if sample_size < 2:
@@ -209,8 +253,32 @@ def render_lessons(lessons):
         active.append(item)
     # Capacity limit: strictly select at most top 8 active lessons (baseline first, then recent)
     sorted_active = sorted(active, key=lambda x: (1 if x.get("is_baseline") else 0, x.get("created_at", "")), reverse=True)
-    capped_active = sorted_active[:8]
+    capped_active = sorted_active[:MAX_INJECTED_LESSONS]
     return "\n".join(f"- {item['rule_text']}" for item in capped_active)
+
+
+#: 提示词注入上限（基线优先，其余按时间倒序）——**超出的 active 心法不会进主脑**。
+#: 审计 P1-8：旧实现把这个截断藏在读侧，页面仍把超出的算作"生效中"，文案还写
+#: "实时透明注入主脑 Prompt" → 管理员以为 12 条都在生效，实际只有 8 条。
+MAX_INJECTED_LESSONS = 8
+
+
+def injection_report(lessons) -> Dict[str, Any]:
+    """披露注入实况：active(未过期)/injected 的条数与未注入清单（供面板与审计）。"""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    active = [i for i in (lessons or []) if isinstance(i, dict) and i.get("enabled") and not is_lesson_expired(i, now)]
+    sorted_active = sorted(active, key=lambda x: (1 if x.get("is_baseline") else 0, x.get("created_at", "")), reverse=True)
+    injected = sorted_active[:MAX_INJECTED_LESSONS]
+    injected_ids = {id(i) for i in injected}
+    return {
+        "active": len(active),
+        "injected": len(injected),
+        "limit": MAX_INJECTED_LESSONS,
+        "not_injected": [
+            {"id": i.get("id"), "category": i.get("category"), "rule_text": (i.get("rule_text") or "")[:60]}
+            for i in sorted_active if id(i) not in injected_ids
+        ],
+    }
 
 
 def read_trading_context(legacy_md=None, legacy_json=None):
@@ -325,7 +393,7 @@ def _new_lesson(text, sample_size, category="TACTICAL"):
             "shield_status": "PASSED"}
 
 
-def _review_candidates(texts, old, sample_size, strict):
+def _review_candidates(texts, old, sample_size, strict, change_status=None):
     if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
         raise ValueError("Expected text list")
     by_text = {i["rule_text"].strip(): i for i in old}
@@ -348,6 +416,20 @@ def _review_candidates(texts, old, sample_size, strict):
         result.append(_new_lesson(text, sample_size))
     # Preserve disabled tombstones even when omitted by a model or legacy editor.
     result.extend(copy.deepcopy(i) for i in old if not i["enabled"] and i["rule_text"].strip() not in seen)
+    # 审计 P1-8c：REVISE/INVALIDATE 下，模型没复述的**已学（非基准）**心法旧实现直接消失，
+    # 报告只统计被宪法补回的基准条目 → 静默丢知识。现在改为保留为**停用存档**
+    # （enabled=False + 退役留痕），既不注入提示词、也不蒸发，面板可见并可人工恢复。
+    if str(change_status or "").upper() in {"REVISE", "INVALIDATE"}:
+        for item in old:
+            if not item.get("enabled") or item.get("is_baseline"):
+                continue
+            if item["rule_text"].strip() in seen:
+                continue
+            tomb = copy.deepcopy(item)
+            tomb["enabled"] = False
+            tomb["retired_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            tomb["retired_reason"] = f"{str(change_status).upper()} 未复述，宿主保留为停用存档（可人工复核恢复）"
+            result.append(tomb)
     return result
 
 
@@ -359,7 +441,7 @@ def publish_review(texts, *, expected_version, sample_size, change_status):
     with _memory_lock():
         snapshot = read_memory_snapshot()
         _check_version(snapshot, expected_version)
-        candidates = _review_candidates(texts, snapshot["lessons"], sample_size, True)
+        candidates = _review_candidates(texts, snapshot["lessons"], sample_size, True, change_status)
         if not candidates or candidates == snapshot["lessons"]:
             return False
         # Rejected-only proposals must not remove existing active entries.

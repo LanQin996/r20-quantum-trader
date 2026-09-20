@@ -12,12 +12,22 @@ const dot = computed(() => {
   const v = tier.value?.tier;
   return v === 'high' ? 'var(--up)' : v === 'mid' ? 'var(--warn)' : 'var(--ink-3)';
 });
+const ariaLabel = computed(() => {
+  if (!tier.value) return '';
+  const num = Math.round((Number(props.value) || 0) * 100) / 100;
+  return `${t(`common.conf.${tier.value.tier}`)} (${num})`;
+});
 </script>
 
 <template>
-  <span v-if="tier" class="badge" :title="`${Math.round((Number(value) || 0) * 100) / 100}`">
-    <span class="dot" :style="{ backgroundColor: dot }" />
+  <span
+    v-if="tier"
+    class="badge"
+    :title="`${Math.round((Number(value) || 0) * 100) / 100}`"
+    :aria-label="ariaLabel"
+  >
+    <span class="dot" :style="{ backgroundColor: dot }" aria-hidden="true" />
     {{ t(`common.conf.${tier.tier}`) }}
   </span>
-  <span v-else class="t-faint">--</span>
+  <span v-else class="t-faint" aria-label="--">--</span>
 </template>

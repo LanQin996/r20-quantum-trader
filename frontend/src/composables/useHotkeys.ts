@@ -11,8 +11,11 @@ function comboOf(e: KeyboardEvent): string {
   if (e.metaKey || e.ctrlKey) parts.push('mod');
   if (e.shiftKey) parts.push('shift');
   if (e.altKey) parts.push('alt');
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
-  parts.push(key);
+  // 批 83：原为 `e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase()`
+  // —— 两支完全相同（压缩后只剩逗号表达式 `(e.key.length, e.key.toLowerCase())`），
+  // 是复制粘贴留下的死代码；且 `e.key` 在少数合成/非常规事件里可能缺失，
+  // 直接读 `.length` 会在**全局** keydown 处理器里抛错。统一兜底为字符串。
+  parts.push((e.key || '').toLowerCase());
   return parts.join('+');
 }
 
