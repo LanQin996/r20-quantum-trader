@@ -23,6 +23,7 @@ patch 面（batch5_d_tails / batch6 / three_tier_ratchet_and_cloud_sync）
 `query_positions`/`fetch_other_venue_positions`，属后续"平仓确认/场所查询"域。
 """
 from __future__ import annotations
+from decimal import Decimal
 
 import time
 from typing import Any, Dict, List, Tuple
@@ -97,7 +98,7 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str,
                               *,
                               _float_or_zero) -> float:
     """Return contract size covered by live, reduce-only OCO TP/SL orders."""
-    coverage = 0.0
+    coverage = Decimal("0")
     close_side = "sell" if pos_side == "long" else "buy"
     for order in orders:
         if str(order.get("state", "live")).lower() not in {"live", "effective"}:
@@ -111,8 +112,8 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str,
         reduce_only = str(order.get("reduceOnly", "true")).lower() in {"true", "1", "yes"}
         if not reduce_only:
             continue
-        coverage += _float_or_zero(order.get("sz") or order.get("actualSz"))
-    return coverage
+        coverage += Decimal(str(_float_or_zero(order.get("sz") or order.get("actualSz"))))
+    return float(coverage)
 
 
 
@@ -126,14 +127,16 @@ def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, t
     except Exception as exc:
         return False, f"unable to verify cloud OCO: {exc}"
     coverage = _live_oco_coverage(algo_rows, pos_side)
-    missing = max(0.0, float(size) - coverage)
-    if missing <= max(1e-12, float(size) * 0.001):
+    # Binary subtraction turns 0.57 - 0.29 into 0.27999999999999997.
+    # Keep the decimal contract quantity intact all the way to the REST body.
+    missing = max(Decimal("0"), Decimal(str(size)) - Decimal(str(coverage)))
+    if missing <= max(Decimal("1e-12"), Decimal(str(size)) * Decimal("0.001")):
         return True, f"cloud OCO coverage verified ({coverage:g}/{size:g})"
 
     close_side = "sell" if pos_side == "long" else "buy"
     try:
         okx_rest.place_algo_oco(
-            inst_id, close_side, missing, pos_side=pos_side, td_mode="cross",
+            inst_id, close_side, format(missing.normalize(), "f"), pos_side=pos_side, td_mode="cross",
             tp_trigger_px=tp_px, tp_ord_px="-1", sl_trigger_px=sl_px, sl_ord_px="-1",
             reduce_only=True, cxl_on_close_pos=True,
         )

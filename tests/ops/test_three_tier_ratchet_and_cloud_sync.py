@@ -59,6 +59,23 @@ class ThreeTierRatchetAndCloudSyncTests(unittest.TestCase):
         self.assertEqual(len(self.http.calls('/api/v5/trade/orders-algo-pending')), 5)
         self.assertEqual(aft.time.sleep.call_args_list, [unittest.mock.call(0.5)] * 4)
 
+    def test_fractional_oco_gap_has_exact_decimal_quantity(self):
+        partial = self.http.row(size="0.29")
+        full = self.http.row(size="0.57")
+        self.http.pending = [[partial], [full]]
+        ok, detail = aft.ensure_cloud_position_protection(
+            "ETH-USDT-SWAP", "long", 0.57, 2600, 2400)
+        self.assertTrue(ok, detail)
+        self.assertEqual(self.http.calls("/api/v5/trade/order-algo")[0][1]["sz"], "0.28")
+
+    def test_fractional_coverage_sum_does_not_accumulate_float_dust(self):
+        rows = [self.http.row(size="0.1"), self.http.row(size="0.2")]
+        self.http.pending = [rows, [self.http.row(size="0.57")]]
+        ok, detail = aft.ensure_cloud_position_protection(
+            "ETH-USDT-SWAP", "long", 0.57, 2600, 2400)
+        self.assertTrue(ok, detail)
+        self.assertEqual(self.http.calls("/api/v5/trade/order-algo")[0][1]["sz"], "0.27")
+
     def test_failed_place_or_unverifiable_recheck_fails_closed(self):
         self.http.rows = []
         self.http.failures['/api/v5/trade/order-algo'] = {

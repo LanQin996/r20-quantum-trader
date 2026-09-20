@@ -13,6 +13,11 @@ class ScaleOutExecutionTests(unittest.TestCase):
         self.mock_record_trade = MagicMock()
         self.mock_notify = MagicMock()
         self.mock_ensure_oco = MagicMock()
+        self.mock_ensure_oco.return_value = (True, "verified")
+        self.mock_okx.request.return_value = [
+            {"ordId": "12345", "state": "filled", "accFillSz": "5"}]
+        self.mock_okx.positions.return_value = [
+            {"instId": "BTC-USDT-SWAP", "posSide": "long", "pos": "5"}]
         self.mock_close_fee = MagicMock(return_value=0.5)
         self.mock_payload = MagicMock(return_value={"action": "close"})
 
@@ -131,10 +136,135 @@ class ScaleOutExecutionTests(unittest.TestCase):
         self.assertEqual(t["currentSz"], 5.0)
         self.assertEqual(t["scale_count"], 999)
         self.assertEqual(t["trailingStopPx"], 80200.0)
+        self.assertEqual(self.sample_pos_long["pos"], 5.0)
 
         # 验证台账双写与通知触发
         self.mock_record_trade.assert_called_once()
         self.mock_notify.assert_called_once()
+
+    def test_sol_057_split_uses_lot_size_and_updates_position(self):
+        f = dict(self.sample_f_long, instId="SOL-USDT-SWAP", name="SOL",
+                 price=108, atr=1, precision=2, lotSz="0.01", minSz="0.01")
+        pos = {"side": "short", "avgPx": 110.65, "pos": 0.57, "venue": "okx"}
+        trackers = {"SOL-USDT-SWAP_short": {
+            "currentSz": 0.57, "takeProfitPx": 105, "trailingStopPx": 112}}
+        self.mock_okx.place_order.return_value = [{"ordId": "sol-close"}]
+        self.mock_okx.request.return_value = [
+            {"ordId": "sol-close", "state": "filled", "accFillSz": "0.28"}]
+        self.mock_okx.positions.return_value = [
+            {"instId": f["instId"], "posSide": "short", "pos": "0.29"}]
+        actions = []
+        ok, _ = execute_scale_out_if_eligible(
+            f, pos, trackers, "", actions, okx_rest=self.mock_okx,
+            ensure_cloud_position_protection=self.mock_ensure_oco)
+        self.assertTrue(ok)
+        self.assertEqual(self.mock_okx.place_order.call_args.args[2], "0.28")
+        self.assertEqual(pos["pos"], 0.29)
+        self.mock_ensure_oco.assert_called_once_with(f["instId"], "short", 0.29, 105.0, 110.37)
+
+    def test_quantity_precision_is_independent_of_price_precision(self):
+        f = dict(self.sample_f_long, precision=1, lotSz="0.001", minSz="0.001")
+        pos = dict(self.sample_pos_long, pos=0.057)
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.request.return_value = [
+            {"ordId": "12345", "state": "filled", "accFillSz": "0.028"}]
+        self.mock_okx.positions.return_value = [
+            {"instId": f["instId"], "posSide": "long", "pos": "0.029"}]
+        ok, _ = execute_scale_out_if_eligible(
+            f, pos, self.sample_trackers, "", [], okx_rest=self.mock_okx,
+            ensure_cloud_position_protection=self.mock_ensure_oco)
+        self.assertTrue(ok)
+        self.assertEqual(self.mock_okx.place_order.call_args.args[2], "0.028")
+        self.assertEqual(pos["pos"], 0.029)
+
+    def test_lot_size_is_not_minimum_order_size(self):
+        f = dict(self.sample_f_long, lotSz="0.1", minSz="0.01")
+        pos = dict(self.sample_pos_long, pos=0.7)
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.request.return_value = [
+            {"ordId": "12345", "state": "filled", "accFillSz": "0.3"}]
+        self.mock_okx.positions.return_value = [
+            {"instId": f["instId"], "posSide": "long", "pos": "0.4"}]
+        ok, _ = execute_scale_out_if_eligible(
+            f, pos, self.sample_trackers, "", [], okx_rest=self.mock_okx,
+            ensure_cloud_position_protection=self.mock_ensure_oco)
+        self.assertTrue(ok)
+        self.assertEqual(self.mock_okx.place_order.call_args.args[2], "0.3")
+        self.assertEqual(pos["pos"], 0.4)
+
+    def test_pending_fill_keeps_protection_and_does_not_resubmit(self):
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.request.return_value = [
+            {"ordId": "12345", "state": "live", "accFillSz": "0"}]
+        with patch("scripts.trader.scale_out.time.sleep"):
+            for _ in range(2):
+                ok, _ = execute_scale_out_if_eligible(
+                    self.sample_f_long, self.sample_pos_long, self.sample_trackers,
+                    "", [], okx_rest=self.mock_okx,
+                    ensure_cloud_position_protection=self.mock_ensure_oco)
+                self.assertFalse(ok)
+        self.mock_okx.place_order.assert_called_once()
+        self.mock_okx.cancel_algo_orders.assert_not_called()
+        self.mock_ensure_oco.assert_not_called()
+        self.assertEqual(self.sample_pos_long["pos"], 10.0)
+        self.mock_okx.request.return_value = [
+            {"ordId": "12345", "state": "filled", "accFillSz": "5"}]
+        ok, _ = execute_scale_out_if_eligible(
+            self.sample_f_long, self.sample_pos_long, self.sample_trackers,
+            "", [], okx_rest=self.mock_okx,
+            ensure_cloud_position_protection=self.mock_ensure_oco)
+        self.assertTrue(ok)
+        self.mock_okx.place_order.assert_called_once()
+        self.assertNotIn("scale_out_pending", self.sample_trackers["BTC-USDT-SWAP_long"])
+
+    def test_failed_protection_is_not_announced_as_verified(self):
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_ensure_oco.return_value = (False, "repair rejected")
+        actions = []
+        ok, _ = execute_scale_out_if_eligible(
+            self.sample_f_long, self.sample_pos_long, self.sample_trackers,
+            "", actions, okx_rest=self.mock_okx,
+            ensure_cloud_position_protection=self.mock_ensure_oco)
+        self.assertTrue(ok)  # The reduction itself is confirmed.
+        self.assertEqual(self.sample_pos_long["pos"], 5.0)
+        self.assertTrue(any("repair rejected" in action for action in actions))
+        self.assertFalse(any("推进至保本位" in action for action in actions))
+
+    def test_filled_order_with_stale_position_keeps_original_protection(self):
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.positions.return_value = [
+            {"instId": "BTC-USDT-SWAP", "posSide": "long", "pos": "10"}]
+        with patch("scripts.trader.scale_out.time.sleep"):
+            ok, _ = execute_scale_out_if_eligible(
+                self.sample_f_long, self.sample_pos_long, self.sample_trackers,
+                "", [], okx_rest=self.mock_okx,
+                ensure_cloud_position_protection=self.mock_ensure_oco)
+        self.assertFalse(ok)
+        self.assertEqual(self.sample_pos_long["pos"], 10.0)
+        self.mock_okx.cancel_algo_orders.assert_not_called()
+        self.mock_ensure_oco.assert_not_called()
+
+    def test_following_risk_check_receives_only_confirmed_remaining_position(self):
+        from scripts import ai_factor_trader as trader
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        with patch.object(trader, "okx_rest", self.mock_okx), \
+             patch.object(trader, "ensure_cloud_position_protection", self.mock_ensure_oco), \
+             patch.object(trader, "record_trade"), patch.object(trader, "notify_trade_close"), \
+             patch.object(trader, "_position_exit_manage", return_value=(False, "holding")) as manage:
+            trader.manage_position_tp_and_trailing(
+                self.sample_f_long, self.sample_pos_long, self.sample_trackers, "", [])
+        self.assertEqual(manage.call_args.args[1]["pos"], 5.0)
+
+    def test_pending_fill_does_not_run_risk_check_against_old_size(self):
+        from scripts import ai_factor_trader as trader
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.request.return_value = [{"ordId": "12345", "state": "live"}]
+        with patch.object(trader, "okx_rest", self.mock_okx), \
+             patch("scripts.trader.scale_out.time.sleep"), \
+             patch.object(trader, "_position_exit_manage") as manage:
+            trader.manage_position_tp_and_trailing(
+                self.sample_f_long, self.sample_pos_long, self.sample_trackers, "", [])
+        manage.assert_not_called()
 
     def test_idempotent_no_duplicate_scale_out(self):
         # scale_out_phase 已为 1 时，再次调用直接拒绝，绝不重复平仓

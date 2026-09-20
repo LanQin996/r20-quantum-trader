@@ -921,6 +921,12 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     except Exception as _so_err:
         print(f"[Scale-Out] 分批止盈判定跳过: {_so_err}")
 
+    pos_key = f"{f['instId']}_{curr_pos.get('side', curr_pos.get('posSide', ''))}"
+    if trackers.get(pos_key, {}).get("scale_out_pending"):
+        return False, "分批平仓待核验，保留原云端保护"
+    if not float(curr_pos.get("pos") or 0):
+        return True, "交易所确认持仓已全部平仓"
+
     return _position_exit_manage(
         f, curr_pos, trackers, timestamp_full, executed_actions,
         _float_or_zero=_float_or_zero,

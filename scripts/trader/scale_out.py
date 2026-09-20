@@ -8,13 +8,13 @@
 防御机制：
 1. 最小合约张数与精度防御（pos_sz < 2*minSz 时优雅降级为整仓追踪止盈）；
 2. 原生 reduceOnly 市价平仓委托（交易所底层物理杜绝反向开仓）；
-3. 云端 OCO 覆盖单超额撤销重置（彻底消除原 100% 止损单残留导致的反向开仓）；
+3. 成交与余仓确认后重置云端 OCO，修复失败交给后续安全风控；
 4. 金字塔顺势加仓单向锁（scale_count = 999，互斥锁定，防止边平边加）；
 5. 幂等性守卫（scale_out_phase = 1，单次持仓生命周期内仅执行一次）。
 """
 from __future__ import annotations
 
-import math
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -76,6 +76,7 @@ def execute_scale_out_if_eligible(
         return False, "未找到持仓跟踪器"
 
     t = trackers[pos_key]
+    pending = t.get("scale_out_pending")
 
     # 1. 幂等性守卫：若已执行过分批止盈，跳过
     if int(t.get("scale_out_phase", 0) or 0) >= 1:
@@ -90,7 +91,7 @@ def execute_scale_out_if_eligible(
 
     # 3. 浮盈判定
     cur_profit_px = (cur_px - entry_px) if is_long else (entry_px - cur_px)
-    if cur_profit_px < trigger_threshold:
+    if not pending and cur_profit_px < trigger_threshold:
         current_desc = str(t.get("stage_desc") or "")
         if not current_desc or "监控中" in current_desc or "TP1" in current_desc:
             gain_pct = abs(tp1_px - entry_px) / entry_px * 100 if entry_px > 0 else 0.0
@@ -99,22 +100,30 @@ def execute_scale_out_if_eligible(
 
     # 4. 精度与最小张数防御
     # 若总持仓不足 2 倍 minSz，无法安全切分为两半，优雅降级
-    if pos_sz < (2.0 * min_sz - 1e-12):
+    if not pending and pos_sz < (2.0 * min_sz - 1e-12):
         msg = f"[{name}] 持仓张数 {pos_sz:g} 低于分批切分下限 (2*minSz={2*min_sz:g})，自动降级为全仓追踪"
         executed_actions.append(msg)
         t["scale_out_phase"] = -1  # 标记为已评估但不可切分，防止每轮重复提示
         return False, "张数不足以切分"
 
     ratio = max(0.1, min(0.9, float(SCALE_OUT_RATIO or 0.50)))
-    raw_close_sz = pos_sz * ratio
-    close_sz = round(raw_close_sz, prec)
-    # 按 minSz 步长向下夹取对齐
-    if min_sz > 0:
-        close_sz = math.floor(close_sz / min_sz + 1e-9) * min_sz
-        close_sz = round(close_sz, prec)
-
-    remaining_sz = round(pos_sz - close_sz, prec)
-    if close_sz < min_sz or remaining_sz < min_sz:
+    # Quantity uses lotSz; precision is exclusively the price decimal count.
+    try:
+        lot = Decimal(str(f.get("lotSz") or min_sz))
+        original_size = Decimal(str(curr_pos["pos"])).copy_abs()
+        if not lot.is_finite() or lot <= 0 or not original_size.is_finite():
+            return False, "合约数量步长无效"
+        close_decimal = (original_size * Decimal(str(ratio)) / lot).to_integral_value(
+            rounding=ROUND_DOWN) * lot
+        remaining_decimal = original_size - close_decimal
+    except (InvalidOperation, ValueError, TypeError):
+        return False, "合约数量步长无效"
+    close_sz = float(close_decimal)
+    remaining_sz = float(remaining_decimal)
+    if pending:
+        close_sz = float(pending["requested_size"])
+        original_size = Decimal(pending["original_size"])
+    if not pending and (close_sz < min_sz or remaining_sz < min_sz):
         msg = f"[{name}] 计算平仓切片 {close_sz:g} 或剩余张数 {remaining_sz:g} 低于最小精度 {min_sz:g}，降级全仓追踪"
         executed_actions.append(msg)
         t["scale_out_phase"] = -1
@@ -127,12 +136,14 @@ def execute_scale_out_if_eligible(
     order_success = False
     order_detail = ""
 
-    if pos_venue == "okx":
+    if pos_venue == "okx" and pending:
+        order_success = True
+    elif pos_venue == "okx":
         try:
             res = okx_rest.place_order(
                 inst_id,
                 close_side,
-                f"{close_sz:g}",
+                format(close_decimal.normalize(), "f"),
                 pos_side=pos_side,
                 td_mode="cross",
                 ord_type="market",
@@ -140,6 +151,14 @@ def execute_scale_out_if_eligible(
             )
             order_success = True
             order_detail = str(res)
+            order_id = next((str(row["ordId"]) for row in res
+                             if isinstance(row, dict) and row.get("ordId")), "")
+            pending = {
+                "order_id": order_id,
+                "original_size": str(original_size),
+                "requested_size": str(close_decimal),
+            }
+            t["scale_out_pending"] = pending
         except Exception as exc:
             order_success = False
             order_detail = f"OKX分批平仓异常: {exc}"
@@ -163,7 +182,68 @@ def execute_scale_out_if_eligible(
         executed_actions.append(f"[{name}] ⚠️ 分批止盈市价平仓提交失败: {order_detail}")
         return False, "平仓提交失败"
 
-    # 5. 原子级撤销旧 OCO 保护单，避免超额单量穿仓反向开单
+    if pos_venue == "okx":
+        # Acceptance is not a fill. Keep existing protection until both the order
+        # and the exchange position confirm the reduction; retry reads, not sells.
+        confirmed = None
+        confirm_error = "未返回可核验订单号"
+        for attempt in range(3):
+            if not pending.get("order_id"):
+                break
+            try:
+                orders = okx_rest.request("GET", "/api/v5/trade/order", {
+                    "instId": inst_id, "ordId": pending["order_id"],
+                })
+                order = next((row for row in orders
+                              if str(row.get("ordId")) == pending["order_id"]), {})
+                if order.get("state") not in {"filled", "canceled"}:
+                    raise ValueError("平仓单尚未进入终态")
+                filled = Decimal(str(order.get("accFillSz") or "0"))
+                if not filled.is_finite() or filled < 0 or filled > original_size:
+                    raise ValueError("累计成交量无效")
+                expected = original_size - filled
+                positions = okx_rest.positions(inst_id=inst_id)
+                if not isinstance(positions, list):
+                    raise ValueError("持仓响应无效")
+                def same_side(row):
+                    side = str(row.get("posSide", "")).lower()
+                    if side == pos_side:
+                        return True
+                    if side == "net":
+                        amount = Decimal(str(row.get("pos") or "0"))
+                        return amount > 0 if is_long else amount < 0
+                    return False
+                position = next((row for row in positions
+                                 if row.get("instId") == inst_id and same_side(row)), None)
+                actual = Decimal(str(position.get("pos", "0"))) if position else Decimal("0")
+                if not actual.is_finite() or actual.copy_abs() != expected:
+                    raise ValueError("持仓数量尚未与成交回执一致")
+                confirmed = (position, actual.copy_abs(), filled)
+                break
+            except Exception as exc:
+                confirm_error = str(exc)
+                if attempt < 2:
+                    time.sleep(0.2)
+        if confirmed is None:
+            executed_actions.append(f"[{name}] 分批止盈已提交，等待成交与余仓核验，保留原云端保护: {confirm_error}")
+            return False, "分批平仓待核验"
+        position, remaining_decimal, filled = confirmed
+        if position:
+            curr_pos.update(position)
+        remaining_sz, close_sz = float(remaining_decimal), float(filled)
+        curr_pos["pos"] = remaining_sz
+        t["currentSz"] = remaining_sz
+        t.pop("scale_out_pending", None)
+        if filled == 0:
+            return False, "分批平仓未成交"
+        # Commit the one-shot state before any protection/notification operation.
+        t["scale_out_phase"] = 1
+        t["scale_count"] = 999
+        if remaining_sz == 0:
+            trackers.pop(pos_key, None)
+            return True, "交易所确认持仓已全部平仓"
+
+    # 5. 成交与余仓已核验，撤销旧 OCO 并重建剩余仓位的保护。
     if pos_venue == "okx":
         try:
             pending_algos = okx_rest.pending_algo_orders(inst_id)
@@ -181,14 +261,20 @@ def execute_scale_out_if_eligible(
     # 6. 计算保本止损线并为剩余仓位重建云端 OCO
     breakeven_cushion = 0.0025 * entry_px
     breakeven_sl = round((entry_px + breakeven_cushion) if is_long else (entry_px - breakeven_cushion), prec)
+    previous_sl = float(t.get("trailingStopPx") or 0)
+    if previous_sl > 0:
+        breakeven_sl = max(breakeven_sl, previous_sl) if is_long else min(breakeven_sl, previous_sl)
     take_profit_px = float(t.get("takeProfitPx", 0.0) or 0.0)
 
+    protection_ok = False
+    protection_detail = "缺少保护单修复器或止盈价格"
     if pos_venue == "okx" and ensure_cloud_position_protection and take_profit_px > 0:
         try:
-            ensure_cloud_position_protection(
+            protection_ok, protection_detail = ensure_cloud_position_protection(
                 inst_id, pos_side, remaining_sz, take_profit_px, breakeven_sl
             )
         except Exception as oco_exc:
+            protection_detail = str(oco_exc)
             print(f"[Scale-Out] 剩余仓位云端保护更新异常: {oco_exc}")
     elif pos_venue in ("binance", "gate") and venue_registry:
         try:
@@ -198,7 +284,9 @@ def execute_scale_out_if_eligible(
                     name, pos_side, tp_px=take_profit_px if take_profit_px > 0 else None,
                     sl_px=breakeven_sl, contracts=remaining_sz
                 )
+                protection_ok = True
         except Exception as oco_exc:
+            protection_detail = str(oco_exc)
             print(f"[Scale-Out] 外所 {pos_venue.upper()} 剩余仓位云端保护更新异常: {oco_exc}")
 
     # 7. 更新本地状态机与账本
@@ -207,13 +295,18 @@ def execute_scale_out_if_eligible(
     t["currentSz"] = remaining_sz
     t["trailingStopPx"] = breakeven_sl
     t["scale_count"] = 999  # 永久互斥锁定金字塔加仓
-    t["stage_desc"] = f"已分批止盈50% (余{remaining_sz:g}张 · 保本止损 {breakeven_sl})"
+    actual_ratio_pct = close_sz / float(original_size) * 100
+    t["stage_desc"] = f"已分批止盈{actual_ratio_pct:.1f}% (余{remaining_sz:g}张 · 保本止损 {breakeven_sl})"
+    if not protection_ok:
+        t["stage_desc"] = f"已分批止盈 (余{remaining_sz:g}张 · 云端保护待核验)"
+        executed_actions.append(f"[{name}] ⚠️ 余仓云端保护未确认，交由后续安全风控处理: {protection_detail}")
 
     # 8. 记录平仓台账与通知
     realized_pnl = close_sz * ct_val * (cur_px - entry_px if is_long else entry_px - cur_px)
     fee_val = close_fee(close_sz, ct_val, cur_px, TAKER_FEE_RATE) if close_fee else (close_sz * ct_val * cur_px * TAKER_FEE_RATE)
 
-    msg_action = f"[{name}] 🎯 达到首批止盈门槛(+{trigger_threshold:.2f})，已市价平仓 {ratio*100:.0f}% ({close_sz:g}张)，锁定盈利 +{realized_pnl:.2f}U；余 {remaining_sz:g} 张推进至保本位 {breakeven_sl}"
+    protection_text = f"推进至保本位 {breakeven_sl}" if protection_ok else "云端保护待核验"
+    msg_action = f"[{name}] 🎯 达到首批止盈门槛(+{trigger_threshold:.2f})，已市价平仓 {actual_ratio_pct:.1f}% ({close_sz:g}张)，估算盈利 {realized_pnl:+.2f}U；余 {remaining_sz:g} 张{protection_text}"
     executed_actions.append(msg_action)
 
     if record_trade and close_trade_payload:
@@ -222,7 +315,7 @@ def execute_scale_out_if_eligible(
             timestamp_full=timestamp_full,
             name=name,
             action_type="分批止盈",
-            side_suffix="首批平仓50%",
+            side_suffix=f"首批平仓{actual_ratio_pct:.1f}%",
             pos_sz=close_sz,
             cur_px=cur_px,
             fee=fee_val,
@@ -232,7 +325,7 @@ def execute_scale_out_if_eligible(
 
     if notify_trade_close:
         try:
-            notify_trade_close(inst=name, pnl=realized_pnl, stage="首批分批止盈50%", exit_px=cur_px)
+            notify_trade_close(inst=name, pnl=realized_pnl, stage=f"首批分批止盈{actual_ratio_pct:.1f}%", exit_px=cur_px)
         except Exception:
             pass
 
