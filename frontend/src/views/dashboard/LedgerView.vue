@@ -156,6 +156,13 @@ function obsToneCls(x: any): string {
   return 'text-[var(--ink-3)] border-[var(--line-1)] bg-[var(--surface-2)]';
 }
 
+function isScaleOutRow(row: any): boolean {
+  return Number(row?.scale_out_phase || 0) >= 1
+    || String(row?.exit_reason || '').includes('分批')
+    || String(row?.side || '').includes('分批')
+    || String(row?.action_type || '').includes('分批');
+}
+
 /** 当前筛选集的确定性可观测性审计（宿主统计，非模型推断）。 */
 const snapshotAudit = computed(() => {
   const counts: Record<ObsTag, number> = { DYNAMICS_OBSERVED: 0, PARTIAL: 0, PRICE_ONLY: 0, NONE: 0 };
@@ -425,6 +432,14 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
                         :title="`${obsLabel(x)} · ${t('dash.ledger.observability.missingFields')} ${t('dash.ledger.observability.noBackfill')}`"
                       >
                         {{ obsBadge(x) }}
+                      </span>
+                      <!-- 分批止盈状态徽章 -->
+                      <span
+                        v-if="isScaleOutRow(x)"
+                        class="rounded px-1 py-0.5 text-3xs font-mono font-medium border text-[var(--accent)] border-[var(--accent-line)] bg-[var(--accent-bg)]"
+                        :title="t('dash.ledger.scaleOutTitle')"
+                      >
+                        🎯 {{ t('dash.ledger.scaleOutShort') }}
                       </span>
                     </div>
                   </td>

@@ -140,4 +140,7 @@ export const enLedger = {
   councilSource: 'AI council decision trace',
   execStrategy: 'Execution strategy',
   adoptedSeat: 'Adopted seat',
+  scaleOutBadge: 'Scale-Out · Breakeven Running',
+  scaleOutShort: 'Scale-Out',
+  scaleOutTitle: 'First batch profit locked, remaining position guarded by breakeven stop',
 };

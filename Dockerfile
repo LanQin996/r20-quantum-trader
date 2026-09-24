@@ -25,12 +25,15 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     R20_DOCKER=1 \
+    PYTHONPATH=/app \
+    TZ=Asia/Shanghai \
     PORT=8080
 
 # Install system utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    tzdata \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
@@ -52,6 +55,8 @@ COPY fcntl_compat.py ./fcntl_compat.py
 COPY plugins/ ./plugins/
 COPY dashboard/ ./dashboard/
 COPY docs/ ./docs/
+COPY deploy/ ./deploy/
+COPY env.example ./env.example
 
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
@@ -60,6 +65,7 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # /app is chowned so the backend can atomically rewrite /app/.env when saving config.
 RUN useradd --create-home --shell /bin/bash r20 && \
     mkdir -p /app/data /app/logs /app/backups && \
+    chmod +x /app/deploy/docker-entrypoint.sh && \
     chown -R r20:r20 /app
 
 USER r20
@@ -69,4 +75,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
-CMD ["python", "-m", "uvicorn", "r20_backend.app:app", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["/app/deploy/docker-entrypoint.sh"]
+CMD ["backend"]

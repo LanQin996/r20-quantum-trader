@@ -72,6 +72,14 @@ const obsTag = computed<string>(() => {
   return ['DYNAMICS_OBSERVED', 'PARTIAL', 'PRICE_ONLY', 'NONE'].includes(v) ? v : 'NONE';
 });
 const obsUnobservable = computed(() => obsTag.value === 'NONE' || obsTag.value === 'PRICE_ONLY');
+
+const isScaleOut = computed(() => {
+  const row = x.value;
+  return Number(row?.scale_out_phase || 0) >= 1
+    || String(row?.action_type || '').includes('分批')
+    || String(row?.side || '').includes('分批')
+    || String(row?.exit_reason || '').includes('分批');
+});
 const obsLabel = computed(() => {
   if (obsTag.value === 'DYNAMICS_OBSERVED') return t('dash.ledger.observability.observed');
   if (obsTag.value === 'PARTIAL') return t('dash.ledger.observability.partial');
@@ -88,7 +96,15 @@ const cells = computed(() => [
   { label: t('dash.ledger.col.entry'), value: fmtPrice(x.value.open_px), cls: 'text-[var(--ink-strong)]' },
   { label: t('dash.ledger.col.exit'), value: holding.value ? t('status.running') : fmtPrice(x.value.close_px), cls: holding.value ? 'text-[var(--ink-3)]' : 'text-[var(--ink-strong)]' },
   { label: t('dash.matrix.positions.col.margin'), value: fmtNum(x.value.margin, 2) + ' U', cls: 'text-[var(--ink-strong)]' },
-  { label: t('dash.ledger.col.qty'), value: fmtNum(x.value.sz, 2) === '0.00' ? fmtNum(x.value.sz, 4) : fmtNum(x.value.sz, 2), cls: 'text-[var(--ink-strong)]' },
+  {
+    label: t('dash.ledger.col.qty'),
+    value: (() => {
+      const absSz = Math.abs(Number(x.value.sz || 0));
+      if (!Number.isFinite(absSz) || absSz === 0) return '--';
+      return fmtNum(absSz, 2) === '0.00' ? fmtNum(absSz, 4) : fmtNum(absSz, 2);
+    })(),
+    cls: 'text-[var(--ink-strong)]',
+  },
   { label: t('dash.ledger.lifecycle.grossPnl'), value: fmtSigned(x.value.gross_pnl), cls: dirClass(x.value.gross_pnl) },
   { label: t('dash.ledger.lifecycle.netPnl'), value: fmtSigned(x.value.net_pnl), cls: dirClass(x.value.net_pnl) },
   { label: t('dash.ledger.col.roi'), value: fmtPct(x.value.roi_pct), cls: dirClass(x.value.roi_pct) },
@@ -120,6 +136,12 @@ const cells = computed(() => [
             </span>
           </div>
           <div class="flex items-center gap-1.5">
+            <span
+              v-if="isScaleOut"
+              class="rounded px-1.5 py-0.5 text-3xs font-semibold border text-[var(--accent)] border-[var(--accent-line)] bg-[var(--accent-bg)]"
+            >
+              🎯 {{ t('dash.ledger.scaleOutBadge') }}
+            </span>
             <span
               class="rounded px-1.5 py-0.5 text-3xs font-semibold uppercase border"
               :class="holding ? 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]' : 'text-[var(--ink-2)] border-[var(--line-1)] bg-[var(--surface-2)]'"

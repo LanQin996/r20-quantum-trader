@@ -8,12 +8,12 @@ import math
 from typing import Any, Tuple
 
 try:
-    from scripts.risk_constants import MIN_RISK_REWARD_RATIO
+    from scripts.risk_constants import MIN_RISK_REWARD_RATIO, MAX_RISK_REWARD_RATIO
 except ImportError:  # flat import when scripts/ itself is on sys.path
-    from risk_constants import MIN_RISK_REWARD_RATIO
+    from risk_constants import MIN_RISK_REWARD_RATIO, MAX_RISK_REWARD_RATIO
 
 
-def validate_quote_geometry_and_rr(action: str, entry: Any, tp: Any, sl: Any) -> Tuple[bool, str, float]:
+def validate_quote_geometry_and_rr(action: str, entry: Any, tp: Any, sl: Any, enforce_max_rr: bool = False) -> Tuple[bool, str, float]:
     """Validates that opening quote prices are positive, finite numbers satisfying
     action-specific geometry, and that the calculated risk-reward ratio meets or exceeds
     the configurable floor (R20_MIN_RISK_REWARD, default 2.0).
@@ -56,5 +56,10 @@ def validate_quote_geometry_and_rr(action: str, entry: Any, tp: Any, sl: Any) ->
 
     if rr < MIN_RISK_REWARD_RATIO:
         return False, f"核心风控拦截：盈亏比不足 {MIN_RISK_REWARD_RATIO:.1f} (当前 R:R = {rr:.2f}:1，底线 {MIN_RISK_REWARD_RATIO:.1f}:1)", rr
+
+    if enforce_max_rr:
+        _cur_max_rr = float(MAX_RISK_REWARD_RATIO or 0.0)
+        if _cur_max_rr > 0 and rr > _cur_max_rr + 1e-4:
+            return False, f"核心风控拦截：盈亏比超出上限 {_cur_max_rr:.1f}:1 (当前 R:R = {rr:.2f}:1，止盈过远拒单)", rr
 
     return True, "", rr

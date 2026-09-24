@@ -54,6 +54,33 @@ AUTO_SIZE_CLOSE_SHORT = "close_short"
 POSITION_MODES = ("single", "dual", "dual_plus")
 
 
+def interpret_position_mode(account_payload: Any) -> str:
+    """由**只读**账户回包判定持仓模式 → `"single"|"dual"|"dual_plus"|"unknown"`。
+
+    判据来自 Gate 真实账户字段（本机 DEMO 实测：`position_mode='dual'`、
+    `in_dual_mode=True`、`enable_new_dual_mode=True`、`margin_mode_name='classic'`）：
+
+    - 首选显式 `position_mode`（Gate 自己的枚举：single/dual/dual_plus）；
+    - 缺失时退化用 `in_dual_mode` 布尔（True→dual / False→single）；
+    - **都读不到 → "unknown"**：宁可判"测不出来"，也不拿默认值冒充事实 ——
+      本仓审计 §2 明写"检测不支持时禁新开仓并显示原因"。
+
+    刻意**不猜**：`dual_plus` 必须原样返回，不得折叠成 dual（拆仓语义不同）。
+    """
+    if not isinstance(account_payload, dict):
+        return "unknown"
+    raw = account_payload.get("raw") if isinstance(account_payload.get("raw"), dict) else account_payload
+    explicit = str(raw.get("position_mode") or "").strip().lower()
+    if explicit in POSITION_MODES:
+        return explicit
+    dual = raw.get("in_dual_mode", raw.get("enable_new_dual_mode"))
+    if isinstance(dual, bool):
+        return "dual" if dual else "single"
+    if isinstance(dual, str) and dual.strip().lower() in ("true", "false"):
+        return "dual" if dual.strip().lower() == "true" else "single"
+    return "unknown"
+
+
 class GateAPIError(RuntimeError):
     """Gate 私有 API 业务错误（label 为官方错误码）。"""
 
@@ -117,6 +144,9 @@ class GateAdapter(BaseExchangeAdapter):
         decimal_amount=True,              # 十进制张数 amount 字符串（与 size 并传时 amount 优先）；
                                           # 按环境+合约规格双许可放行，真实账户支持未验（审计 §3）→ 保守回退 int
         position_modes=POSITION_MODES,
+        # dual 走 auto_size、single 走 close=true（均有单测 + 真帧核验）；
+        # dual_plus 拆仓不得折叠 ⇒ 不在"已验证可交易"子集内
+        entry_ready_position_modes=("single", "dual"),
         conditional_family="independent_resource",
         protection_semantics="price_orders 原生触发单：受理挂出即回读 id 确认；reduce_only 腿"
                              "对手成交后残留触发单自然失效不反向开仓；棘轮优先原生 amend 无缝改单",
@@ -389,7 +419,8 @@ class GateAdapter(BaseExchangeAdapter):
 
     def place_order(self, symbol: str, side: str, contracts: float,
                     price: Optional[float] = None, tif: str = "gtc",
-                    text: str = "", amount: Optional[str] = None) -> Dict[str, Any]:
+                    text: str = "", amount: Optional[str] = None,
+                    reduce_only: bool = False) -> Dict[str, Any]:
         """contracts 为正张数；side long→+、short→−（Gate 带符号张数语义）。
 
         US-004：amount 为十进制张数字符串（正数，方向仍由 side 决定）——仅当
@@ -405,6 +436,8 @@ class GateAdapter(BaseExchangeAdapter):
             "tif": "ioc" if price is None else tif,
             "text": text or f"t-r20{int(time.time() * 1000) % 100000000}",
         }
+        if reduce_only:
+            order["reduce_only"] = True
         if amount is not None and str(amount).strip() != "":
             amt = Decimal(str(amount).strip())
             if amt <= 0:
@@ -451,6 +484,13 @@ class GateAdapter(BaseExchangeAdapter):
         item.setdefault("side", side)
         item.setdefault("base", base)
         item.setdefault("reduce_only", bool(o.get("is_reduce_only") or o.get("is_close")))
+        item["size_signed"] = sz_val
+        item["size"] = abs(sz_val)
+        if "amount" in item and item["amount"] is not None:
+            try:
+                item["amount"] = str(abs(Decimal(str(item["amount"]))))
+            except Exception:
+                pass
         return item
 
     def open_orders(self) -> List[Dict[str, Any]]:
@@ -519,13 +559,35 @@ class GateAdapter(BaseExchangeAdapter):
             return RULE_ABOVE if long else RULE_BELOW
         return RULE_BELOW if long else RULE_ABOVE
 
+    def detect_position_mode(self) -> str:
+        """**只读**探测账户持仓模式（`interpret_position_mode` 的 IO 壳）。
+
+        永不抛异常、永不改账户：读不到返回 "unknown" ⇒ 调用方据此禁新开仓。
+        本系统**绝不调用** `set_position_mode` 自动切换用户账户模式（审计 §2）。
+        """
+        try:
+            snap = self.account_snapshot()
+        except Exception:
+            return "unknown"
+        return interpret_position_mode(snap)
+
     def attach_protective_orders(self, symbol: str, pos_side: str,
                                  tp_px: Optional[float] = None,
                                  sl_px: Optional[float] = None,
                                  expiration: int = 604800,
                                  price_type: int = 0,
+                                 position_mode: Optional[str] = None,
                                  **kwargs: Any) -> Dict[str, Any]:
-        """挂 TP/SL 双腿 reduce_only 全平触发单；任一半途失败自动回滚已挂腿。"""
+        """挂 TP/SL 双腿 reduce_only 全平触发单；任一半途失败自动回滚已挂腿。
+
+        `position_mode`：调用方按**只读探测**结果传入（single/dual/dual_plus/unknown）。
+        - `dual`：直接发 `auto_size=close_long/close_short`（dual 模式拒绝 close=true）；
+        - `single`：发 `close=true`（原载荷）；
+        - `None`/`unknown`：维持既有**反应式**兼容（先试 close=true，被拒再换 auto_size）
+          —— 这是给"没做探测的老调用方"留的退路，不是推荐路径。
+        预先选对比事后重试重要：重试依赖 Gate 的错误码/label 文本，一旦文案变化，
+        保护腿就会挂不上而整笔开仓回滚（本仓真实风险，非理论）。
+        """
         inst = self.native_symbol(symbol)
         placed: Dict[str, Any] = {}
         legs = []
@@ -538,10 +600,18 @@ class GateAdapter(BaseExchangeAdapter):
         try:
             for kind, px, rule in legs:
                 initial: Dict[str, Any] = {
-                    "contract": inst, "size": 0, "price": "0",
-                    "close": True, "tif": "ioc", "reduce_only": True,
+                    "contract": inst, "price": "0",
+                    "tif": "ioc", "reduce_only": True,
                     "text": f"t-r20{kind}{int(time.time() * 1000) % 100000000}",
                 }
+                if str(position_mode or "").strip().lower() == "dual":
+                    # 预先按 dual 载荷构造（不浪费一次注定被拒的请求）
+                    initial["auto_size"] = (AUTO_SIZE_CLOSE_LONG
+                                            if str(pos_side).lower() in ("long", "buy")
+                                            else AUTO_SIZE_CLOSE_SHORT)
+                else:
+                    initial["size"] = 0
+                    initial["close"] = True
                 payload = {
                     "initial": initial,
                     "trigger": {"strategy_type": 0, "price_type": price_type,
@@ -589,6 +659,19 @@ class GateAdapter(BaseExchangeAdapter):
 
     def cancel_price_order(self, order_id: Any) -> Any:
         return self.signed_request("DELETE", f"/api/v4/futures/usdt/price_orders/{order_id}")
+
+    def cancel_protective_orders(self, symbol: str) -> List[Any]:
+        """撤销指定合约的全部活跃价格触发保护单（TP/SL）。"""
+        orders = self.list_protective_orders(symbol)
+        results = []
+        for o in (orders or []):
+            oid = (o or {}).get("id")
+            if oid:
+                try:
+                    results.append(self.cancel_price_order(oid))
+                except Exception as exc:
+                    print(f"[Gate] 取消触发单 {oid} 失败: {exc}")
+        return results
 
     def amend_price_order(self, order_id: Any, *, trigger_price: Optional[str] = None,
                           price_type: Optional[int] = None, size: Optional[int] = None,

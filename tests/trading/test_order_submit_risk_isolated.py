@@ -110,6 +110,35 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         self.assertAlmostEqual(float(kwargs.get("px")), 100.0, delta=0.5)
         mock_rest.place_order.assert_called_once()
 
+    def test_take_profit_width_clamping(self):
+        """测试止盈宽度平滑收窄：防止 AI 规划过远无法触及的天际线止盈单。"""
+        from scripts.trader.brackets import clamp_take_profit_width
+
+        # 1. 超过最大 R:R 上限（默认 3.5:1）：entry=100, sl=90 (risk=10), tp=160 (原 R:R=6.0)
+        # 应被收窄到 100 + 10 * 3.5 = 135.0 (R:R=3.5)
+        clamped_long = clamp_take_profit_width(
+            is_long=True, limit_px=100.0, sl_px=90.0, tp_px=160.0, atr=0.0, prec=2)
+        self.assertEqual(clamped_long, 135.0)
+
+        # 2. 空头方向对称：entry=100, sl=110 (risk=10), tp=40 (原 R:R=6.0)
+        # 应被收窄到 100 - 10 * 3.5 = 65.0 (R:R=3.5)
+        clamped_short = clamp_take_profit_width(
+            is_long=False, limit_px=100.0, sl_px=110.0, tp_px=40.0, atr=0.0, prec=2)
+        self.assertEqual(clamped_short, 65.0)
+
+        # 3. 验证 clamp_take_profit_width 函数的 ATR 与 R:R 联动：
+        # entry=100, sl=90 (risk=10), tp=130 (R:R=3.0 <= 3.5)
+        # 若 atr=2.0，max_tp_atr=3.5 -> max_tp_dist = min(2.0*3.5=7.0, 35.0) -> 但底线为 min_rr (10*2=20)
+        # 故 allowed_max = 20.0 -> tp 被收窄到 120.0
+        clamped_tp = clamp_take_profit_width(
+            is_long=True, limit_px=100.0, sl_px=90.0, tp_px=130.0, atr=2.0, prec=2)
+        self.assertEqual(clamped_tp, 120.0)
+
+        # 4. 正常区间内的 TP 原样放行：entry=100, sl=90 (risk=10), tp=125 (R:R=2.5)，atr=8.0 (8*3.5=28 > 25)
+        normal_tp = clamp_take_profit_width(
+            is_long=True, limit_px=100.0, sl_px=90.0, tp_px=125.0, atr=8.0, prec=2)
+        self.assertEqual(normal_tp, 125.0)
+
 
 if __name__ == "__main__":
     unittest.main()

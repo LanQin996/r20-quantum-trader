@@ -97,6 +97,140 @@ class NotificationsTests(unittest.TestCase):
             self.assertIn("11255", detail)
             self.assertIn("自动获取 OpenID", detail)
 
+    def test_send_webhook_dingtalk_with_secret_signature(self):
+        env = dict(self.env)
+        env["R20_DINGTALK_SECRET"] = "SEC_test_secret_key"
+        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"errcode": 0})) as mock_post:
+            ok, detail = notifications.send_channel("webhook", "加签钉钉消息", env)
+            self.assertTrue(ok)
+            url_called, payload = mock_post.call_args[0]
+            self.assertIn("&timestamp=", url_called)
+            self.assertIn("&sign=", url_called)
+            self.assertEqual(payload, {"msgtype": "text", "text": {"content": "加签钉钉消息"}})
+
+    def test_send_webhook_feishu_with_secret_signature(self):
+        env = dict(self.env)
+        env["R20_NOTIFICATION_WEBHOOK"] = "https://open.feishu.cn/open-apis/bot/v2/hook/mock"
+        env["R20_FEISHU_SECRET"] = "FS_test_secret_key"
+        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"code": 0})) as mock_post:
+            ok, detail = notifications.send_channel("webhook", "加签飞书消息", env)
+            self.assertTrue(ok)
+            _, payload = mock_post.call_args[0]
+            self.assertIn("timestamp", payload)
+            self.assertIn("sign", payload)
+            self.assertEqual(payload["msg_type"], "text")
+            self.assertEqual(payload["content"]["text"], "加签飞书消息")
+
+    def test_send_webhook_bark(self):
+        env = dict(self.env)
+        env["R20_NOTIFICATION_WEBHOOK"] = "https://api.day.app/mock-key/"
+        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {})) as mock_post:
+            ok, detail = notifications.send_channel("webhook", "Bark测试消息", env)
+            self.assertTrue(ok)
+            _, payload = mock_post.call_args[0]
+            self.assertEqual(payload["body"], "Bark测试消息")
+            self.assertEqual(payload["group"], "R20-Trade")
+
+    def test_modern_notifier_double_tp_and_three_venues(self):
+        import scripts.qq_notifier as notifier
+        with patch("scripts.qq_notifier._publish", return_value=True) as mock_pub:
+            # Test Binance multi-venue + double TP1/TP2
+            res = notifier.notify_trade_open(
+                inst="ETH",
+                side="多",
+                sz=10,
+                px=3250.0,
+                strategy="全维度波段强化版",
+                reason="1H加速度突破",
+                tp_px=3450.0,
+                sl_px=3180.0,
+                leverage=5,
+                tp1_px=3320.0,
+                scale_out_ratio=0.50,
+                venue="binance",
+                margin_usdt=325.0,
+                rr_ratio=2.45,
+                confidence=88.0,
+                market_regime="单边主升",
+                council_role="进攻官",
+            )
+            self.assertTrue(res)
+            event_type, title, msg, payload = mock_pub.call_args[0][:4]
+            self.assertEqual(event_type, "trade.opened")
+            self.assertIn("[BINANCE]", title)
+            self.assertIn("BINANCE", msg)
+            self.assertIn("ETHUSDT 永续", msg)
+            self.assertIn("首批止盈 (TP1 · 50%仓位)：3320.0", msg)
+            self.assertIn("终极波段 (TP2 · 剩余仓位)：3450.0", msg)
+            self.assertIn("几何盈亏比：2.45 R", msg)
+            self.assertIn("保证金 325.00 U", msg)
+            self.assertEqual(payload["tp1"], 3320.0)
+
+            # Test legacy caller without tp1_px: auto-deduces TP1 & geometric RR
+            res_legacy = notifier.notify_trade_open(
+                inst="BTC",
+                side="多",
+                sz=2,
+                px=90000.0,
+                strategy="默认策略",
+                reason="突破",
+                tp_px=95000.0,
+                sl_px=88000.0,
+                leverage=3,
+            )
+            self.assertTrue(res_legacy)
+            _, _, msg_leg, _ = mock_pub.call_args[0][:4]
+            self.assertIn("首批止盈 (TP1 · 50%仓位)", msg_leg)
+            self.assertIn("终极波段 (TP2 · 剩余仓位)：95000.0", msg_leg)
+            self.assertIn("几何盈亏比：2.50 R", msg_leg)
+            self.assertIn("预估保证金", msg_leg)
+
+    def test_modern_notifier_partial_close_and_fees(self):
+        import scripts.qq_notifier as notifier
+        with patch("scripts.qq_notifier._publish", return_value=True) as mock_pub:
+            res = notifier.notify_trade_close(
+                inst="SOL",
+                pnl=15.0,
+                stage="首批分批止盈50%",
+                exit_px=185.0,
+                side="多",
+                entry_px=175.0,
+                fee=1.2,
+                venue="gate",
+                is_partial=True,
+            )
+            self.assertTrue(res)
+            _, title, msg, payload = mock_pub.call_args[0][:4]
+            self.assertIn("阶梯止盈 TP1 达成", title)
+            self.assertIn("GATE", msg)
+            self.assertIn("SOL_USDT 永续", msg)
+            self.assertIn("到手净利", msg)
+            self.assertIn("+13.8000 USDT", msg)
+            self.assertIn("交易手续费: -1.2000 U", msg)
+            self.assertIn("零风险放飞", msg)
+            self.assertEqual(payload["pnl"], 13.8)
+
+    def test_modern_notifier_interceptor_blocked(self):
+        import scripts.qq_notifier as notifier
+        with patch("scripts.qq_notifier._publish", return_value=True) as mock_pub:
+            res = notifier.notify_interceptor_blocked(
+                inst="DOGE",
+                action="BUY_LONG",
+                interceptor_name="4H 宏观顺势铁律",
+                reason="4H 均线空头承压",
+                venue="okx",
+            )
+            self.assertTrue(res)
+            event_type, title, msg, payload = mock_pub.call_args[0][:4]
+            self.assertEqual(event_type, "risk.interceptor_blocked")
+            self.assertIn("物理硬风控拦截", title)
+            self.assertIn("4H 宏观顺势铁律", msg)
+            self.assertIn("4H 均线空头承压", msg)
+            self.assertIn("Fail-Closed", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

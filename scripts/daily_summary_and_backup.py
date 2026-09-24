@@ -99,14 +99,56 @@ def generate_daily_briefing_and_backup():
         except Exception:
             pass
 
-    briefing_text = (
-        f"📅 日期：{date_str}（北京时间）\n"
-        f"• 今日平仓战绩：{len(wins)} 胜 / {len(losses)} 负（胜率 {win_rate:.1f}%）\n"
-        f"• 今日已结净盈亏：{net_pnl:+.2f} USDT\n"
-        f"• 最优贡献标的：{top_asset} ({top_asset_pnl:+.2f} U)\n"
-        f"• 市场舆情环境：{macro_env}\n"
-        f"• 策略状态：多周期趋势共振滤网已激活，黑天鹅熔断哨兵全天候巡检中。"
-    )
+    # 4. Load Dashboard Account & Active Positions
+    dashboard_file = os.path.join(DATA_DIR, "dashboard_last_good.json")
+    account_info = {}
+    positions = []
+    if os.path.exists(dashboard_file):
+        try:
+            with open(dashboard_file, "r", encoding="utf-8") as f:
+                d_good = json.load(f)
+                account_info = d_good.get("account", {})
+                positions = d_good.get("positions", [])
+        except Exception:
+            pass
+
+    lines = [
+        f"📅 日期：{date_str}（北京时间 {now_str[11:16]}）",
+    ]
+    if account_info:
+        total_eq = float(account_info.get("total_eq", 0.0) or 0.0)
+        avail_eq = float(account_info.get("avail_eq", 0.0) or 0.0)
+        pos_upl = float(account_info.get("pos_upl_total", 0.0) or 0.0)
+        mgn_usage = float(account_info.get("margin_usage_pct", 0.0) or 0.0)
+        lines.append(f"💼 账户总净值：{total_eq:,.2f} USDT (可用: {avail_eq:,.2f} U | 杠杆占用率: {mgn_usage:.1f}%)")
+        if pos_upl != 0.0:
+            lines.append(f"📈 实时在管浮盈 (UPL)：{pos_upl:+.2f} USDT")
+
+    total_fee = sum(float(t.get("fee", 0.0) or 0.0) for t in closed_today)
+    lines.append(f"• 今日平仓战绩：{len(wins)} 胜 / {len(losses)} 负（胜率 {win_rate:.1f}%）")
+    if total_fee > 0:
+        lines.append(f"• 今日已结净盈亏：{net_pnl:+.2f} USDT (交易手续费: -{total_fee:.2f} U)")
+    else:
+        lines.append(f"• 今日已结净盈亏：{net_pnl:+.2f} USDT")
+    lines.append(f"• 最优贡献标的：{top_asset} ({top_asset_pnl:+.2f} U)")
+
+    if positions:
+        lines.append(f"📦 当前在管持仓 ({len(positions)} 笔)：")
+        for p in positions[:4]:
+            p_name = p.get("name") or p.get("instId", "").split("-")[0]
+            p_venue = str(p.get("venue") or "okx").upper()
+            p_side = "🟢多" if ("long" in str(p.get("side", "")).lower()) else "🔴空"
+            p_upl = float(p.get("upl", 0.0) or 0.0)
+            p_roi = float(p.get("uplRatio", 0.0) or p.get("roi_pct", 0.0) or 0.0)
+            p_sl = p.get("trailingSl") or p.get("exchangeSl") or "--"
+            lines.append(f"  • {p_side} {p_name} ({p_venue}) | 浮盈 {p_upl:+.2f} U ({p_roi:+.1f}%) | 止损 {p_sl}")
+        if len(positions) > 4:
+            lines.append(f"  • ... 另有 {len(positions) - 4} 笔持仓监控中")
+
+    lines.append(f"• 市场舆情环境：{macro_env}")
+    lines.append("• 策略状态：三所平权对等撮合已就绪，多周期趋势共振滤网与黑天鹅熔断哨兵全天候巡检中。")
+
+    briefing_text = "\n".join(lines)
 
     if _ledger_unreadable:
         briefing_text = ("⚠️ 台账文件损坏/不可读，今日战绩与净盈亏不可信（宁报故障，不发假 0）；"

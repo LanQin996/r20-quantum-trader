@@ -170,7 +170,10 @@ class BrainDispatchVerbatimTest(unittest.TestCase):
             _build_effective_prompt_text=lambda **k: "",
             _record_cycle_health=lambda *a, **k: None,
             execute_brain_pending_cancels=lambda *a, **k: None)
-        got = D.dispatch_llm_and_persist_decisions(**kw)
+        from unittest.mock import patch
+        with patch("r20_backend.council_manager.load_council_config",
+                   return_value={"enabled": False}):
+            got = D.dispatch_llm_and_persist_decisions(**kw)
         self.assertIsNone(got)
 
     def test_judgment_actually_notices_a_change(self):

@@ -183,7 +183,11 @@ const engineFacts = computed(() => {
     { label: t('admin.risk.engineDailyLoss'), value: e.daily_loss_limit_usdt == null ? '--' : `${e.daily_loss_limit_usdt}${U}` },
     { label: t('admin.risk.engineSingleAsset'), value: e.single_asset_margin_usdt == null ? '--' : `${e.single_asset_margin_usdt}${U}` },
     { label: t('admin.risk.engineMaxPositions'), value: e.max_positions == null ? '--' : `${e.max_positions} / ${e.max_same_direction}` },
-    { label: t('admin.risk.engineTargetRR'), value: `≥ ${e.target_rr}` },
+    { label: t('admin.risk.engineTargetRR'), value: e.max_risk_reward ? `${e.target_rr} ~ ${e.max_risk_reward}` : `≥ ${e.target_rr}` },
+    {
+      label: '止盈止损宽度',
+      value: `止盈 ≤ ${e.max_take_profit_atr || 3.5}x ATR · 止损 ${e.stop_loss_atr_mult || 2.0}x ATR`,
+    },
     { label: t('admin.risk.engineConfBand'), value: `${(e.confidence_band || []).join('% ~ ')}%` },
     {
       label: '分批止盈口径',
@@ -234,7 +238,9 @@ function toggleAllGroups() {
 
 function groupSummary(groupId: string): string {
   if (groupId === 'exit_strategy') {
-    return draft.R20_SCALE_OUT_ENABLED ? `已开启 · ${Math.round((draft.R20_SCALE_OUT_RATIO || 0.5) * 100)}% · ${draft.R20_SCALE_OUT_TRIGGER_ATR || 1.2}x ATR` : '已禁用';
+    const scaleOut = draft.R20_SCALE_OUT_ENABLED ? `分批 ${Math.round((draft.R20_SCALE_OUT_RATIO || 0.5) * 100)}%` : '分批禁用';
+    const maxTp = `止盈宽 ≤ ${draft.R20_MAX_TAKE_PROFIT_ATR || 3.5}x ATR`;
+    return `${scaleOut} · ${maxTp}`;
   }
   if (groupId === 'exposure') {
     const levMin = draft.R20_MIN_LEVERAGE || 2;
@@ -242,10 +248,12 @@ function groupSummary(groupId: string): string {
     return `杠杆 ${levMin}~${levMax}x · 单笔 ${Math.round((draft.R20_MAX_MARGIN_EQUITY_RATIO || 0.2) * 100)}%`;
   }
   if (groupId === 'per_trade') {
-    return `R:R ≥ ${(draft.R20_MIN_RISK_REWARD || 2.0).toFixed(1)} · 置信度 ≥ ${draft.R20_MIN_ENTRY_CONFIDENCE || 80}%`;
+    const rrMin = (draft.R20_MIN_RISK_REWARD || 2.0).toFixed(1);
+    const rrMax = (draft.R20_MAX_RISK_REWARD || 3.5).toFixed(1);
+    return `R:R ${rrMin}~${rrMax} · 置信度 ≥ ${draft.R20_MIN_ENTRY_CONFIDENCE || 80}%`;
   }
   if (groupId === 'stop_loss') {
-    return `日亏 ${Math.round((draft.R20_DAILY_LOSS_EQUITY_RATIO || 0.05) * 100)}% · 最长持仓 ${draft.R20_TIME_STOP_HOURS || 8}h · 冷静 ${draft.R20_STOP_COOLDOWN_MINUTES || 30}m`;
+    return `止损宽 ${draft.R20_STOP_LOSS_ATR_MULT || 2.0}x ATR · 日亏 ${Math.round((draft.R20_DAILY_LOSS_EQUITY_RATIO || 0.05) * 100)}% · 冷静 ${draft.R20_STOP_COOLDOWN_MINUTES || 30}m`;
   }
   if (groupId === 'pyramiding') {
     return (draft.R20_MAX_SCALE_IN_COUNT || 0) > 0 ? `允许加仓 ${draft.R20_MAX_SCALE_IN_COUNT} 次` : '已禁用加仓';
@@ -277,6 +285,10 @@ async function saveChanges() {
   }
   if (levInverted.value) {
     toast.err(t('admin.risk.levInvertedSave'))
+    return
+  }
+  if ((draft.R20_MIN_RISK_REWARD ?? 0) > (draft.R20_MAX_RISK_REWARD ?? 0)) {
+    toast.err(t('admin.risk.rrInvertedSave'))
     return
   }
   // 审计 P2-9：极端值（单标的占比≥50% / 日亏≥25% 权益 / 杠杆≥10x 等）此前一次点击即落盘，

@@ -73,9 +73,13 @@ class PositionBindingTests(unittest.TestCase):
             calls.append((kind, body, meta))
             return "id"
 
-        with patch.object(trader.analysis_capture, "emit", side_effect=record):
+        # This test checks event attribution; persistence has separate coverage.
+        with patch.object(trader.analysis_capture, "emit", side_effect=record), \
+             patch.object(trader, "_atomic_write_json"), \
+             patch.object(trader, "record_trade_sqlite"):
             trader.record_trade({"action": "平仓", "action_type": "AI裁量整仓退出",
-                                 "inst": "LINK", "sz": 5.2, "price": 11.788},
+                                 "inst": "LINK", "sz": 5.2, "price": 11.788,
+                                 "policy_version": "fixture"},
                                 position=LIVE_POSITION)
         exits = [c for c in calls if c[0] == "position.exit_reason"]
         self.assertEqual(len(exits), 1)
@@ -137,6 +141,13 @@ class RiskBaseTests(unittest.TestCase):
 
 
 class MarginEstimateTests(unittest.TestCase):
+    def setUp(self):
+        pool = patch("scripts.instrument_pool.load_instruments", return_value=[
+            {"instId": "LINK-USDT-SWAP", "ctVal": "1"},
+        ])
+        pool.start()
+        self.addCleanup(pool.stop)
+
     def test_closed_lifecycle_gets_an_estimated_margin(self):
         row = {"instId": "LINK-USDT-SWAP", "posId": "1", "cTime": "1788882581271",
                "uTime": "1788904813083", "direction": "long", "type": "2", "lever": "3",
@@ -162,6 +173,11 @@ class ReconcileExitAttributionTests(unittest.TestCase):
         import os
         import tempfile
         from r20_backend.analysis_store import Archive
+        pool = patch("scripts.instrument_pool.load_instruments", return_value=[
+            {"instId": "LINK-USDT-SWAP", "ctVal": "1"},
+        ])
+        pool.start()
+        self.addCleanup(pool.stop)
         self.temp = tempfile.TemporaryDirectory()
         path = Path(self.temp.name) / "r20_quant.db"
         self.env = patch.dict(os.environ, {"R20_TESTING": "1", "R20_ANALYSIS_DB": str(path)})

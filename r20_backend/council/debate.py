@@ -557,7 +557,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         '       "limit_price": 78250.0,  // 入场限价同义兼容\n'
         '       "stop_loss": 76500.0,  // 严格基于 1.8~2.2x 1H ATR 设置的防插针止损价（数字）\n'
         '       "stop_loss_price": 76500.0,  // 止损价同义兼容\n'
-        '       "take_profit": 81750.0,  // 至少 2.0R 盈亏比的目标止盈价（数字）\n'
+        '       "take_profit": 81750.0,  // 目标盈亏比 2.0~3.5R 的合理波段止盈价（数字），严禁超远天际线挂单\n'
         '       "take_profit_price": 81750.0,  // 止盈价同义兼容\n'
         f'       "leverage": {int(max(_R20_MIN_LEVERAGE, min(_R20_MAX_LEVERAGE, (_R20_MIN_LEVERAGE + _R20_MAX_LEVERAGE) / 2)))},  // 杠杆整数：必须落在 [{_R20_MIN_LEVERAGE:g}~{_R20_MAX_LEVERAGE:g}] 区间按信心自主裁决，严禁照抄模板占位值\n'
         '       "margin_usdt": 150.0,  // 拟投入保证金（须在可用余额安全范围内）\n'

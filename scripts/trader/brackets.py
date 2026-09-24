@@ -55,3 +55,100 @@ def normalize_bracket_prices(*, is_long, limit_px, tp_px, sl_px, sl_dist, tp_dis
         if tp_px >= limit_px:
             tp_px = round(limit_px - max(tp_dist, price * 0.024), prec)
     return sl_px, tp_px
+
+
+def clamp_take_profit_width(*, is_long: bool, limit_px: float, sl_px: float, tp_px: float,
+                            atr: float = 0.0, prec: int = 2,
+                            max_tp_atr: float | None = None,
+                            max_rr: float | None = None,
+                            min_rr: float | None = None) -> float:
+    """平滑钳制止盈宽度，防止 AI 给出过远无法触及的天际线止盈单。
+
+    核心逻辑：
+    1. 止损风险距离 risk = abs(limit_px - sl_px)。若 risk <= 0 或参数非法，原样返回 tp_px。
+    2. 计算当前止盈距离 curr_reward = (tp_px - limit_px) if is_long else (limit_px - tp_px)。
+       若 curr_reward <= 0，原样返回 tp_px。
+    3. 允许的最大止盈距离：
+       - 基于 ATR 的上限：atr * max_tp_atr（当 atr > 0 且 max_tp_atr > 0 时生效）
+       - 基于最大盈亏比的上限：risk * max_rr（当 max_rr > 0 时生效）
+       两者的较严者（最小值）为 allowed_max。
+    4. 保证底线：allowed_max 不得低于 risk * min_rr（默认 2.0），绝不破坏最小盈亏比。
+    5. 若 curr_reward > allowed_max，则将 tp_px 平滑收窄钳制到该上限并按精度取整。
+    """
+    try:
+        limit_px = float(limit_px)
+        sl_px = float(sl_px)
+        tp_px = float(tp_px)
+    except (TypeError, ValueError):
+        return tp_px
+
+    if limit_px <= 0 or sl_px <= 0 or tp_px <= 0:
+        return tp_px
+
+    # 动态加载风控常量（支持热重载）
+    if max_tp_atr is None or max_rr is None or min_rr is None:
+        try:
+            from scripts.risk_constants import (
+                MAX_TAKE_PROFIT_ATR as _def_tp_atr,
+                MAX_RISK_REWARD_RATIO as _def_max_rr,
+                MIN_RISK_REWARD_RATIO as _def_min_rr,
+            )
+        except ImportError:
+            from risk_constants import (
+                MAX_TAKE_PROFIT_ATR as _def_tp_atr,
+                MAX_RISK_REWARD_RATIO as _def_max_rr,
+                MIN_RISK_REWARD_RATIO as _def_min_rr,
+            )
+        if max_tp_atr is None:
+            max_tp_atr = _def_tp_atr
+        if max_rr is None:
+            max_rr = _def_max_rr
+        if min_rr is None:
+            min_rr = _def_min_rr
+
+    risk = abs(limit_px - sl_px)
+    if risk <= 0:
+        return tp_px
+
+    curr_reward = (tp_px - limit_px) if is_long else (limit_px - tp_px)
+    if curr_reward <= 0:
+        return tp_px
+
+    # 计算各上限
+    candidates = []
+    try:
+        atr_val = float(atr or 0.0)
+        tp_atr_cap = float(max_tp_atr or 0.0)
+        if atr_val > 0 and tp_atr_cap > 0:
+            candidates.append(atr_val * tp_atr_cap)
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        max_rr_val = float(max_rr or 0.0)
+        if max_rr_val > 0:
+            candidates.append(risk * max_rr_val)
+    except (TypeError, ValueError):
+        pass
+
+    if not candidates:
+        return tp_px
+
+    allowed_max = min(candidates)
+
+    # 绝不破坏最小盈亏比底线
+    try:
+        min_rr_val = float(min_rr or 2.0)
+        floor_reward = risk * min_rr_val
+        if allowed_max < floor_reward:
+            allowed_max = floor_reward
+    except (TypeError, ValueError):
+        pass
+
+    if curr_reward > allowed_max:
+        if is_long:
+            tp_px = round(limit_px + allowed_max, prec)
+        else:
+            tp_px = round(limit_px - allowed_max, prec)
+
+    return tp_px

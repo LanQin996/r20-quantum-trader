@@ -141,4 +141,7 @@ export const zhLedger = {
   councilSource: 'AI 投委会决策溯源',
   execStrategy: '执行策略',
   adoptedSeat: '采纳席位',
+  scaleOutBadge: '分批止盈 · 余仓保本跑',
+  scaleOutShort: '分批止盈',
+  scaleOutTitle: '已执行首批分批平仓锁利，余仓保本移动止损守护中',
 };

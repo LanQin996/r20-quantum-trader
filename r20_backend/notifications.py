@@ -2,6 +2,8 @@
 from __future__ import annotations
 import base64
 import datetime
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -222,8 +224,28 @@ def send_channel(channel: str, message: str, env: dict[str, str] | None = None) 
         u_lower = url.lower()
         if "dingtalk" in u_lower or "oapi.dingtalk.com" in u_lower:
             payload = {"msgtype": "text", "text": {"content": message}}
+            # 钉钉加签支持 (HMAC-SHA256)
+            ding_secret = env.get("R20_DINGTALK_SECRET", "").strip()
+            if ding_secret:
+                ts = int(time.time() * 1000)
+                sign_str = f"{ts}\n{ding_secret}"
+                hmac_code = hmac.new(ding_secret.encode("utf-8"), sign_str.encode("utf-8"), hashlib.sha256).digest()
+                sign = urllib.parse.quote_plus(base64.b64encode(hmac_code).decode("utf-8"))
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}timestamp={ts}&sign={sign}"
         elif "feishu" in u_lower or "larksuite" in u_lower or "open.feishu.cn" in u_lower:
             payload = {"msg_type": "text", "content": {"text": message}}
+            # 飞书签名校验支持
+            feishu_secret = env.get("R20_FEISHU_SECRET", "").strip()
+            if feishu_secret:
+                ts = int(time.time())
+                sign_str = f"{ts}\n{feishu_secret}"
+                hmac_code = hmac.new(sign_str.encode("utf-8"), digestmod=hashlib.sha256).digest()
+                sign = base64.b64encode(hmac_code).decode("utf-8")
+                payload["timestamp"] = str(ts)
+                payload["sign"] = sign
+        elif "day.app" in u_lower or "bark" in u_lower:
+            payload = {"title": "【R20 Quantum】", "body": message, "group": "R20-Trade"}
         elif "discord.com" in u_lower or "discordapp.com" in u_lower:
             payload = {"content": message}
         elif "qyapi.weixin.qq.com" in u_lower:

@@ -66,10 +66,16 @@ if MIN_LEVERAGE > MAX_LEVERAGE:
 RISK_PER_TRADE_EQUITY_RATIO = _env_float("R20_RISK_PER_TRADE_RATIO", 0.02)
 # 最小盈亏比 R:R 硬底线，低于该值的报价被 order_risk 物理拦截。
 MIN_RISK_REWARD_RATIO = _env_float("R20_MIN_RISK_REWARD", 2.0)
+# 最大盈亏比 R:R 上限（防把止盈画到天际线导致无法止盈，须 >= MIN_RISK_REWARD）。
+MAX_RISK_REWARD_RATIO = _env_float("R20_MAX_RISK_REWARD", 3.5)
+if MAX_RISK_REWARD_RATIO < MIN_RISK_REWARD_RATIO:
+    MAX_RISK_REWARD_RATIO = MIN_RISK_REWARD_RATIO
 # 新开仓最低 AI 置信度门禁。
 MIN_ENTRY_CONFIDENCE = _env_float("R20_MIN_ENTRY_CONFIDENCE", 80.0)
 
 # ── 组3 · 止损与熔断 ──────────────────────────────────────────────
+# 单笔基准止损 ATR 宽度（× 1H ATR）。
+STOP_LOSS_ATR_MULT = _env_float("R20_STOP_LOSS_ATR_MULT", 2.0)
 # 单日亏损熔断绝对封顶（USDT）。
 MAX_DAILY_LOSS_USDT = _env_float("R20_MAX_DAILY_LOSS_USDT", 150.0)
 # 单日亏损熔断占可用余额比例（与绝对封顶取小）。
@@ -96,6 +102,8 @@ SCALE_OUT_ENABLED = bool(_env_int("R20_SCALE_OUT_ENABLED", 1) > 0)
 SCALE_OUT_RATIO = _env_float("R20_SCALE_OUT_RATIO", 0.50)
 # 分批平仓触发浮盈门槛（×ATR，达到该门槛时触发分批落袋，默认 1.2x ATR）。
 SCALE_OUT_TRIGGER_ATR = _env_float("R20_SCALE_OUT_TRIGGER_ATR", 1.20)
+# 单笔最大止盈 ATR 宽度（× 1H ATR，超出此倍数的止盈单会被执行层平滑收窄钳制，防止止盈过远）。
+MAX_TAKE_PROFIT_ATR = _env_float("R20_MAX_TAKE_PROFIT_ATR", 3.50)
 
 # 组合风险总预算（USDT，跨所合算的顶层总闸；0 = 不封顶）。
 # 审计⑫(2026-09-13) 注释正名：旧注释承诺「0=自动按持仓上限×单标的封顶派生」，但执行层
@@ -126,7 +134,9 @@ DEFAULTS = {
     "R20_MAX_LEVERAGE": 5.0,
     "R20_RISK_PER_TRADE_RATIO": 0.02,
     "R20_MIN_RISK_REWARD": 2.0,
+    "R20_MAX_RISK_REWARD": 3.5,
     "R20_MIN_ENTRY_CONFIDENCE": 80.0,
+    "R20_STOP_LOSS_ATR_MULT": 2.0,
     "R20_MAX_DAILY_LOSS_USDT": 150.0,
     "R20_DAILY_LOSS_EQUITY_RATIO": 0.05,
     "R20_TIME_STOP_HOURS": 8.0,
@@ -138,6 +148,7 @@ DEFAULTS = {
     "R20_SCALE_OUT_ENABLED": 1,
     "R20_SCALE_OUT_RATIO": 0.50,
     "R20_SCALE_OUT_TRIGGER_ATR": 1.20,
+    "R20_MAX_TAKE_PROFIT_ATR": 3.50,
 }
 
 RISK_ENV_KEYS = tuple(DEFAULTS.keys())

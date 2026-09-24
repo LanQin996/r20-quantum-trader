@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Release](https://img.shields.io/badge/Release-v8.1.1-blue.svg?style=flat-square)](https://github.com/555cute/r20-quantum-trader/releases/tag/v8.1.1)
+[![Release](https://img.shields.io/badge/Release-v8.3.0-blue.svg?style=flat-square)](https://github.com/555cute/r20-quantum-trader/releases/tag/v8.3.0)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg?style=flat-square)](https://fastapi.tiangolo.com/)
@@ -240,7 +240,35 @@ R20 Quantum Trader 是一套面向专业交易团队与量化交易员打造的*
 
 ## 🚀 极速部署指南
 
-### 环境准备
+### 方式 A：🐳 Docker 一键部署（最推荐，零环境依赖）
+
+适用于远程 Linux 服务器或本地容器环境。默认使用本仓库发布的镜像，包含 Python 3.11、前端静态资源和 OKX CLI；Web 引擎自动启动并守护网关 Worker：
+
+```bash
+# 1. 克隆代码
+git clone https://github.com/LanQin996/r20-quantum-trader.git
+cd r20-quantum-trader
+
+# 2. 准备环境变量与持久化目录（若无 .env 可由启动脚本自动创建）
+cp env.example .env
+vim .env
+
+# 3. 拉取镜像并后台启动（单容器包含 Web 与受监督的网关 Worker）
+docker compose up -d
+# 或直接运行部署引导脚本：./deploy/docker-start.sh
+
+# 查看运行状态与日志
+docker compose ps
+docker compose logs -f
+```
+
+如需从当前源码构建，按 `docker-compose.yml` 注释启用 `build`，注释掉 `image` 和 `pull_policy`，再执行 `docker compose up -d --build`。配置通过 `env_file` 注入，避免单文件挂载 `.env` 阻断后台原子保存；重建容器前请将需要长期保留的环境设置同步到宿主机 `.env`。
+
+---
+
+### 方式 B：传统本地/物理机部署
+
+#### 环境准备
 - **操作系统**：Linux / macOS（推荐 Ubuntu 22.04 LTS 或更高版本）
 - **Python 环境**：Python 3.10+
 - **前端构建环境**：Node.js 18+ / npm
@@ -256,6 +284,9 @@ sh deploy/install.sh
 # 配置环境变量（根据需要填入大模型 API Key，默认开启模拟盘）
 vim .env
 ```
+
+> 📈 **可选：观测栈**（Prometheus + Grafana，把 `/api/v1/admin/metrics` 变成告警与面板）：
+> 见 `deploy/observability/README.md`。指标含账户规模与风控阈值，端口默认只绑 127.0.0.1。
 
 ### 2. 编译前端与启动服务
 ```bash

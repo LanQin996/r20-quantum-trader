@@ -93,6 +93,26 @@ def build_effective_prompt_text(*, effective_system_prompt, policy_version, time
     )
 
 
+def _calculate_scale_out_tp(entry_price, action, atr, precision=2):
+    try:
+        from scripts.risk_constants import SCALE_OUT_ENABLED, SCALE_OUT_TRIGGER_ATR
+        if not SCALE_OUT_ENABLED:
+            return None
+        ep = float(entry_price or 0.0)
+        atr_val = float(atr or 0.0)
+        act = str(action or "").upper()
+        if ep <= 0 or atr_val <= 0:
+            return None
+        trigger_threshold = float(SCALE_OUT_TRIGGER_ATR or 1.20) * atr_val
+        if "BUY" in act or "LONG" in act:
+            return round(ep + trigger_threshold, int(precision or 2))
+        elif "SELL" in act or "SHORT" in act:
+            return round(ep - trigger_threshold, int(precision or 2))
+    except Exception:
+        pass
+    return None
+
+
 def build_history_record(*, time_str, policy_version, policy_hash, policy_snapshot,
                          policy_summary, macro_summary, council_status, ai_last_prompt,
                          pos_mgmt_list, council_transcript, packages, standard_cache):
@@ -131,6 +151,12 @@ def build_history_record(*, time_str, policy_version, policy_hash, policy_snapsh
                 "target_entry_price": standard_cache[p["instId"]]["decision"].get("entry_price"),
                 "stop_loss_price": standard_cache[p["instId"]]["decision"].get("stop_loss_price"),
                 "take_profit_price": standard_cache[p["instId"]]["decision"].get("take_profit_price"),
+                "scale_out_tp": _calculate_scale_out_tp(
+                    standard_cache[p["instId"]]["decision"].get("entry_price"),
+                    standard_cache[p["instId"]]["decision"].get("action"),
+                    p.get("atr") or p.get("atr_1h") or p.get("atr_15m"),
+                    p.get("precision", 2),
+                ),
             }
             for p in packages
         ]

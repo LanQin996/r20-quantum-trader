@@ -20,6 +20,8 @@ services:
       - .env
     environment:
       - PORT=8080
+      - TZ=Asia/Shanghai
+      - PYTHONPATH=/app
       # OKX 环境总开关：demo=模拟盘（默认，安全）。改实盘前务必确认凭证与风险。
       - R20_OKX_ENV=demo
     volumes:

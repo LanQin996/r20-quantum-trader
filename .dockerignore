@@ -18,3 +18,21 @@ data/*
 *.db-*
 *.tar.gz
 *.zip
+
+# Upstream build context exclusions
+.gitignore
+.venv
+venv
+ENV
+*$py.class
+*.so
+.pytest_cache
+.ruff_cache
+tests
+..env.lock
+.env.lock
+/core
+/core.[0-9]*
+promo_local/
+plan_local/
+.archive/

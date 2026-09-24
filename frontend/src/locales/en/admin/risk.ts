@@ -48,6 +48,7 @@ export const enAdminRisk = {
   detailSep: '; ',
   levInvertedFix: 'The leverage floor cannot exceed the cap — fix the single-trade leverage range first',
   levInvertedSave: 'The leverage floor cannot exceed the cap — adjust the range before saving',
+  rrInvertedSave: 'Minimum R:R ratio floor cannot exceed the cap — adjust the range before saving',
   extremeTitle: 'Confirm extreme risk parameters',
   extremeDesc: 'These parameters are now in the extreme range and will significantly loosen hard risk controls: {detail}',
   saveOk: 'Saved {n} change(s) · {effect}',

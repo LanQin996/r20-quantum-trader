@@ -106,6 +106,9 @@ function posActionBadge(action: string): { label: string; class: string } {
   if (a === 'HOLD') {
     return { label: '🛡️ 顺势持有', class: 'text-[var(--ink-2)] border-[var(--line-1)] bg-[var(--surface-2)]' };
   }
+  if (a === 'SCALE_OUT' || a === 'PARTIAL_TP') {
+    return { label: '🎯 分批锁利', class: 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' };
+  }
   return { label: a || '—', class: 'text-[var(--ink-3)] border-[var(--line-1)] bg-[var(--surface-2)]' };
 }
 </script>
@@ -225,6 +228,12 @@ function posActionBadge(action: string): { label: string; class: string } {
               <span class="font-mono font-bold text-xs text-[var(--ink-strong)]">{{ o.inst }}</span>
               <DirTag :dir="dirOf(o.action)" />
               <ConfBadge :value="o.confidence" />
+              <span
+                v-if="o.scale_out_tp"
+                class="rounded px-1.5 py-0.5 border text-4xs font-mono font-medium text-[var(--accent)] border-[var(--accent-line)] bg-[var(--accent-bg)]"
+              >
+                {{ t('dash.radar.scaleOutTag') }}
+              </span>
             </div>
             <span class="rounded px-1.5 py-0.5 border text-3xs font-mono text-[var(--ink-2)]" style="background-color: var(--surface-2); border-color: var(--line-1)">
               {{ o.suggested_leverage || (o.leverage ? o.leverage + 'x' : '5x') }}
@@ -233,8 +242,34 @@ function posActionBadge(action: string): { label: string; class: string } {
 
           <p class="text-xs text-[var(--ink-2)] leading-body">{{ o.reason || o.reasoning || '--' }}</p>
 
-          <!-- 挂单点位 -->
-          <div class="grid grid-cols-3 gap-2 pt-2 border-t text-3xs font-mono" style="border-color: var(--line-1)">
+          <!-- 挂单点位：包含分批止盈 TP1 则为 4 列阶梯；否则维持经典 3 列 -->
+          <div
+            v-if="o.scale_out_tp"
+            class="grid grid-cols-4 gap-2 pt-2 border-t text-3xs font-mono"
+            style="border-color: var(--line-1)"
+          >
+            <div>
+              <span class="text-[var(--ink-3)] block">{{ t('dash.radar.entry') }}</span>
+              <span class="font-bold text-[var(--ink-1)]">{{ fmtPrice(o.target_entry_price ?? o.entry_price) }}</span>
+            </div>
+            <div>
+              <span class="text-[var(--ink-3)] block">{{ t('dash.radar.stopLoss') }}</span>
+              <span class="font-bold text-[var(--down)]">{{ fmtPrice(o.stop_loss_price) }}</span>
+            </div>
+            <div>
+              <span class="text-[var(--ink-3)] block">{{ t('dash.radar.scaleOutTp') }}</span>
+              <span class="font-bold text-[var(--up)]">{{ fmtPrice(o.scale_out_tp) }}</span>
+            </div>
+            <div>
+              <span class="text-[var(--ink-3)] block">{{ t('dash.radar.finalTp') }}</span>
+              <span class="font-bold text-[var(--up)]">{{ fmtPrice(o.take_profit_price) }}</span>
+            </div>
+          </div>
+          <div
+            v-else
+            class="grid grid-cols-3 gap-2 pt-2 border-t text-3xs font-mono"
+            style="border-color: var(--line-1)"
+          >
             <div>
               <span class="text-[var(--ink-3)] block">{{ t('dash.radar.entry') }}</span>
               <span class="font-bold text-[var(--ink-1)]">{{ fmtPrice(o.target_entry_price ?? o.entry_price) }}</span>

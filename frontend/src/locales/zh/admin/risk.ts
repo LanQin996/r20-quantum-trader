@@ -48,6 +48,7 @@ export const zhAdminRisk = {
   detailSep: '；',
   levInvertedFix: '杠杆下限不能高于上限，请先修正「单笔杠杆区间」',
   levInvertedSave: '杠杆下限不能高于上限，请调整区间后再保存',
+  rrInvertedSave: '最小盈亏比底线不能高于最大盈亏比上限，请调整后再保存',
   extremeTitle: '极端风控参数确认',
   extremeDesc: '以下参数已进入极端区间，将显著放松硬风控：{detail}',
   saveOk: '已保存 {n} 项修改 · {effect}',

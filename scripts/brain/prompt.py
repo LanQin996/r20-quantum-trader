@@ -256,7 +256,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
    - 【首发开仓】：自主判断未持仓品种是否具备确定性爆发机会，结合最新资讯、多周期形态与筹码，决定多空方向 (action: BUY_LONG / SELL_SHORT / WAIT)；
    - 【顺势浮盈金字塔加仓申请】：已有多仓仅可输出同向 BUY_LONG，已有空仓仅可输出同向 SELL_SHORT；这只是加仓申请，执行层仍将复核底仓 ROI/保本、最多{max_scale_in_count}次、累计保证金≤【本周期风险预算】单标的上限、置信度≥{min_scale_in_confidence:g}%、加速度与延续/击穿概率门禁。任何不确定均输出 WAIT；
    - 自主规划拟开仓/加仓保证金 (margin_usdt: 可用余额的 5%~{max_margin_equity_ratio:.0%}，且不得超过系统上限) 与杠杆 ({min_leverage:g}~{max_leverage:g}x 内按信心强弱自主裁决)；
-   - 自主规划 entry_price、take_profit_price 与 stop_loss_price；目标盈亏比见【本周期风险预算】，且任何低于其硬底线的报价会被执行层拒绝。
+   - 自主规划 entry_price、take_profit_price 与 stop_loss_price；目标盈亏比与止盈宽度见【本周期风险预算】，且任何低于其硬底线的报价会被执行层拒绝，超出上限的超远止盈将被执行层自动平滑收窄。
 4. 必须输出严格 JSON，格式如下：
 {{
   "macro_assessment": "30字内全市场宏观流动性与情绪总结",

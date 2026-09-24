@@ -12,6 +12,9 @@ from typing import Any, Mapping
 from scripts.risk_constants import (
     DEFAULTS,
     RISK_ENV_KEYS,
+    MAX_RISK_REWARD_RATIO,
+    MAX_TAKE_PROFIT_ATR,
+    STOP_LOSS_ATR_MULT,
     MIN_ENTRY_CONFIDENCE,
     MIN_RISK_REWARD_RATIO,
     SCALE_OUT_ENABLED,
@@ -89,6 +92,10 @@ _PARAMS: list[dict[str, Any]] = [
      "label": "最小盈亏比 R:R 硬底线", "label_en": "Minimum R:R Ratio",
      "desc": "盈亏比低于该值的开仓报价会被核心风控物理拦截（Fail-Closed），无论来自 AI 还是人工。",
      "type": "float", "min": 1.0, "max": 10.0, "step": 0.1, "unit": ": 1", "display_scale": 1},
+    {"key": "R20_MAX_RISK_REWARD", "group": "per_trade",
+     "label": "最大盈亏比 R:R 上限", "label_en": "Max Risk-Reward Ratio Cap",
+     "desc": "单笔开仓允许的最大盈亏比上限。超出此上限的止盈报价会被执行层平滑收窄钳制，防止规划无法触及的虚高止盈。须 ≥ 最小盈亏比底线。",
+     "type": "float", "min": 2.0, "max": 10.0, "step": 0.1, "unit": ": 1", "display_scale": 1},
     {"key": "R20_MIN_ENTRY_CONFIDENCE", "group": "per_trade",
      "label": "新开仓最低 AI 置信度", "label_en": "Min Entry Confidence",
      "desc": "AI 裁决置信度低于该百分比时禁止新开仓（金字塔加仓另有独立门禁）。",
@@ -114,6 +121,10 @@ _PARAMS: list[dict[str, Any]] = [
      "label": "止损后冷静期", "label_en": "Post-Stop Cooldown",
      "desc": "某标的止损出局后，同标的同方向在该分钟内禁止再次开仓，防情绪化反手与连续磨损。",
      "type": "int", "min": 0, "max": 1440, "step": 5, "unit": "分钟", "display_scale": 1},
+    {"key": "R20_STOP_LOSS_ATR_MULT", "group": "stop_loss",
+     "label": "单笔基准止损宽度 (×ATR)", "label_en": "Base Stop-Loss ATR Band",
+     "desc": "单笔止损距离入场价的基准 ATR 倍数（通常为 1.8~2.2x ATR），与标的池档位结合确定防插针安全呼吸空间。",
+     "type": "float", "min": 1.0, "max": 4.0, "step": 0.1, "unit": "× ATR", "display_scale": 1},
     # ── 组4 顺势金字塔加仓 ──
     {"key": "R20_MAX_SCALE_IN_COUNT", "group": "pyramiding",
      "label": "单标的最大加仓次数", "label_en": "Max Scale-In Count",
@@ -140,6 +151,10 @@ _PARAMS: list[dict[str, Any]] = [
      "label": "分批止盈触发门槛", "label_en": "Scale-Out Trigger Threshold",
      "desc": "持仓浮盈达到该倍数 × 1H ATR 时启动分批平仓（通常为 1.0~1.5x ATR）。",
      "type": "float", "min": 0.5, "max": 5.0, "step": 0.1, "unit": "× ATR", "display_scale": 1},
+    {"key": "R20_MAX_TAKE_PROFIT_ATR", "group": "exit_strategy",
+     "label": "单笔最大止盈宽度 (×ATR)", "label_en": "Max Take-Profit ATR Band",
+     "desc": "单笔止盈单距离入场价的最大 ATR 跨度。超出此倍数的止盈单会被执行层平滑收窄钳制，防止止盈目标过远导致行情反转无法落袋。",
+     "type": "float", "min": 1.5, "max": 8.0, "step": 0.1, "unit": "× ATR", "display_scale": 1},
 ]
 
 _INDEX = {p["key"]: p for p in _PARAMS}
@@ -154,12 +169,15 @@ SUITES: list[dict[str, Any]] = [
          "R20_MAX_CONCURRENT_POSITIONS": 4, "R20_MAX_SAME_DIRECTION_POSITIONS": 2,
          "R20_MAX_MARGIN_EQUITY_RATIO": 0.10, "R20_SINGLE_ASSET_EQUITY_RATIO": 0.20,
          "R20_MAX_SINGLE_ASSET_MARGIN_USDT": 300.0, "R20_MIN_LEVERAGE": 2.0, "R20_MAX_LEVERAGE": 3.0,
-         "R20_RISK_PER_TRADE_RATIO": 0.01, "R20_MIN_RISK_REWARD": 2.5, "R20_MIN_ENTRY_CONFIDENCE": 85.0,
+         "R20_RISK_PER_TRADE_RATIO": 0.01, "R20_MIN_RISK_REWARD": 2.5, "R20_MAX_RISK_REWARD": 3.0,
+         "R20_MIN_ENTRY_CONFIDENCE": 85.0,
+         "R20_STOP_LOSS_ATR_MULT": 1.8,
          "R20_DAILY_LOSS_EQUITY_RATIO": 0.03, "R20_MAX_DAILY_LOSS_USDT": 100.0,
          "R20_TIME_STOP_HOURS": 12.0, "R20_TIME_STOP_ATR_BAND": 0.10, "R20_STOP_COOLDOWN_MINUTES": 90,
          "R20_MAX_SCALE_IN_COUNT": 0, "R20_MIN_SCALE_IN_PROFIT_RATIO": 0.012, "R20_MIN_SCALE_IN_CONFIDENCE": 85.0,
          "R20_MAX_TOTAL_EXPOSURE_USDT": 600.0,
          "R20_SCALE_OUT_ENABLED": 1, "R20_SCALE_OUT_RATIO": 0.50, "R20_SCALE_OUT_TRIGGER_ATR": 1.00,
+         "R20_MAX_TAKE_PROFIT_ATR": 2.80,
      }},
     {"id": "balanced", "name": "⚖️ 均衡波段", "tagline": "推荐默认 · 攻守兼备",
      "desc": "系统出厂基线：同向 3 仓防共振踩踏、单笔保证金 20% 硬顶、2% 单笔风险、R:R 底线 2.0、"
@@ -173,12 +191,15 @@ SUITES: list[dict[str, Any]] = [
          "R20_MAX_CONCURRENT_POSITIONS": 0, "R20_MAX_SAME_DIRECTION_POSITIONS": 4,
          "R20_MAX_MARGIN_EQUITY_RATIO": 0.25, "R20_SINGLE_ASSET_EQUITY_RATIO": 0.40,
          "R20_MAX_SINGLE_ASSET_MARGIN_USDT": 800.0, "R20_MIN_LEVERAGE": 5.0, "R20_MAX_LEVERAGE": 7.0,
-         "R20_RISK_PER_TRADE_RATIO": 0.03, "R20_MIN_RISK_REWARD": 2.0, "R20_MIN_ENTRY_CONFIDENCE": 72.0,
+         "R20_RISK_PER_TRADE_RATIO": 0.03, "R20_MIN_RISK_REWARD": 2.0, "R20_MAX_RISK_REWARD": 5.0,
+         "R20_MIN_ENTRY_CONFIDENCE": 72.0,
+         "R20_STOP_LOSS_ATR_MULT": 2.2,
          "R20_DAILY_LOSS_EQUITY_RATIO": 0.08, "R20_MAX_DAILY_LOSS_USDT": 300.0,
          "R20_TIME_STOP_HOURS": 16.0, "R20_TIME_STOP_ATR_BAND": 0.20, "R20_STOP_COOLDOWN_MINUTES": 30,
          "R20_MAX_SCALE_IN_COUNT": 2, "R20_MIN_SCALE_IN_PROFIT_RATIO": 0.006, "R20_MIN_SCALE_IN_CONFIDENCE": 70.0,
          "R20_MAX_TOTAL_EXPOSURE_USDT": 3000.0,
          "R20_SCALE_OUT_ENABLED": 1, "R20_SCALE_OUT_RATIO": 0.40, "R20_SCALE_OUT_TRIGGER_ATR": 1.50,
+         "R20_MAX_TAKE_PROFIT_ATR": 5.00,
      }},
 ]
 
@@ -287,7 +308,9 @@ def process_values() -> dict[str, float | int]:
         "R20_MAX_LEVERAGE": rc.MAX_LEVERAGE,
         "R20_RISK_PER_TRADE_RATIO": rc.RISK_PER_TRADE_EQUITY_RATIO,
         "R20_MIN_RISK_REWARD": rc.MIN_RISK_REWARD_RATIO,
+        "R20_MAX_RISK_REWARD": rc.MAX_RISK_REWARD_RATIO,
         "R20_MIN_ENTRY_CONFIDENCE": rc.MIN_ENTRY_CONFIDENCE,
+        "R20_STOP_LOSS_ATR_MULT": rc.STOP_LOSS_ATR_MULT,
         "R20_MAX_DAILY_LOSS_USDT": rc.MAX_DAILY_LOSS_USDT,
         "R20_DAILY_LOSS_EQUITY_RATIO": rc.DAILY_LOSS_EQUITY_RATIO,
         "R20_TIME_STOP_HOURS": rc.TIME_STOP_HOURS,
@@ -299,6 +322,7 @@ def process_values() -> dict[str, float | int]:
         "R20_SCALE_OUT_ENABLED": 1 if rc.SCALE_OUT_ENABLED else 0,
         "R20_SCALE_OUT_RATIO": rc.SCALE_OUT_RATIO,
         "R20_SCALE_OUT_TRIGGER_ATR": rc.SCALE_OUT_TRIGGER_ATR,
+        "R20_MAX_TAKE_PROFIT_ATR": rc.MAX_TAKE_PROFIT_ATR,
     }
     return {key: mapping.get(key, DEFAULTS.get(key, 0)) for key in RISK_ENV_KEYS}
 
@@ -363,6 +387,9 @@ def effective_engine_values(usdt_available: float | None = None,
         "max_same_direction": same,
         "pool_size_used": pool_size,
         "target_rr": round(max(2.2, float(MIN_RISK_REWARD_RATIO or 0.0)), 2),
+        "max_risk_reward": float(MAX_RISK_REWARD_RATIO),
+        "max_take_profit_atr": float(MAX_TAKE_PROFIT_ATR),
+        "stop_loss_atr_mult": float(STOP_LOSS_ATR_MULT),
         "confidence_band": [max(float(MIN_ENTRY_CONFIDENCE or 0.0), 78.0),
                             max(float(MIN_ENTRY_CONFIDENCE or 0.0), 78.0) + 8.0],
         "scale_out_enabled": bool(SCALE_OUT_ENABLED),
@@ -410,6 +437,11 @@ def normalize(values: Mapping[str, Any]) -> dict[str, str]:
     lev_max = parsed.get("R20_MAX_LEVERAGE", current_values().get("R20_MAX_LEVERAGE", DEFAULTS["R20_MAX_LEVERAGE"]))
     if isinstance(lev_min, (int, float)) and isinstance(lev_max, (int, float)) and lev_min > lev_max:
         errors.append(f"杠杆下限 ({lev_min:g}x) 不能高于杠杆上限 ({lev_max:g}x)")
+    # 盈亏比区间一致性：底线不得高于上限
+    rr_min = parsed.get("R20_MIN_RISK_REWARD", current_values().get("R20_MIN_RISK_REWARD", DEFAULTS["R20_MIN_RISK_REWARD"]))
+    rr_max = parsed.get("R20_MAX_RISK_REWARD", current_values().get("R20_MAX_RISK_REWARD", DEFAULTS["R20_MAX_RISK_REWARD"]))
+    if isinstance(rr_min, (int, float)) and isinstance(rr_max, (int, float)) and rr_min > rr_max:
+        errors.append(f"最小盈亏比底线 ({rr_min:g}) 不能高于最大盈亏比上限 ({rr_max:g})")
     if errors:
         raise ValueError("；".join(errors))
     return {k: str(v) for k, v in parsed.items()}

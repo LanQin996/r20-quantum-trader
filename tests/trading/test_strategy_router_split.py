@@ -36,11 +36,16 @@ PRE = "386f24b"                      # 本刀动工前最后提交（第九十�
 BASELINE = "r20_backend/routers/strategy.py"
 PKG = ROOT / "r20_backend" / "routers" / "strategy"
 INCLUDE_ORDER = ("council", "interceptors", "policy", "prompts")
-# Added by the v8.1 merge after the original route extraction.
-ADDED_ROUTES = [
+
+# 拆分**之后**新增的路由（正常演进，不是本刀产物）：自进化配置页的读写两条，
+# 落在 prompts 子模块里，路径前缀是 `/api/v1/admin/evolution`。
+# 本门原本要求「路由表一字不变」，那只对**拆分那一刻**成立；此后新增路由必须
+# 登记在此表，否则下面会红（少一条/多一条/换顺序/换处理器名都会红）——
+# 它是登记，不是放水。
+POST_SPLIT_ADDITIONS = (
     ("/api/v1/admin/evolution/config", "GET", "get_evolution_config"),
     ("/api/v1/admin/evolution/config", "PUT", "update_evolution_config"),
-]
+)
 
 
 def _routes_in(node_src: str) -> list:
@@ -66,8 +71,10 @@ class StrategyRouterSplitTest(unittest.TestCase):
         got = []
         for name in INCLUDE_ORDER:
             got.extend(_routes_in((PKG / f"{name}.py").read_text(encoding="utf-8")))
-        self.assertEqual(got, want + ADDED_ROUTES,
-                         "路由表（路径/方法/处理器名/顺序）与拆分前不一致")
+        self.assertEqual(got[:len(want)], want,
+                         "前 35 条路由表（路径/方法/处理器名/顺序）与拆分前不一致")
+        self.assertEqual(tuple(got[len(want):]), POST_SPLIT_ADDITIONS,
+                         "拆分后新增路由未登记（或顺序/处理器名变了）")
 
     def test_live_openapi_route_surface_unchanged(self):
         from r20_backend.app import app
@@ -86,7 +93,7 @@ class StrategyRouterSplitTest(unittest.TestCase):
         r = subprocess.run(["git", "show", f"{PRE}:{BASELINE}"],
                            capture_output=True, text=True, cwd=str(ROOT))
         self.assertEqual(r.returncode, 0, f"基线取不到：{r.stderr[:200]}")
-        want = {(p, m) for p, m, _ in _routes_in(r.stdout) + ADDED_ROUTES}
+        want = {(p, m) for p, m, _ in _routes_in(r.stdout) + list(POST_SPLIT_ADDITIONS)}
         self.assertEqual(live, want, "线上接口面（路径×方法）与拆分前不一致")
         self.assertEqual(len(live), 37)
         self.assertEqual(tags, {("strategy",): 37},
