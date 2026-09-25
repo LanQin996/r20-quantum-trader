@@ -24,6 +24,8 @@ services:
       - PYTHONPATH=/app
       # OKX 环境总开关：demo=模拟盘（默认，安全）。改实盘前务必确认凭证与风险。
       - R20_OKX_ENV=demo
+      # 单容器部署由后端管理网关，不启用上游双容器模式。
+      - R20_STANDALONE_GATEWAY=false
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
