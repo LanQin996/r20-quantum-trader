@@ -142,20 +142,29 @@ def reconcile(archive: Archive, account: str, positions: list[dict] | None = Non
     histories = archive.raw_rows(account,"positions-history")
     orders = archive.raw_rows(account,"orders")
     fills = archive.raw_rows(account,"fills")
-    events = archive.events(account)
+    events = archive.reconciliation_events(account)
     submissions = {e["order_id"]:e for e in events if e["kind"]=="order.submitted" and e["order_id"]}
-    event_ids = {e["id"] for e in events}
+    fill_event_ids = ["fill_"+digest([account, f.get("instId"), f.get("billId") or f.get("tradeId")]) for f in fills]
+    order_event_ids = ["order_state_"+digest([account, str(o.get("ordId") or ""), o.get("state"), o.get("uTime")]) for o in orders]
+    event_ids = archive.existing_event_ids(account, [*fill_event_ids, *order_event_ids])
     from collections import defaultdict
+    # Index once instead of rescanning the entire event history twice per trade.
+    # Preserve chronological order so the last exit remains the latest evidence.
+    exits_by_trade, samples_by_trade = defaultdict(list), defaultdict(list)
+    for event in events:
+        if event["kind"] == "position.exit_reason":
+            exits_by_trade[event["trade_id"]].append(event)
+        elif event["kind"] in ("position.manage.end", "position.sample"):
+            samples_by_trade[event["trade_id"]].append(event)
     fills_by_order, orders_by_inst, histories_by_side = defaultdict(list), defaultdict(list), defaultdict(list)
     for fill in fills: fills_by_order[(fill.get("instId"), fill.get("ordId"))].append(fill)
     for order in orders: orders_by_inst[order.get("instId")].append(order)
     for history in histories: histories_by_side[(history.get("instId"), str(history.get("direction")))].append(history)
     live_ids = {lifecycle_id(p) for p in positions or []}
     trades = []
-    for fill in fills:
+    for fill, event_id in zip(fills, fill_event_ids):
         oid = str(fill.get("ordId") or "")
         submitted = submissions.get(oid)
-        event_id = "fill_"+digest([account, fill.get("instId"), fill.get("billId") or fill.get("tradeId")])
         if event_id in event_ids: continue
         archive.event(account, "order.fill", {"fill": fill}, "filled",
             id=event_id,
@@ -163,10 +172,9 @@ def reconcile(archive: Archive, account: str, positions: list[dict] | None = Non
             decision_id=submitted["decision_id"] if submitted else "",
             cycle_id=submitted["cycle_id"] if submitted else "",
             config_id=submitted["config_id"] if submitted else "")
-    for order in orders:
+    for order, event_id in zip(orders, order_event_ids):
         oid = str(order.get("ordId") or "")
         submitted = submissions.get(oid)
-        event_id = "order_state_"+digest([account, oid, order.get("state"), order.get("uTime")])
         if event_id in event_ids: continue
         archive.event(account, "order.state", {"order": order}, str(order.get("state") or "unknown"),
             id=event_id,
@@ -218,7 +226,7 @@ def reconcile(archive: Archive, account: str, positions: list[dict] | None = Non
                 t["entry_deviation_bps"] = (entry/requested-1)*10000*(1 if direction=="long" else -1)
         else:
             t["link_evidence"]="unlinked"
-        exact_exits = [e for e in events if e["trade_id"]==t["id"] and e["kind"]=="position.exit_reason"]
+        exact_exits = exits_by_trade[t["id"]]
         if exact_exits:
             with archive.connect() as con:
                 detail = archive.read_blob(con,exact_exits[-1]["body_hash"])
@@ -230,11 +238,11 @@ def reconcile(archive: Archive, account: str, positions: list[dict] | None = Non
                 t["exit_reason"] = inferred["reason"]
                 t["exit_evidence"] = "inferred"
                 t["exit_source"] = inferred["source"]
-        samples = [e for e in events if e["trade_id"]==t["id"] and e["kind"] in ("position.manage.end","position.sample")]
+        samples = samples_by_trade[t["id"]]
         highs, lows = [], []
         with archive.connect() as con:
-            for event in samples:
-                body = archive.read_blob(con,event["body_hash"])
+            for event in archive.iter_event_bodies(samples, con):
+                body = event["body"]
                 trackers = (body.get("after") or {}).get("trackers") or {}
                 tracker = body.get("tracker") or trackers.get(f"{inst}_{direction}") or {}
                 hi, lo = number(tracker.get("highWaterMark")), number(tracker.get("lowWaterMark"))
@@ -261,13 +269,22 @@ def sync_archive(positions: list[dict] | None = None, max_pages: int = 2, accoun
     from r20_backend.analysis_capture import resolve_identity
     account = account or resolve_identity(env)
     archive = Archive()
+    started = time.perf_counter()
+    timings = {}
     recover_legacy()
+    timings["legacy_seconds"] = time.perf_counter() - started
     for source in SOURCES:
+        stage = time.perf_counter()
         state = sync_source(archive,account,source,lambda s,c:fetch_page(s,c,env),max_pages)
+        timings[source + "_seconds"] = time.perf_counter() - stage
         if not env.configured:
             state.update({"complete":False,"pagination_supported":False,
                           "coverage_note":"CLI 只采集可访问的最近窗口，完整历史回补需要静态 V5 凭证"})
             archive.sync_state(account,source,state)
+    stage = time.perf_counter()
     result = reconcile(archive,account,positions)
-    emit("archive.sync",{"trades":len(result)},"completed",account=account)
+    timings["reconcile_seconds"] = time.perf_counter() - stage
+    timings["total_seconds"] = time.perf_counter() - started
+    emit("archive.sync",{"trades":len(result), "timings":timings},"completed",account=account)
+    print("[analysis_archive] " + json.dumps({"trades":len(result), "timings":timings}))
     return result

@@ -317,6 +317,31 @@ class Archive:
                 return self.events(account,reader) if reader else []
         return [dict(r) for r in con.execute("SELECT * FROM analysis_events WHERE account=? ORDER BY occurred_ms,id",(account,))]
 
+    def reconciliation_events(self, account: str) -> list[dict]:
+        """Read evidence only; unrelated telemetry must not scale reconciliation."""
+        with self.connect() as con:
+            if con is None:
+                return []
+            return [dict(r) for r in con.execute(
+                """SELECT * FROM analysis_events WHERE account=? AND kind IN
+                ('order.submitted','position.exit_reason','position.manage.end','position.sample')
+                ORDER BY occurred_ms,id""", (account,))]
+
+    def existing_event_ids(self, account: str, ids) -> set[str]:
+        """Bounded primary-key lookups, not a full account event materialization."""
+        keys = list(dict.fromkeys(ids))
+        found = set()
+        with self.connect() as con:
+            if con is None:
+                return found
+            for offset in range(0, len(keys), 400):
+                batch = keys[offset:offset+400]
+                marks = ','.join('?' for _ in batch)
+                found.update(r[0] for r in con.execute(
+                    f'SELECT id FROM analysis_events WHERE account=? AND id IN ({marks})',
+                    [account, *batch]))
+        return found
+
     def configurations(self, account: str, con=None) -> list[dict]:
         if con is None:
             with self.connect() as reader:

@@ -53,7 +53,8 @@ def backup_job_specs() -> tuple[JobSpec, ...]:
 
 
 def current_jobs() -> tuple[JobSpec, ...]:
-    return (*JOBS, *backup_job_specs())
+    archive = (JobSpec("analysis_archive", "sync_analysis_archive.py", 300, 180),) if os.getenv("R20_ANALYSIS_STANDALONE") == "1" else ()
+    return (*JOBS, *archive, *backup_job_specs())
 
 
 def _resolve_times(spec: JobSpec, schedule: dict[str, Any]) -> tuple[str, ...]:
