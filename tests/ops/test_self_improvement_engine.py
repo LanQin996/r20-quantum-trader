@@ -804,6 +804,27 @@ class _Drop:
 _DROP = _Drop()
 
 
+class ArchivedEntrySnapshotTests(_Base):
+    def test_snapshots_use_the_first_matching_proposal_for_the_account(self):
+        from astra_backend.analysis_store import Archive
+
+        archive = Archive(Path(self.tmp.name) / "archive.db")
+        archive.event("acct", "decision.proposed", {"market": {"source": "first"}},
+                      id="proposal-first", decision_id="d1", occurred_ms=10)
+        archive.event("acct", "decision.proposed", {"market": {"source": "later"}},
+                      id="proposal-later", decision_id="d1", occurred_ms=20)
+        archive.event("other", "decision.proposed", {"market": {"source": "other-account"}},
+                      id="proposal-other", decision_id="d2", occurred_ms=10)
+        archive.event("acct", "decision.filtered", {"market": {"source": "wrong-kind"}},
+                      id="filtered", decision_id="d3", occurred_ms=10)
+
+        snapshots = SIE._archived_entry_snapshots(
+            archive, "acct", ["d1", "d2", "d3", "missing", "d1"]
+        )
+
+        self.assertEqual(snapshots, {"d1": {"source": "first"}})
+
+
 class LoadClosedTradesTests(_Base):
     def setUp(self):
         super().setUp()

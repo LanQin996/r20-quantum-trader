@@ -430,12 +430,41 @@ def _match_snapshot(journal_by_inst, inst, open_time, side=None):
     return (best_rec or {}).get("snapshot")
 
 
+def _archived_entry_snapshots(archive, account: str, decision_ids: List[str]) -> Dict[str, Any]:
+    """Fetch proposal snapshots with indexed decision lookups, not per-trade event scans."""
+    unique_ids = list(dict.fromkeys(str(value) for value in decision_ids if value))
+    snapshots: Dict[str, Any] = {}
+    if not unique_ids:
+        return snapshots
+
+    # Stay below SQLite builds with the traditional 999 bind-parameter limit.
+    batch_size = 400
+    with archive.connect() as con:
+        if con is None:
+            return snapshots
+        for offset in range(0, len(unique_ids), batch_size):
+            batch = unique_ids[offset:offset + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows = con.execute(
+                "SELECT decision_id, body_hash FROM analysis_events "
+                "WHERE account=? AND kind='decision.proposed' "
+                f"AND decision_id IN ({placeholders}) ORDER BY occurred_ms,id",
+                [account, *batch],
+            )
+            for row in rows:
+                decision_id = row["decision_id"]
+                if decision_id in snapshots:
+                    continue
+                body = archive.read_blob(con, row["body_hash"])
+                snapshots[decision_id] = body.get("market") if isinstance(body, dict) else None
+    return snapshots
+
+
 def _load_archived_closed_trades(start_time_override=None):
     """Only verifiable, cost-complete closed lifecycles feed the review."""
     from astra_backend.analysis_store import Archive, timestamp_ms
     from astra_backend.analysis_metrics import cost_complete
     from astra_backend.analysis_capture import identity
-    from astra_backend.analysis_service import trade_detail
     reset_ms = 0
     path = os.path.join(DATA_DIR, "account_initial_state.json")
     if os.path.exists(path):
@@ -444,25 +473,20 @@ def _load_archived_closed_trades(start_time_override=None):
     start_value = start_time_override or os.getenv("ASTRA_EVOLUTION_START_TIME", "")
     reset_ms = max(reset_ms, timestamp_ms(start_value) or 0)
     archive = Archive()
-    rows = archive.trades(identity(), {"status": "closed", "start_ms": reset_ms})
+    account = identity()
+    rows = archive.trades(account, {"status": "closed", "start_ms": reset_ms})
+    eligible_rows = [row for row in rows if cost_complete(row)]
+    entry_snapshots = _archived_entry_snapshots(
+        archive, account, [row.get("decision_id") for row in eligible_rows]
+    )
     output = []
-    for row in rows:
-        if not cost_complete(row):
-            continue
+    for row in eligible_rows:
         t = dict(row)
         t["net_pnl"] = float(t["net_pnl"])
         t["fee"] = float(t["fee"]) if t.get("fee") is not None else None
         t["time"] = t.get("close_time")
         # Never guess an entry snapshot from another nearby trade.
-        t["entry_snapshot"] = None
-        if t.get("decision_id"):
-            detail = trade_detail(identity(), t["id"], archive)
-            with archive.connect() as con:
-                for event in (detail or {}).get("events", []):
-                    if event["kind"] == "decision.proposed" and event["decision_id"] == t["decision_id"]:
-                        full = con.execute("SELECT body_hash FROM analysis_events WHERE id=? AND account=?", (event["id"], identity())).fetchone()
-                        if full:
-                            t["entry_snapshot"] = archive.read_blob(con, full[0]).get("market")
+        t["entry_snapshot"] = entry_snapshots.get(str(t.get("decision_id") or ""))
         t["snapshot_observability"] = classify_snapshot_observability(t["entry_snapshot"])
         output.append(t)
     return output
