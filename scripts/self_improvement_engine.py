@@ -724,6 +724,74 @@ def _compute_multi_dimensional_breakdown(closed_trades: List[Dict[str, Any]]) ->
     return "\n".join(lines)
 
 
+EVOLUTION_TRADE_EVIDENCE_MAX_CHARS = 180_000
+EVOLUTION_TRADE_EVIDENCE_MAX_SAMPLES = 240
+EVOLUTION_PROMPT_MAX_CHARS = 240_000
+_EVOLUTION_TRADE_TEXT_FIELDS = (
+    "inst", "side", "time", "open_time", "strategy", "exit_reason",
+    "snapshot_observability", "exit_cause", "exit_reason_source",
+    "decision_source", "adopted_role",
+)
+_EVOLUTION_TRADE_NUMBER_FIELDS = (
+    "margin", "gross_pnl", "fee", "net_pnl", "mfe_pct", "mae_pct", "mfe_r", "mae_r",
+)
+
+
+def compact_evolution_trade_evidence(
+        closed_trades: List[Dict[str, Any]],
+        max_chars: int = EVOLUTION_TRADE_EVIDENCE_MAX_CHARS,
+        max_samples: int = EVOLUTION_TRADE_EVIDENCE_MAX_SAMPLES) -> Tuple[str, int]:
+    """Bound model evidence while retaining full local statistics and causal factor fields."""
+    from scripts.evolution.observability import DYNAMICS_FIELDS
+
+    def scalar(value):
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, (int, float)):
+            return value if value == value and abs(value) != float("inf") else None
+        if isinstance(value, str):
+            return value[:120]
+        return None
+
+    compact_rows = []
+    for trade in closed_trades:
+        if not isinstance(trade, dict):
+            continue
+        row = {key: scalar(trade.get(key)) for key in _EVOLUTION_TRADE_TEXT_FIELDS
+               if trade.get(key) is not None}
+        for key in _EVOLUTION_TRADE_NUMBER_FIELDS:
+            value = scalar(trade.get(key))
+            if value is not None:
+                row[key] = value
+        snapshot = trade.get("entry_snapshot")
+        if isinstance(snapshot, dict):
+            factors = {key: scalar(snapshot.get(key)) for key in DYNAMICS_FIELDS
+                       if snapshot.get(key) is not None}
+            if factors:
+                row["entry_snapshot"] = factors
+        compact_rows.append(row)
+
+    total = len(compact_rows)
+    sample_size = min(total, max(1, int(max_samples))) if total else 0
+
+    def select(size):
+        if size >= total:
+            return compact_rows
+        if size <= 1:
+            return compact_rows[-1:]
+        # Evenly spread evidence over time; always includes both oldest and newest trades.
+        indices = [round(i * (total - 1) / (size - 1)) for i in range(size)]
+        return [compact_rows[index] for index in indices]
+
+    sampled = select(sample_size)
+    encoded = json.dumps(sampled, ensure_ascii=False, separators=(",", ":"))
+    while len(encoded) > max(1, int(max_chars)) and sample_size > 1:
+        sample_size = max(1, sample_size // 2)
+        sampled = select(sample_size)
+        encoded = json.dumps(sampled, ensure_ascii=False, separators=(",", ":"))
+    return encoded, len(sampled)
+
+
 def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memory_md: str = "", timestamp_str: str = "") -> Tuple[str, str, str, Dict[str, int]]:
     """组装自进化 System/User 提示词，并前置注入宿主确定性数理快照可观测性审计与多维战绩矩阵。
 
@@ -749,6 +817,14 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
 """ if existing_memory_md.strip() else "当前长期记忆库为空 (系统初始冷启动状态)"
 
     breakdown_text = _compute_multi_dimensional_breakdown(closed_trades)
+    trade_evidence_json, trade_evidence_count = compact_evolution_trade_evidence(closed_trades)
+    sample_note = ""
+    if trade_evidence_count < total:
+        sample_note = (
+            f"\n逐笔明细采用按时间均匀抽样：{trade_evidence_count}/{total} 笔；"
+            "上方统计矩阵仍基于全部平仓交易。请勿把样本频数当作全量频数。\n"
+        )
+    rendered_trade_evidence = sample_note + trade_evidence_json
 
     prompt = f"""======================= 【当前认知复盘基准时间】 =======================
 【复盘基准时间】: {now_bj_str}
@@ -765,7 +841,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
 {breakdown_text}
 
 【逐笔历史交易明细 (按时间排序)】:
-{json.dumps(closed_trades, indent=2, ensure_ascii=False)}
+{rendered_trade_evidence}
 
 【复盘与长期记忆进化任务】:
 请严格基于可观测台账证据与透视矩阵复盘。以宿主注入的「数理快照可观测性审计」为准：对 PRICE_ONLY / NONE 的交易不得输出任何数理因果，只能标注“数理快照不可观测”。证据不足时使用 NO_CHANGE，不得强行生成新规律。输出标准 JSON：
@@ -797,7 +873,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
         "total": total, "wins": len(wins), "losses": len(losses), "win_rate": win_rate,
         "total_net": f"{total_net:+.2f}", "total_fees": f"{total_fees:.2f}",
         "target_instruments": ", ".join(TARGET_INSTRUMENTS),
-        "closed_trades_json": json.dumps(closed_trades, indent=2, ensure_ascii=False),
+        "closed_trades_json": rendered_trade_evidence,
         "active_instruments": ",".join(TARGET_INSTRUMENTS),
         "snapshot_observability_summary": observability_brief,
         "dynamics_observable_trades": snapshot_audit["math_observable"],
@@ -839,6 +915,12 @@ def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memo
     request_user_prompt = str(effective_evolution_user)
     if repair_hint:
         request_user_prompt = f"{request_user_prompt}\n\n{repair_hint}"
+    prompt_chars = len(effective_evolution_system) + len(request_user_prompt)
+    if prompt_chars > EVOLUTION_PROMPT_MAX_CHARS:
+        message = (f"自进化提示词超过安全预算：{prompt_chars} chars > "
+                   f"{EVOLUTION_PROMPT_MAX_CHARS} chars；已阻止发送，请精简自定义复盘模板")
+        log_msg(message)
+        return {"__llm_error__": message}
     try:
         snapshot = f"【SYSTEM PROMPT】:\n{effective_evolution_system.strip()}\n\n{'='*70}\n【USER PROMPT ({now_bj_str})】：\n{request_user_prompt.strip()}"
         fd, temp_path = tempfile.mkstemp(prefix=".evolution-prompt-", suffix=".tmp", dir=DATA_DIR)
@@ -889,7 +971,7 @@ def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memo
     )
     try:
         t0 = time.time()
-        log_msg(f"🚀 正在调用自进化专属引擎 {model_name} ({api_format} / 思考上限 {thinking_timeout:.0f}s / 推理强度 {effort}) 进行多维实战复盘与策略进化...")
+        log_msg(f"🚀 正在调用自进化专属引擎 {model_name} ({api_format} / 思考上限 {thinking_timeout:.0f}s / 推理强度 {effort} / 输入 {prompt_chars} chars) 进行多维实战复盘与策略进化...")
         raw_res = None
         content = ""
         if execute_llm_request:

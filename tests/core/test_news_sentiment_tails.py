@@ -178,12 +178,13 @@ class CryptoRssTests(_Sandbox, unittest.TestCase):
     def test_rss_items_become_news_rows(self):
         items = self._run({
             "https://cointelegraph.com/rss": _resp(RSS_XML, raw=True),
-            "https://www.coindesk.com/arc/outboundfeeds/rss/": _resp("", raw=True),
+            "https://www.coindesk.com/arc/outboundfeeds/rss": _resp(RSS_XML, raw=True),
             "https://www.theblock.co/rss.xml": _resp("", raw=True),
         })
         titles = [i["title"] for i in items]
         self.assertIn("Bitcoin 突破新高", titles)
         self.assertIn("以太坊升级", titles)
+        self.assertTrue(any("CoinDesk" in i["platforms"] for i in items))
 
     def test_a_blank_title_is_skipped(self):
         # ★ 第 179/180 行

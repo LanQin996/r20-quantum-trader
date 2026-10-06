@@ -168,7 +168,7 @@ def fetch_crypto_rss_news(limit=30) -> list:
     # 1. 国际主流加密媒体 RSS 流
     feeds = [
         ("Cointelegraph", "https://cointelegraph.com/rss"),
-        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss"),
         ("TheBlock", "https://www.theblock.co/rss.xml"),
     ]
     for name, url in feeds:

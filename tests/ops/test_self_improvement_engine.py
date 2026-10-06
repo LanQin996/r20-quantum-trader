@@ -1108,7 +1108,28 @@ class ComposeEvolutionPromptsTests(_Base):
 
     def test_the_closed_trades_json_is_embedded(self):
         _, user, _, _ = SIE.compose_evolution_prompts(self._trades(1.0))
-        self.assertIn("\"net_pnl\": 1.0", user)
+        self.assertIn("\"net_pnl\":1.0", user)
+
+    def test_prompt_evidence_omits_unbounded_snapshot_payloads(self):
+        trade = {**self._trades(1.0)[0], "time": "2026-10-01", "open_time": "2026-10-01",
+                 "entry_snapshot": {"macd_hist": 1.2, "raw_market_dump": "x" * 500_000}}
+        system, user, _, _ = SIE.compose_evolution_prompts([trade])
+        self.assertIn("macd_hist", user)
+        self.assertNotIn("raw_market_dump", user)
+        self.assertNotIn("raw_market_dump", system)
+        self.assertLess(len(user), 20_000)
+
+    def test_large_trade_history_is_time_stratified_under_the_evidence_budget(self):
+        trades = [{"inst": "BTC", "time": f"2026-10-{i:02d}", "net_pnl": float(i),
+                   "entry_snapshot": {"macd_hist": float(i), "large": "x" * 100_000}}
+                  for i in range(1, 301)]
+        evidence, count = SIE.compact_evolution_trade_evidence(
+            trades, max_chars=8_000, max_samples=300)
+        rows = json.loads(evidence)
+        self.assertLessEqual(len(evidence), 8_000)
+        self.assertLess(count, len(trades))
+        self.assertEqual(rows[0]["time"], trades[0]["time"])
+        self.assertEqual(rows[-1]["time"], trades[-1]["time"])
 
     def test_the_system_prompt_declares_the_json_contract(self):
         """复盘提示词体系必须声明严格 JSON 输出契约。
@@ -1277,6 +1298,18 @@ class CallLlmEvolutionReviewTests(_Base):
         kwargs = self.compose.call_args[1]
         self.assertEqual(kwargs["existing_memory_md"], "MEM")
         self.assertEqual(kwargs["timestamp_str"], "T")
+
+    def test_an_oversized_custom_prompt_is_blocked_before_network_call(self):
+        self.compose.return_value = (
+            "SYS", "x" * (SIE.EVOLUTION_PROMPT_MAX_CHARS + 1),
+            "T", {"total": 0})
+        execute = self._llm(runtime={}, execute=("{}", None, {}, None))
+
+        out = SIE.call_llm_evolution_review([])
+
+        self.assertIn("__llm_error__", out)
+        execute.assert_not_called()
+        self.assertIn("超过安全预算", out["__llm_error__"])
 
     def test_an_unparsable_reply_is_an_error_not_a_silent_empty(self):
         self._llm(runtime={}, execute=("不是 JSON", None, {}, None))
