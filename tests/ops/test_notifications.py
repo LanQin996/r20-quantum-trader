@@ -1,24 +1,24 @@
 import unittest
 from unittest.mock import patch, MagicMock
 
-from r20_backend import notifications
+from astra_backend import notifications
 
 
 class NotificationsTests(unittest.TestCase):
     def setUp(self):
         self.env = {
-            "R20_NOTIFY_WEBHOOK_ENABLED": "1",
-            "R20_NOTIFICATION_WEBHOOK": "https://oapi.dingtalk.com/robot/send?access_token=mock",
-            "R20_NOTIFY_WECHAT_ENABLED": "1",
-            "R20_WECHAT_WEBHOOK": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=mock",
-            "R20_NOTIFY_TELEGRAM_ENABLED": "1",
-            "R20_TELEGRAM_BOT_TOKEN": "bot123456:mocktoken",
-            "R20_TELEGRAM_CHAT_ID": "12345678",
-            "R20_TELEGRAM_API_BASE": "https://custom-tg-proxy.example.com",
-            "R20_NOTIFY_QQ_ENABLED": "1",
-            "R20_QQ_APP_ID": "1905549905",
-            "R20_QQ_CLIENT_SECRET": "mocksecret",
-            "R20_QQ_OPENID": "MOCK_USER_OPENID",
+            "ASTRA_NOTIFY_WEBHOOK_ENABLED": "1",
+            "ASTRA_NOTIFICATION_WEBHOOK": "https://oapi.dingtalk.com/robot/send?access_token=mock",
+            "ASTRA_NOTIFY_WECHAT_ENABLED": "1",
+            "ASTRA_WECHAT_WEBHOOK": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=mock",
+            "ASTRA_NOTIFY_TELEGRAM_ENABLED": "1",
+            "ASTRA_TELEGRAM_BOT_TOKEN": "bot123456:mocktoken",
+            "ASTRA_TELEGRAM_CHAT_ID": "12345678",
+            "ASTRA_TELEGRAM_API_BASE": "https://custom-tg-proxy.example.com",
+            "ASTRA_NOTIFY_QQ_ENABLED": "1",
+            "ASTRA_QQ_APP_ID": "1905549905",
+            "ASTRA_QQ_CLIENT_SECRET": "mocksecret",
+            "ASTRA_QQ_OPENID": "MOCK_USER_OPENID",
         }
 
     def test_diagnose_ready_and_incomplete(self):
@@ -26,14 +26,14 @@ class NotificationsTests(unittest.TestCase):
         self.assertEqual(diag["status"], "ready")
 
         incomplete_env = dict(self.env)
-        incomplete_env["R20_QQ_OPENID"] = ""
+        incomplete_env["ASTRA_QQ_OPENID"] = ""
         diag2 = notifications.diagnose_channel("qq", incomplete_env)
         self.assertEqual(diag2["status"], "incomplete")
         self.assertIn("自动获取 OpenID", diag2["detail"])
 
     def test_send_webhook_smart_payload_dingtalk(self):
-        with patch("r20_backend.notifications.validate_outbound_url", return_value="https://oapi.dingtalk.com/robot/send?access_token=mock"), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"errcode": 0})) as mock_post:
+        with patch("astra_backend.notifications.validate_outbound_url", return_value="https://oapi.dingtalk.com/robot/send?access_token=mock"), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {"errcode": 0})) as mock_post:
             ok, detail = notifications.send_channel("webhook", "钉钉测试消息", self.env)
             self.assertTrue(ok)
             self.assertIn("accepted", detail)
@@ -42,9 +42,9 @@ class NotificationsTests(unittest.TestCase):
 
     def test_send_webhook_smart_payload_feishu(self):
         env = dict(self.env)
-        env["R20_NOTIFICATION_WEBHOOK"] = "https://open.feishu.cn/open-apis/bot/v2/hook/mock"
-        with patch("r20_backend.notifications.validate_outbound_url", return_value=env["R20_NOTIFICATION_WEBHOOK"]), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"code": 0})) as mock_post:
+        env["ASTRA_NOTIFICATION_WEBHOOK"] = "https://open.feishu.cn/open-apis/bot/v2/hook/mock"
+        with patch("astra_backend.notifications.validate_outbound_url", return_value=env["ASTRA_NOTIFICATION_WEBHOOK"]), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {"code": 0})) as mock_post:
             ok, detail = notifications.send_channel("webhook", "飞书测试消息", env)
             self.assertTrue(ok)
             args, _ = mock_post.call_args
@@ -52,9 +52,9 @@ class NotificationsTests(unittest.TestCase):
 
     def test_send_webhook_smart_payload_discord(self):
         env = dict(self.env)
-        env["R20_NOTIFICATION_WEBHOOK"] = "https://discord.com/api/webhooks/mock"
-        with patch("r20_backend.notifications.validate_outbound_url", return_value=env["R20_NOTIFICATION_WEBHOOK"]), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {})) as mock_post:
+        env["ASTRA_NOTIFICATION_WEBHOOK"] = "https://discord.com/api/webhooks/mock"
+        with patch("astra_backend.notifications.validate_outbound_url", return_value=env["ASTRA_NOTIFICATION_WEBHOOK"]), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {})) as mock_post:
             ok, detail = notifications.send_channel("webhook", "Discord消息", env)
             self.assertTrue(ok)
             args, _ = mock_post.call_args
@@ -63,8 +63,8 @@ class NotificationsTests(unittest.TestCase):
     def test_send_telegram_uses_custom_api_base(self):
         # 审计修复A6后 telegram 也过 validate_outbound_url（与 webhook/wechat 对齐）；
         # 假域名按本文件既有惯例打恒等补丁，真实拒绝路径由批1审计回归测试覆盖。
-        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"ok": True, "result": {"message_id": 999}})) as mock_post:
+        with patch("astra_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {"ok": True, "result": {"message_id": 999}})) as mock_post:
             ok, detail = notifications.send_channel("telegram", "Telegram测试", self.env)
             self.assertTrue(ok)
             self.assertIn("accepted", detail)
@@ -72,7 +72,7 @@ class NotificationsTests(unittest.TestCase):
             self.assertTrue(args[0].startswith("https://custom-tg-proxy.example.com/botbot123456:mocktoken/sendMessage"))
 
     def test_send_qq_token_and_message_success(self):
-        with patch("r20_backend.notifications._post_json") as mock_post:
+        with patch("astra_backend.notifications._post_json") as mock_post:
             mock_post.side_effect = [
                 (True, "HTTP 200", {"access_token": "valid_token_xyz"}),
                 (True, "HTTP 200", {"id": "msg-12345"}),
@@ -87,7 +87,7 @@ class NotificationsTests(unittest.TestCase):
             self.assertIn("/v2/users/MOCK_USER_OPENID/messages", second_url)
 
     def test_send_qq_handles_11255_gracefully(self):
-        with patch("r20_backend.notifications._post_json") as mock_post:
+        with patch("astra_backend.notifications._post_json") as mock_post:
             mock_post.side_effect = [
                 (True, "HTTP 200", {"access_token": "valid_token_xyz"}),
                 (False, "HTTP 400 Bad Request", {"code": 11255, "message": "请求的资源不存在"}),
@@ -99,9 +99,9 @@ class NotificationsTests(unittest.TestCase):
 
     def test_send_webhook_dingtalk_with_secret_signature(self):
         env = dict(self.env)
-        env["R20_DINGTALK_SECRET"] = "SEC_test_secret_key"
-        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"errcode": 0})) as mock_post:
+        env["ASTRA_DINGTALK_SECRET"] = "SEC_test_secret_key"
+        with patch("astra_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {"errcode": 0})) as mock_post:
             ok, detail = notifications.send_channel("webhook", "加签钉钉消息", env)
             self.assertTrue(ok)
             url_called, payload = mock_post.call_args[0]
@@ -111,10 +111,10 @@ class NotificationsTests(unittest.TestCase):
 
     def test_send_webhook_feishu_with_secret_signature(self):
         env = dict(self.env)
-        env["R20_NOTIFICATION_WEBHOOK"] = "https://open.feishu.cn/open-apis/bot/v2/hook/mock"
-        env["R20_FEISHU_SECRET"] = "FS_test_secret_key"
-        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {"code": 0})) as mock_post:
+        env["ASTRA_NOTIFICATION_WEBHOOK"] = "https://open.feishu.cn/open-apis/bot/v2/hook/mock"
+        env["ASTRA_FEISHU_SECRET"] = "FS_test_secret_key"
+        with patch("astra_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {"code": 0})) as mock_post:
             ok, detail = notifications.send_channel("webhook", "加签飞书消息", env)
             self.assertTrue(ok)
             _, payload = mock_post.call_args[0]
@@ -125,19 +125,19 @@ class NotificationsTests(unittest.TestCase):
 
     def test_send_webhook_bark(self):
         env = dict(self.env)
-        env["R20_NOTIFICATION_WEBHOOK"] = "https://api.day.app/mock-key/"
-        with patch("r20_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
-             patch("r20_backend.notifications._post_json", return_value=(True, "HTTP 200", {})) as mock_post:
+        env["ASTRA_NOTIFICATION_WEBHOOK"] = "https://api.day.app/mock-key/"
+        with patch("astra_backend.notifications.validate_outbound_url", side_effect=lambda u, **k: u), \
+             patch("astra_backend.notifications._post_json", return_value=(True, "HTTP 200", {})) as mock_post:
             ok, detail = notifications.send_channel("webhook", "Bark测试消息", env)
             self.assertTrue(ok)
             _, payload = mock_post.call_args[0]
             self.assertEqual(payload["body"], "Bark测试消息")
-            self.assertEqual(payload["group"], "R20-Trade")
+            self.assertEqual(payload["group"], "AstraQuant-Trade")
 
-    def test_modern_notifier_double_tp_and_three_venues(self):
+    def test_modern_notifier_double_tp_and_okx_venue(self):
         import scripts.qq_notifier as notifier
         with patch("scripts.qq_notifier._publish", return_value=True) as mock_pub:
-            # Test Binance multi-venue + double TP1/TP2
+            # OKX-only 迁移后唯一在场：双止盈 TP1/TP2 + OKX 符号约定
             res = notifier.notify_trade_open(
                 inst="ETH",
                 side="多",
@@ -150,7 +150,7 @@ class NotificationsTests(unittest.TestCase):
                 leverage=5,
                 tp1_px=3320.0,
                 scale_out_ratio=0.50,
-                venue="binance",
+                venue="okx",
                 margin_usdt=325.0,
                 rr_ratio=2.45,
                 confidence=88.0,
@@ -160,9 +160,10 @@ class NotificationsTests(unittest.TestCase):
             self.assertTrue(res)
             event_type, title, msg, payload = mock_pub.call_args[0][:4]
             self.assertEqual(event_type, "trade.opened")
-            self.assertIn("[BINANCE]", title)
-            self.assertIn("BINANCE", msg)
-            self.assertIn("ETHUSDT 永续", msg)
+            # OKX 是默认场所：不叠加 `[OKX]` 标题前缀
+            self.assertNotIn("[OKX]", title)
+            self.assertIn("OKX", msg)
+            self.assertIn("ETH-USDT-SWAP", msg)
             self.assertIn("首批止盈 (TP1 · 50%仓位)：3320.0", msg)
             self.assertIn("终极波段 (TP2 · 剩余仓位)：3450.0", msg)
             self.assertIn("几何盈亏比：2.45 R", msg)
@@ -186,7 +187,10 @@ class NotificationsTests(unittest.TestCase):
             self.assertIn("首批止盈 (TP1 · 50%仓位)", msg_leg)
             self.assertIn("终极波段 (TP2 · 剩余仓位)：95000.0", msg_leg)
             self.assertIn("几何盈亏比：2.50 R", msg_leg)
-            self.assertIn("预估保证金", msg_leg)
+            # 2026-09-28：不再用 `张数 × 价格 ÷ 杠杆` 造「预估保证金」——
+            # 那正是把 199.9 XRP 的 49.9U 说成 6.72U 的形态。没给保证金就只说杠杆。
+            self.assertNotIn("预估保证金", msg_leg)
+            self.assertIn("3x 杠杆", msg_leg)
 
     def test_modern_notifier_partial_close_and_fees(self):
         import scripts.qq_notifier as notifier
@@ -199,37 +203,20 @@ class NotificationsTests(unittest.TestCase):
                 side="多",
                 entry_px=175.0,
                 fee=1.2,
-                venue="gate",
+                venue="okx",
                 is_partial=True,
             )
             self.assertTrue(res)
             _, title, msg, payload = mock_pub.call_args[0][:4]
             self.assertIn("阶梯止盈 TP1 达成", title)
-            self.assertIn("GATE", msg)
-            self.assertIn("SOL_USDT 永续", msg)
+            self.assertIn("OKX", msg)
+            self.assertIn("SOL-USDT-SWAP", msg)
             self.assertIn("到手净利", msg)
             self.assertIn("+13.8000 USDT", msg)
             self.assertIn("交易手续费: -1.2000 U", msg)
-            self.assertIn("零风险放飞", msg)
+            # 文案 2026-09-28 精简过（去掉口号式收尾）：判据钉**语义**而非旧口号。
+            self.assertIn("锁定胜率放飞", msg)
             self.assertEqual(payload["pnl"], 13.8)
-
-    def test_modern_notifier_interceptor_blocked(self):
-        import scripts.qq_notifier as notifier
-        with patch("scripts.qq_notifier._publish", return_value=True) as mock_pub:
-            res = notifier.notify_interceptor_blocked(
-                inst="DOGE",
-                action="BUY_LONG",
-                interceptor_name="4H 宏观顺势铁律",
-                reason="4H 均线空头承压",
-                venue="okx",
-            )
-            self.assertTrue(res)
-            event_type, title, msg, payload = mock_pub.call_args[0][:4]
-            self.assertEqual(event_type, "risk.interceptor_blocked")
-            self.assertIn("物理硬风控拦截", title)
-            self.assertIn("4H 宏观顺势铁律", msg)
-            self.assertIn("4H 均线空头承压", msg)
-            self.assertIn("Fail-Closed", msg)
 
 
 if __name__ == "__main__":

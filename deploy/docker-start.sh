@@ -2,13 +2,13 @@
 set -e
 
 # ==============================================================================
-# R20 Quantum Trader - Docker One-click Launcher
+# AstraQuant - Docker One-click Launcher
 # ==============================================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "🐳 [R20 Docker Launcher] Pre-flight checks..."
+echo "🐳 [ASTRA Docker Launcher] Pre-flight checks..."
 
 # 1. 确保运行时挂载目录存在
 mkdir -p "$ROOT_DIR/data" "$ROOT_DIR/logs" "$ROOT_DIR/backups"
@@ -44,10 +44,10 @@ else
     exit 1
 fi
 
-echo "🚀 Starting R20 Quantum Trader (image or configured local build)..."
+echo "🚀 Starting AstraQuant (image or configured local build)..."
 $COMPOSE_CMD up -d --build
 
-echo "✅ R20 Docker Stack successfully launched!"
+echo "✅ ASTRA Docker Stack successfully launched!"
 echo "--------------------------------------------------------"
 echo "🖥️  Web Dashboard:  http://localhost:8080"
 echo "⚙️  Admin Console:  http://localhost:8080/admin/login"

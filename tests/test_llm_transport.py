@@ -13,7 +13,7 @@ import urllib.error
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from r20_backend import llm_manager as lm
+from astra_backend import llm_manager as lm
 
 
 def reply(content="OK", **extra):
@@ -101,7 +101,7 @@ class LLMTransportTests(unittest.TestCase):
             content, reasoning, usage, latency = self.call(response_format={"type": "json_object"})
         self.assertEqual(json.loads(content), {"action": "等待"})
         self.assertEqual(reasoning, "正在分析行情")
-        self.assertEqual(usage, {"total_tokens": 45})
+        self.assertEqual(usage, {"total_tokens": 45, "cache_reported": False, "truncated": False})
         self.assertGreater(latency, 100)
         self.assertTrue(stream.closed)
         payload = json.loads(transport.call_args.args[0].data)

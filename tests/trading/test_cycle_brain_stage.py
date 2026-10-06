@@ -16,11 +16,13 @@
 import unittest
 
 from scripts.trader.cycle_stages import scan_risk_gates_and_ai_brain
+from scripts.trader.cycle_snapshot import venue_position_span
 
 
 class _Rig:
     def __init__(self, *, cb=(False, ""), brain=None, brain_raises=None, refresh=None,
-                 health=None, pool_trustworthy=True, margin=250.0, batch_enabled=True):
+                 health=None, pool_trustworthy=True, margin=250.0, batch_enabled=True,
+                 session_restricted=False):
         self.actions = []
         self.saved = []
         self.managed = []
@@ -35,6 +37,7 @@ class _Rig:
         self.pool_trustworthy = pool_trustworthy
         self.margin = margin
         self.batch_enabled = batch_enabled
+        self.session_restricted = session_restricted
         self.pos_desc = None
         self.merged_into = None
 
@@ -58,13 +61,12 @@ class _Rig:
             return self.refresh
 
         out = scan_risk_gates_and_ai_brain(
-            _xv_total=2, active_pos_count=1, all_factors=[{"name": "BTC"}],
+            venue_position_span=venue_position_span,
+            active_pos_count=1, all_factors=[{"name": "BTC"}],
             executed_actions=self.actions, long_count=1, short_count=0,
             timestamp_full="2026-09-21 12:00:00", trackers={"t": 1}, usdt_available=1000.0,
-            xv_positions_by_venue={"binance": [{"inst_id": "SOL"}]},
             MAX_CONCURRENT_POSITIONS=5,
             _collect_okx_position_payloads=collect,
-            _merge_cross_venue_positions=merge,
             effective_single_asset_margin=lambda usdt: self.margin,
             execute_ai_position_management=lambda pos_dict, tr, ts, acts:
                 self.managed.append(pos_dict),
@@ -74,7 +76,9 @@ class _Rig:
             pool_state=lambda: {"status": "corrupt", "detail": "文件坏了"},
             query_positions=query,
             read_cycle_health=lambda: self.health,
-            save_trackers=lambda tr: self.saved.append(dict(tr)))
+            real_pos_dict=getattr(self, "real_pos_dict", {}),
+            save_trackers=lambda tr: self.saved.append(dict(tr)),
+            session_restricted=self.session_restricted)
         return out
 
 
@@ -92,6 +96,35 @@ class ScanRiskGatesAndBrainTest(unittest.TestCase):
         rig.run()
         self.assertIsNone(rig.pos_desc, "总开关关掉 ⇒ 一个模型调用都不发")
         self.assertEqual(rig.queries, 0)
+
+    def test_session_restricted_skips_the_model_entirely(self):
+        """窗口外（manage_only）：一个模型调用都不发（这是省下 94% token 的那一刀）。"""
+        rig = _Rig(brain={"BTC": {"action": "BUY_LONG"}}, session_restricted=True)
+        _, cache, _, _ = rig.run()
+        self.assertIsNone(rig.pos_desc, "休市窗口里绝不许叫模型")
+        self.assertEqual(rig.queries, 0, "没叫模型就不需要刷持仓")
+        self.assertEqual(rig.managed, [])
+        self.assertEqual(cache, {}, "brain_cache 必须为空 ⇒ 入场扫描无新鲜决策可用（fail-closed）")
+
+    def test_session_restriction_leaves_a_searchable_action_line(self):
+        rig = _Rig(session_restricted=True)
+        rig.run()
+        self.assertEqual(len(rig.actions), 1, "降级必须留下恰好一条可检索的动作行")
+        self.assertIn("非交易时段", rig.actions[0])
+        self.assertIn("机械风控照常", rig.actions[0])
+
+    def test_circuit_breaker_wins_over_session_restriction(self):
+        """熔断时不该出现"时段"文案：真正的停手理由是熔断，别让日志指向错误原因。"""
+        rig = _Rig(cb=(True, "🚨 断崖"), session_restricted=True)
+        rig.run()
+        self.assertEqual(rig.actions, [])
+
+    def test_default_flag_keeps_the_old_behaviour(self):
+        """不传 `session_restricted`（既有调用点/测试夹具）⇒ 与改造前逐位一致。"""
+        rig = _Rig(brain={"BTC": {"action": "HOLD"}})
+        _, cache, _, _ = rig.run()
+        self.assertEqual(cache, {"BTC": {"action": "HOLD"}})
+        self.assertEqual(rig.queries, 1)
 
     def test_asset_margin_cap_comes_from_the_adaptive_helper(self):
         cap, _, _, _ = _Rig(margin=777.0).run()
@@ -155,41 +188,11 @@ class ScanRiskGatesAndBrainTest(unittest.TestCase):
         self.assertFalse(any("标的池不可信" in a for a in rig.actions))
         self.assertEqual(rig.actions, [], "没动作时不该制造噪音")
 
-    def test_cross_venue_positions_are_merged_into_the_panorama(self):
-        rig = _Rig(brain={"BTC": {}})
-        rig.run()
-        self.assertTrue(rig.merged, "必须汇入外所在管持仓（三所平权全景）")
-        self.assertIn("SOL-USDT-SWAP", [p["instId"] for p in rig.active_pos_list],
-                      "外所持仓要进全景，否则模型看不到它")
-
-    def test_position_description_discloses_counts_and_cross_venue(self):
+    def test_position_description_shape(self):
         rig = _Rig(brain={"BTC": {}})
         rig.run()
         self.assertIn("1/5", rig.pos_desc)
-        self.assertIn("2", rig.pos_desc, "跨所笔数要写进描述")
-
-    def test_unknown_cross_venue_count_is_spelled_out(self):
-        rig = _Rig(brain={"BTC": {}})
-        rig._xv = None
-        # 直接改调用参数：用 _xv_total=None 再跑一次
-        rig_kwargs = dict(_xv_total=None)
-        import scripts.trader.cycle_stages as cs
-        captured = {}
-        out = cs.scan_risk_gates_and_ai_brain(
-            _xv_total=None, active_pos_count=1, all_factors=[], executed_actions=[],
-            long_count=1, short_count=0, timestamp_full="t", trackers={}, usdt_available=1.0,
-            xv_positions_by_venue={}, MAX_CONCURRENT_POSITIONS=5,
-            _collect_okx_position_payloads=lambda a, t: [],
-            _merge_cross_venue_positions=lambda l, x, a: None,
-            effective_single_asset_margin=lambda u: 1.0,
-            execute_ai_position_management=lambda *a: None,
-            execute_batch_ai_brain_cycle=lambda desc, lst, *, usdt_available: captured.update(
-                {"desc": desc}) or {"x": 1},
-            is_circuit_breaker_active=lambda u: (False, ""),
-            pool_is_trustworthy=lambda: True, pool_state=lambda: {},
-            query_positions=lambda: (True, [], ""), read_cycle_health=lambda: {},
-            save_trackers=lambda t: None)
-        self.assertIn("未知", captured["desc"], "跨所笔数拿不到时必须写「未知」，绝不装 0")
+        self.assertIn("okx 1", rig.pos_desc)
 
 
 if __name__ == "__main__":

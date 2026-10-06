@@ -54,6 +54,8 @@ export const zhCommon = {
     pageNav: '分页导航',
     prevPage: '上一页',
     nextPage: '下一页',
+    prev: '上一步',
+    next: '下一步',
     remove: '移除',
     restore: '恢复',
     load: '载入',
@@ -132,11 +134,11 @@ export const zhCommon = {
     siteTimeTip: '全站时间：Asia/Shanghai (UTC+8)',
   },
   brand: {
-    name: 'R20 量子交易系统',
-    nameEn: 'R20 Quantum Trader',
-    tagline: 'AI 主脑全自动永续波段终端',
+    name: 'AstraQuant',
+    nameEn: 'AstraQuant',
+    tagline: '机构级自主量化交易操作系统（多模型对抗质询 · 7梯队微观结构因子 · 确定性物理风控）',
     official: 'Official',
-    license: 'MIT License',
+    license: 'AGPL-3.0 + Commons Clause',
   },
   // 批 39：全角标点曾写死在模板里（`}}：{{`、`（{{ ... }}）`），
   // 英文界面因此出现全角冒号/括号。改为按语言取值：中文用全角，

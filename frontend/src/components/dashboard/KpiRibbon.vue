@@ -1,47 +1,35 @@
 <script setup lang="ts">
 /**
- * KpiRibbon.vue · DeepSeek Harness 风格核心指标仪表盘
- * 纯净低饱和黑白/深灰主题，分层卡片结构，呈现多所总权益、走势、浮亏与防线
+ * KpiRibbon.vue · AstraQuant 核心指标仪表盘
+ * 纯净低饱和黑白/深灰主题，分层卡片结构，呈现 OKX 账户总权益、走势、浮亏与防线
  */
-import { computed, onMounted, ref } from 'vue';
-import { ShieldCheck, Layers } from 'lucide-vue-next';
+import { computed } from 'vue';
+import { ShieldCheck } from 'lucide-vue-next';
 import { useDashboardStore } from '../../stores/dashboard';
-import { useVenueAccountsStore } from '../../stores/venueAccounts';
 import { useI18n } from '../../composables/useI18n';
 import { fmtNum, fmtSigned, fmtPct, arrow } from '../../utils/format';
-import { venueColor } from '../../utils/venueMeta';
 import BaseStat from '../base/BaseStat.vue';
-import BaseSparkline from '../base/BaseSparkline.vue';
 
 const store = useDashboardStore();
-const venueStore = useVenueAccountsStore();
 const { t } = useI18n();
 
 const account = computed(() => store.data?.account || ({} as any));
 const today = computed(() => (store.data as any)?.today_stats || {});
 
-const isLiveEnv = computed(() => venueStore.environment === 'live');
-const envBadgeText = computed(() => (isLiveEnv.value ? t('dash.venueAccounts.envLive') : t('dash.venueAccounts.envDemo')));
-
-const portfolioSummary = computed(() => venueStore.portfolioSummary || (store.data as any)?.multi_venue_portfolio || null);
-const hasMultiVenue = computed(() => {
-  const sum = portfolioSummary.value;
-  return !!sum && Number(sum.total_equity || 0) > 0;
+/* ── 账户总权益：OKX 单所快照 ────────────────────────────────────────────────
+ * 系统已收口为 OKX 专用，`/api/all` 的 `account` 段就是 OKX 当前档（模拟盘 /
+ * 实盘）的读数，不再有第二家交易所可以混进来。缺值一律按「未知」处理：
+ * 显示 `--`，**绝不以 0 冒充未知**。
+ * ────────────────────────────────────────────────────────────────────────── */
+const totalEquityNum = computed<number | null>(() => {
+  const one = Number(account.value.total_eq || 0);
+  return one > 0 ? one : null;
 });
 
-const totalEquityNum = computed(() => {
-  const sum = portfolioSummary.value;
-  if (sum && Number(sum.total_equity || 0) > 0) return Number(sum.total_equity);
-  return Number(account.value.total_eq || 0);
-});
-
-const totalAggregatedEquity = computed(() => {
-  return fmtNum(totalEquityNum.value, 2);
-});
-
-const distOkx = computed(() => Number(portfolioSummary.value?.asset_distribution?.okx?.share_pct || 0));
-const distBinance = computed(() => Number(portfolioSummary.value?.asset_distribution?.binance?.share_pct || 0));
-const distGate = computed(() => Number(portfolioSummary.value?.asset_distribution?.gate?.share_pct || 0));
+/** 单位以文本后缀形式给出（读作 "1234.00 U"）—— 绝不用 "$" 前缀冒充币种。 */
+const totalEquity = computed(() =>
+  totalEquityNum.value === null ? '--' : `${fmtNum(totalEquityNum.value, 2)} U`,
+);
 
 const todayNet = computed(() => Number(today.value.net_realized ?? today.value.total_pnl ?? 0));
 const todayTrades = computed(() => Number(today.value.closed_trades ?? (Number(today.value.win_trades ?? 0) + Number(today.value.loss_trades ?? 0) + Number(today.value.breakeven_trades ?? 0))));
@@ -60,14 +48,13 @@ const shortCount = computed(() => store.positions.filter((p) => p.side === 'shor
 
 const actualMarginUsed = computed(() => {
   if (posMargin.value > 0) return posMargin.value;
-  const sum = portfolioSummary.value;
-  if (sum && typeof sum.margin_used === 'number') return Number(sum.margin_used);
   return Number(account.value.total_pos_margin || 0);
 });
 
 const marginUsage = computed(() => {
-  if (totalEquityNum.value > 0) {
-    return Math.round((actualMarginUsed.value / totalEquityNum.value) * 1000) / 10;
+  const eq = totalEquityNum.value;
+  if (eq !== null && eq > 0) {
+    return Math.round((actualMarginUsed.value / eq) * 1000) / 10;
   }
   return 0;
 });
@@ -78,81 +65,30 @@ const ocoCoverage = computed(() => {
   const ok = store.positions.filter((p: any) => p.cloud_oco_verified !== false && p.protectionStatus !== 'unprotected').length;
   return { pct: Math.round((ok / total) * 100), missing: total - ok };
 });
-
-/* 14 日净值走势 */
-const eqSeries = ref<number[]>([]);
-onMounted(async () => {
-  try {
-    const r = await fetch('/api/v1/equity_history?days=14');
-    const d = await r.json();
-    eqSeries.value = (d.days || []).map((x: any) => Number(x.equity)).filter((n: number) => Number.isFinite(n));
-  } catch {
-    /* sparkline optional */
-  }
-});
 </script>
 
 <template>
   <div class="dsh-card">
-    <!-- 头部：多所组合分布与状态 -->
-    <header
-      v-if="hasMultiVenue"
-      class="dsh-card-header text-3xs font-medium"
-    >
-      <div class="flex items-center gap-2">
-        <span class="flex items-center gap-1.5 font-bold" style="color: var(--ink-strong)">
-          <Layers class="h-3.5 w-3.5 text-[var(--accent)]" />
-          {{ t('dash.matrix.kpi.multiEquity') }}
-        </span>
-        <span class="hidden md:inline font-mono font-semibold" style="color: var(--ink-1)">{{ totalAggregatedEquity }} U</span>
-        <span
-          class="rounded px-1.5 py-0.5 border text-3xs font-mono"
-          style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-2)"
-        >
-          {{ t('dash.matrix.kpi.venuesConnected', undefined, { n: portfolioSummary?.active_venues_count }) }}
-        </span>
-      </div>
-
-      <!-- 资产份额条 -->
-      <div class="hidden sm:flex items-center gap-3 font-mono">
-        <span class="flex items-center gap-1">
-          <span class="h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: venueColor('okx') }" />
-          <span style="color: var(--ink-2)">OKX</span>
-          <span style="color: var(--ink-1)">{{ distOkx }}%</span>
-        </span>
-        <span class="flex items-center gap-1">
-          <span class="h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: venueColor('binance') }" />
-          <span style="color: var(--ink-2)">Binance</span>
-          <span style="color: var(--ink-1)">{{ distBinance }}%</span>
-        </span>
-        <span class="flex items-center gap-1">
-          <span class="h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: venueColor('gate') }" />
-          <span style="color: var(--ink-2)">Gate</span>
-          <span style="color: var(--ink-1)">{{ distGate }}%</span>
-        </span>
-      </div>
-    </header>
-
     <!-- 6 个核心指标单元格 -->
-    <div class="grid grid-cols-2 gap-px bg-[var(--line-1)] sm:grid-cols-3 xl:grid-cols-6">
-      <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors flex flex-col justify-between">
+    <div class="grid grid-cols-2 gap-2 p-2.5 sm:grid-cols-3 xl:grid-cols-6 bg-[var(--surface-1)]">
+      <div class="rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] border border-[var(--line-1)] hover:border-[var(--ds-color-border-hover)] p-3 transition-all flex flex-col justify-between">
         <BaseStat
-          :label="t('dash.matrix.kpi.comboEquity')"
-          :value="totalAggregatedEquity"
-          :hint="hasMultiVenue ? `${envBadgeText} ${t('dash.matrix.kpi.comboEquityTip')}` : t('dash.matrix.kpi.equityTip')"
+          :label="t('dash.matrix.kpi.equity')"
+          :value="totalEquity"
+          :hint="totalEquityNum === null ? t('dash.matrix.kpi.equityEmpty') : t('dash.matrix.kpi.equityTip')"
         >
-          <template #extra>
+          <!-- 今日盈亏：总权益未知时这一行整块不渲染；今日盈亏本身在下方的「今日已实现」有专格。 -->
+          <template v-if="totalEquityNum !== null" #extra>
             <div class="flex items-center gap-2 mt-1">
-              <span class="num text-xs font-semibold" :class="todayNet >= 0 ? 'up' : 'down'">
-                {{ arrow(todayNet) }} {{ fmtSigned(todayNet) }}
+              <span class="num text-xs font-semibold px-2 py-0.5 rounded-md" :class="todayNet >= 0 ? 'up bg-[var(--up-bg)] border border-[var(--up-line)]' : 'down bg-[var(--down-bg)] border border-[var(--down-line)]'">
+                <template v-if="todayNet !== 0">{{ arrow(todayNet) }} </template>{{ fmtSigned(todayNet) }}
               </span>
-              <BaseSparkline :values="eqSeries" :width="48" :height="18" />
             </div>
           </template>
         </BaseStat>
       </div>
 
-      <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors flex flex-col justify-between">
+      <div class="rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] border border-[var(--line-1)] hover:border-[var(--ds-color-border-hover)] p-3 transition-all flex flex-col justify-between">
         <BaseStat
           :label="t('dash.matrix.kpi.todayPnl')"
           :value="fmtSigned(todayNet)"
@@ -162,7 +98,7 @@ onMounted(async () => {
         />
       </div>
 
-      <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors flex flex-col justify-between">
+      <div class="rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] border border-[var(--line-1)] hover:border-[var(--ds-color-border-hover)] p-3 transition-all flex flex-col justify-between">
         <BaseStat
           :label="t('dash.matrix.kpi.floatPnl')"
           :value="fmtSigned(floatPnl)"
@@ -172,7 +108,7 @@ onMounted(async () => {
         />
       </div>
 
-      <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors flex flex-col justify-between">
+      <div class="rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] border border-[var(--line-1)] hover:border-[var(--ds-color-border-hover)] p-3 transition-all flex flex-col justify-between">
         <BaseStat
           :label="t('dash.matrix.kpi.ls')"
           :value="`${longCount} / ${shortCount}`"
@@ -180,7 +116,7 @@ onMounted(async () => {
         />
       </div>
 
-      <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors flex flex-col justify-between">
+      <div class="rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] border border-[var(--line-1)] hover:border-[var(--ds-color-border-hover)] p-3 transition-all flex flex-col justify-between">
         <BaseStat
           :label="t('dash.matrix.kpi.margin')"
           :value="`${fmtNum(marginUsage, 1)}%`"
@@ -190,7 +126,7 @@ onMounted(async () => {
         />
       </div>
 
-      <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors flex flex-col justify-between">
+      <div class="rounded-xl bg-[var(--surface-2)] hover:bg-[var(--surface-3)] border border-[var(--line-1)] hover:border-[var(--ds-color-border-hover)] p-3 transition-all flex flex-col justify-between">
         <BaseStat
           :label="t('dash.matrix.kpi.oco')"
           :value="`${ocoCoverage.pct}%`"

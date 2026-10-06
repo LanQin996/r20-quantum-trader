@@ -1,6 +1,6 @@
 """US-007 环境维合约存在性对账（listing gate）纯单测。
 
-零凭证、零出网：patch ``r20_backend.exchanges.listing.urlopen`` 模块绑定名，
+零凭证、零出网：patch ``astra_backend.exchanges.listing.urlopen`` 模块绑定名，
 所有网络面由 fake urlopen 响应；域名正确性通过捕获 Request.url 断言。
 """
 from __future__ import annotations
@@ -15,8 +15,8 @@ from urllib.request import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from r20_backend.exchanges import listing as listing_mod
-from r20_backend.exchanges.listing import ensure_contract_listed
+from astra_backend.exchanges import listing as listing_mod
+from astra_backend.exchanges.listing import ensure_contract_listed
 
 
 def _resp(payload) -> object:
@@ -117,35 +117,6 @@ class ListingGateTest(unittest.TestCase):
         self.assertEqual(headers.get("x-simulated-trading"), "1")
         # demo 与 live 同域（env_profiles 契约）
         self.assertIn("www.okx.com", net.requests[0].full_url)
-
-    def test_04_binance_break_reject(self):
-        net = _FakeNet([BINANCE_BREAK])
-        self.mock_urlopen.side_effect = net
-        chk = ensure_contract_listed("binance", "live", "SUIUSDT")
-        self.assertFalse(chk.ok)
-        self.assertIn("status=BREAK", chk.reason)
-
-    def test_05_binance_domains_live_vs_demo(self):
-        net = _FakeNet([BINANCE_TRADING, BINANCE_TRADING])
-        self.mock_urlopen.side_effect = net
-        self.assertTrue(ensure_contract_listed("binance", "live", "SUIUSDT").ok)
-        self.assertTrue(ensure_contract_listed("binance", "demo", "SUIUSDT").ok)
-        self.assertIn("https://fapi.binance.com", net.requests[0].full_url)
-        self.assertIn("https://demo-fapi.binance.com", net.requests[1].full_url)
-
-    def test_06_gate_in_delisting_reject(self):
-        net = _FakeNet([GATE_DELISTING])
-        self.mock_urlopen.side_effect = net
-        chk = ensure_contract_listed("gate", "live", "SUI_USDT")
-        self.assertFalse(chk.ok)
-        self.assertIn("in_delisting=true", chk.reason)
-
-    def test_07_gate_sandbox_domain_resolution(self):
-        # resolve 由 setUp 的表钉死（sandbox → fx-api-testnet），urlopen 由 fake 接管
-        net = _FakeNet([GATE_OK])
-        self.mock_urlopen.side_effect = net
-        self.assertTrue(ensure_contract_listed("gate", "sandbox", "BTC_USDT").ok)
-        self.assertIn("fx-api-testnet.gateio.ws", net.requests[0].full_url)
 
     def test_08_ttl_cache_no_second_call(self):
         net = _FakeNet([OKX_LIVE])

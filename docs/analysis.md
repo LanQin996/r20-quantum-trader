@@ -7,7 +7,7 @@
 ## 采集与导出
 
 - 实际发送的模型请求在供应商协议适配之后采集，包含重试与降级请求、响应、投委会席位和最终裁决。不会导出请求鉴权头。
-- 当时保存的配置、进程实际观测的参数、导出时当前保存配置分别记录。配置正文压缩、按哈希去重，存于 data/r20_quant.db 的 analysis_* 表。
+- 当时保存的配置、进程实际观测的参数、导出时当前保存配置分别记录。配置正文压缩、按哈希去重，存于 data/astra_quant.db 的 analysis_* 表。
 - 风控规则标明实际执行结果与未执行规则。订单建议、调整后的参数、回执、成交、撤单、保护单和持仓管理分开记录；提交成功不等于成交。
 - 实盘与模拟盘按环境、凭证组隔离，采集使用本轮冻结的静态 V5 凭证身份。外所执行事件单独按场所、环境和凭证指纹归档，不混入 OKX 成交。
 - OKX 历史通过原生 V5 API 分页增量回补并保存断点。上游 v8.1.0 的 Binance/Gate 台账仍沿用其独立同步流程，复盘中心暂不宣称已覆盖这些场所的完整成交历史。
@@ -31,10 +31,10 @@ Chat Completions 调用优先使用流式响应，兼容返回普通 JSON 的网
 ## 运维与兼容
 
 - 默认持续保留，页面显示占用。归档在原有 SQLite 备份范围内，部署时保留 data 目录。
-- R20_ANALYSIS_DB 可指定隔离数据库；R20_ANALYSIS_DISABLED=1 可停用采集，已有归档仍可读取。测试模式 R20_TESTING=1 默认不采集，只有显式指定隔离数据库才启用。
+- ASTRA_ANALYSIS_DB 可指定隔离数据库；ASTRA_ANALYSIS_DISABLED=1 可停用采集，已有归档仍可读取。测试模式 ASTRA_TESTING=1 默认不采集，只有显式指定隔离数据库才启用。
 - 采集错误进入日志和 analysis_capture_fault.json；故障不阻断原有平仓、保护和风控判断。页面展示故障时间及缺口，不能把缺失样本解读为没有交易。
 - 旧 JSON 与旧 SQLite 留存归入 legacy:unknown，不能未经核验绑定当前账户或推定已包含资金费。
-- 后台分析 API 前缀为 /api/v1/admin/analysis，沿用 X-R20-Session 鉴权；包含 summary、breakdown、trades、events、configurations 和 export。正文按需读取。
+- 后台分析 API 前缀为 /api/v1/admin/analysis，沿用 X-Astra-Session 鉴权；包含 summary、breakdown、trades、events、configurations 和 export。正文按需读取。
 - 大包使用 `POST /exports` 创建任务、`GET /exports/{id}` 读取进度、`DELETE /exports/{id}` 取消。`POST /exports/{id}/download` 在验证管理员会话与任务归属后签发仅适用于该文件路径的短时 HttpOnly Cookie，再由浏览器请求 `/exports/{id}/file`；会话不出现在下载 URL 中。旧 `/export` 接口仍兼容，并改用磁盘文件发送。
 - 后台任务与当前默认部署一样使用单个 Web 进程，同一时刻只生成一个分析包，重复点击会复用正在生成的同一任务。临时包位于归档数据库旁的 `analysis_exports`，需要足够的磁盘空间；任务取消或失败会清理未完成文件，过期文件自动清理。后端重启后任务需要重新创建。
 - 不自动调用额外分析模型或调整实盘策略。下载分析包后，再根据证据制定和验证策略修改。

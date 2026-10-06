@@ -24,7 +24,7 @@ import json
 import os
 import time
 
-from r20_backend import analysis_capture
+from astra_backend import analysis_capture
 
 
 
@@ -66,8 +66,8 @@ def record_open_intent(inst_id: str, side: str, ts_ms: int = None, *,
 
 def record_trade(trade_data, position=None, *, LEDGER_JSON_FILE: str, _atomic_write_json,
                  record_trade_sqlite, current_environment, __version__: str):
-    # G10 场所标注：本链路全部为 OKX V5 直签执行，源头补 venue（gate lab 写侧
-    # 自带 venue="gate"）；setdefault 不覆盖显式值，旧调用方无感。
+    # G10 场所标注：本链路全部为 OKX V5 直签执行，源头补 venue；
+    # setdefault 不覆盖显式值，旧调用方无感。
     trade_data.setdefault("venue", "okx")
     if not isinstance(trade_data, dict):
         return

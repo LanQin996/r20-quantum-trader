@@ -1,4 +1,4 @@
-"""Cross-platform drop-in for the POSIX ``fcntl.flock`` API used across R20.
+"""Cross-platform drop-in for the POSIX ``fcntl.flock`` API used across AstraQuant.
 
 On Linux/macOS this module simply re-exports the real ``fcntl`` lock API.
 On Windows (which has no ``fcntl``), ``flock()`` is emulated with

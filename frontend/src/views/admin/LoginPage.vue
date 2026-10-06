@@ -2,7 +2,7 @@
 /**
  * LoginPage.vue · 系统管理员鉴权入口
  * ---------------------------------------------------------------------------
- * 极简高端、通透精致的开发者控制台质感（参考 Linear / Vercel / DeepSeek）：
+ * 极简高端、通透精致的量化控制台质感（参考 Linear / Apple / Raycast 级工业质感）：
  *   - 居中微发光悬浮毛玻璃工位卡片
  *   - 严谨、专业、克制的排版与信息层级
  *   - 真实高精度控件与平滑交互反馈
@@ -156,12 +156,10 @@ async function handleLogin() {
         </div>
       </div>
 
-      <!-- 底部安全状态与版本 -->
+      <!-- 底部安全状态 -->
       <div class="auth-meta-bar mono">
         <span class="auth-meta-dot" aria-hidden="true" />
-        <span>FAIL-CLOSED HARD GATEWAYS READY</span>
-        <span class="auth-meta-sep">·</span>
-        <span>SESSION ENCRYPTED</span>
+        <span>ENCRYPTED ACCESS</span>
       </div>
     </main>
   </div>
@@ -176,8 +174,21 @@ async function handleLogin() {
   justify-content: center;
   min-height: 100vh;
   padding: 24px;
-  background: radial-gradient(ellipse 80% 50% at 50% 25%, rgba(120, 119, 198, 0.12) 0%, rgba(0, 0, 0, 0) 70%), var(--ds-color-bg-page);
+  background-color: var(--ds-color-bg-page);
   overflow: hidden;
+}
+.auth-page::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 640px;
+  height: 640px;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.07) 0%, rgba(6, 78, 59, 0.02) 45%, transparent 70%);
+  pointer-events: none;
+  border-radius: 50%;
+  filter: blur(40px);
 }
 
 /* 顶部操作条 */
@@ -361,7 +372,7 @@ async function handleLogin() {
 .auth-input:focus {
   background: var(--ds-color-bg-input);
   border-color: var(--ds-color-border-input-focus);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
 }
 .auth-input::placeholder {
   color: var(--ds-color-text-placeholder);
@@ -409,18 +420,18 @@ async function handleLogin() {
   margin-top: 8px;
   border-radius: var(--r-ctl);
   background: var(--ds-btn-primary-bg);
-  border: 1px solid rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--ds-btn-primary-bg);
   color: var(--ds-btn-primary-text);
   font-size: var(--text-xs);
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 4px 14px rgba(255, 255, 255, 0.12);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 4px 14px rgba(16, 185, 129, 0.2);
   transition: all var(--dur-fast) var(--ease-out);
 }
 .auth-submit-btn:hover:not(:disabled) {
   background: var(--ds-btn-primary-hover-bg);
   border-color: var(--ds-btn-primary-hover-bg);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(255, 255, 255, 0.22);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(16, 185, 129, 0.3);
   transform: translateY(-1px);
 }
 .auth-submit-btn:disabled {
@@ -466,9 +477,6 @@ async function handleLogin() {
   border-radius: 50%;
   background: var(--up);
   box-shadow: 0 0 6px var(--up);
-}
-.auth-meta-sep {
-  opacity: 0.5;
 }
 
 </style>

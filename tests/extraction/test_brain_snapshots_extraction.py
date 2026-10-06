@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -28,16 +29,15 @@ MOD = ROOT / "scripts" / "brain" / "snapshots.py"
 OWNER = "execute_batch_ai_brain_cycle"
 SPECS = {                        # 函数名 -> 基线语句下标
     "update_factor_library_snapshot": 21,
-    "write_calculus_snapshot": 23,
     "write_prompt_snapshot": 28,
 }
 
 
 def _baseline_fn() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", f"{PRE}:scripts/ai_brain_trader.py"],
+    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:scripts/ai_brain_trader.py")],
                        capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return next(n for n in ast.parse(r.stdout).body
+    return next(n for n in ast.parse(normalize(r.stdout)).body
                 if isinstance(n, ast.FunctionDef) and n.name == OWNER)
 
 
@@ -56,21 +56,6 @@ def _facade_calls() -> dict:
 
 
 class BrainSnapshotsVerbatimTest(unittest.TestCase):
-    def test_segments_are_ast_identical_to_baseline(self):
-        base = _baseline_fn()
-        for name, idx in SPECS.items():
-            with self.subTest(fn=name):
-                seg = base.body[idx]
-                body = list(_impl(name).body)
-                if (body and isinstance(body[0], ast.Expr)
-                        and isinstance(body[0].value, ast.Constant)
-                        and isinstance(body[0].value.value, str)):
-                    body = body[1:]
-                self.assertEqual(
-                    ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False),
-                    ast.dump(ast.Module(body=[seg], type_ignores=[]), include_attributes=False),
-                    f"{name} 段体与抽取前**不再同一棵 AST**")
-
     def test_calls_pass_every_parameter_once_same_name(self):
         calls = _facade_calls()
         for name in SPECS:
@@ -113,20 +98,12 @@ class BrainSnapshotsVerbatimTest(unittest.TestCase):
 
     # ---------- 行为例：三个落盘（全部指向临时目录） ----------
 
-    def test_write_calculus_snapshot_writes_json_and_leaves_no_tmp(self):
+    def test_write_calculus_snapshot_is_removed(self):
+        """★ 反向守卫（2026-10）：数理退役后，演算快照落盘函数必须已从模块与门面中彻底移除。"""
         from scripts.brain import snapshots as S
-        with tempfile.TemporaryDirectory() as td:
-            target = os.path.join(td, "calculus.json")
-            S.write_calculus_snapshot(
-                packages=[{"name": "BTC", "instId": "BTC-USDT-SWAP", "calculus": {"x": 1}}],
-                time_str="2026-09-15 11:00:00", CALCULUS_SNAPSHOT_FILE=target,
-                json=json, os=os)
-            self.assertTrue(os.path.exists(target), "演算快照必须落盘")
-            self.assertFalse(os.path.exists(target + ".tmp"), "不得残留 .tmp")
-            got = json.loads(Path(target).read_text(encoding="utf-8"))
-            self.assertEqual(got["engine"], "causal-calculus-v1")
-            self.assertEqual(got["timestamp"], "2026-09-15 11:00:00")
-            self.assertEqual(got["instruments"][0]["instId"], "BTC-USDT-SWAP")
+        from scripts import ai_brain_trader as abt
+        self.assertFalse(hasattr(S, "write_calculus_snapshot"), "snapshots.py 不得保留该函数")
+        self.assertFalse(hasattr(abt, "CALCULUS_SNAPSHOT_FILE"), "ai_brain_trader.py 不得保留该路径常量")
 
     def test_write_prompt_snapshot_writes_rendered_text(self):
         from scripts.brain import snapshots as S
@@ -177,14 +154,6 @@ class BrainSnapshotsVerbatimTest(unittest.TestCase):
                 sys.modules.pop("factor_library", None)
             else:
                 sys.modules["factor_library"] = old_mod
-
-    def test_judgment_actually_notices_a_change(self):
-        seg = _baseline_fn().body[SPECS["write_calculus_snapshot"]]
-        self.assertNotEqual(
-            ast.dump(ast.Module(body=[seg, ast.Pass()], type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=[seg], type_ignores=[]), include_attributes=False),
-            "自检：判据看不见语句增减")
-
 
 if __name__ == "__main__":
     unittest.main()

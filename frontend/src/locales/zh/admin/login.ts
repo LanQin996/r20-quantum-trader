@@ -1,14 +1,14 @@
 /** 登录页 */
 export const zhAdminLogin = {
-  title: 'R20 控制台',
+  title: 'AstraQuant 控制台',
   desc: '输入管理员凭据进入系统配置面',
   username: '用户名',
   password: '密码',
   submit: '登录',
   submitting: '验证中…',
   failed: '登录失败',
-  rateHint: '连续失败 5 次锁定 15 分钟；全部登录行为计入审计日志。',
-  backToScreen: '返回实盘大屏',
+  rateHint: '连续多次失败将暂时锁定账户，保障系统安全',
+  backToScreen: '返回实盘看板',
   secured: '会话凭据仅存于本机浏览器',
   showPwd: '显示密码',
   hidePwd: '隐藏密码',

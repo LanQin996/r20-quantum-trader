@@ -27,7 +27,7 @@ interface ExportJob {
   stage: string; completed: number; total: number; bytes: number; error: string;
 }
 const exportJob = ref<ExportJob | null>(null), exportError = ref(''), downloading = ref(false);
-const exportStorageKey = 'r20.analysis.export';
+const exportStorageKey = 'astra.analysis.export';
 let exportTimer: ReturnType<typeof setTimeout> | undefined, disposed = false;
 const tab = ref('overview');
 const bjToday = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
@@ -193,7 +193,7 @@ async function downloadExport() {
     if (disposed) return;
     const link = document.createElement('a');
     link.href = result.url;
-    link.download = 'r20-analysis-' + bjToday + '.zip';
+    link.download = 'astra-analysis-' + bjToday + '.zip';
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -308,8 +308,8 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
   <div class="analysis-page space-y-4">
     <PageHeader :title="tr('title')" :description="tr('subtitle')">
       <template #actions>
-        <button class="btn btn-ghost btn-sm" :disabled="loading" @click="apply(false)"><RefreshCw :class="{ 'animate-spin': loading }" />{{ tr('refresh') }}</button>
-        <button class="btn btn-primary btn-sm" :disabled="exporting || loading || !applied" @click="exportAll"><Download />{{ exporting ? tr('exporting') : tr('export') }}</button>
+        <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="apply(false)"><RefreshCw class="shrink-0" :class="{ 'animate-spin': loading }" />{{ tr('refresh') }}</button>
+        <button type="button" class="btn btn-primary btn-sm" :disabled="exporting || loading || !applied" @click="exportAll"><Download />{{ exporting ? tr('exporting') : tr('export') }}</button>
       </template>
     </PageHeader>
     <div v-if="exportJob || exportError" class="card p-3 space-y-2" role="status" aria-live="polite">
@@ -317,12 +317,12 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
         <span v-if="exporting">{{ exportJob?.state === 'cancelling' ? tr('exportCancelling') : exportProgress }}</span>
         <span v-else-if="exportJob?.state === 'ready'">{{ tr('exportReady') }} · {{ format(exportJob.bytes / 1048576) }} MB</span>
         <span v-else-if="exportJob?.state === 'cancelled'">{{ tr('exportCancelled') }}</span>
-        <button v-if="exportJob?.state === 'running'" class="btn btn-ghost btn-sm" @click="cancelExport">{{ tr('exportCancel') }}</button>
-        <button v-if="exportJob?.state === 'ready'" class="btn btn-primary btn-sm" :disabled="downloading" @click="downloadExport">{{ tr('exportDownloadAgain') }}</button>
+        <button v-if="exportJob?.state === 'running'" type="button" class="btn btn-ghost btn-sm" @click="cancelExport">{{ tr('exportCancel') }}</button>
+        <button v-if="exportJob?.state === 'ready'" type="button" class="btn btn-primary btn-sm" :disabled="downloading" @click="downloadExport">{{ tr('exportDownloadAgain') }}</button>
       </div>
       <p v-if="exporting" class="text-xs t-faint">{{ tr('exportBackgroundHint') }}</p>
       <p v-if="exportJob?.state === 'ready'" class="text-xs t-faint">{{ tr('exportReadyHint') }}</p>
-      <p v-if="exportError" class="text-xs down">{{ exportError }}</p>
+      <p v-if="exportError" role="alert" class="text-xs down">{{ exportError }}</p>
     </div>
     <form class="card analysis-filters" :aria-label="tr('apply')" :aria-busy="loading" @submit.prevent="apply()">
       <label class="analysis-account">{{ tr('account') }}<select v-model="account" class="field" :aria-label="tr('account')"><option v-if="!account" value="">{{ tr('currentAccount') }}</option><option v-for="a in accounts" :key="a" :value="a">{{ a }}</option></select></label>
@@ -389,13 +389,13 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
     <section v-if="tab === 'attribution'" class="space-y-4">
       <div class="card p-3">
         <div class="flex flex-wrap items-center gap-3 mb-3"><label>{{ tr('group') }}<select v-model="groupBy" class="field" :aria-label="tr('group')"><option v-for="d in dimensions" :key="d" :value="d">{{ dimensionLabel(d) }}</option></select></label><p class="text-xs t-faint">{{ tr('modelNote') }}</p></div>
-        <div class="overflow-x-auto"><table class="table"><thead><tr><th>{{ tr('group') }}</th><th>{{ tr('samples') }}</th><th>{{ tr('incomplete') }}</th><th>{{ tr('winRate') }}</th><th>{{ tr('net') }}</th><th>{{ tr('pf') }}</th><th>{{ tr('expectancy') }}</th></tr></thead>
+        <div class="overflow-x-auto"><table class="table" :aria-label="tr('group')"><thead><tr><th scope="col">{{ tr('group') }}</th><th scope="col">{{ tr('samples') }}</th><th scope="col">{{ tr('incomplete') }}</th><th scope="col">{{ tr('winRate') }}</th><th scope="col">{{ tr('net') }}</th><th scope="col">{{ tr('pf') }}</th><th scope="col">{{ tr('expectancy') }}</th></tr></thead>
           <tbody><tr v-for="g in groups" :key="g.key"><td class="max-w-60 break-all">{{ g.key }}</td><td>{{ g.sample_count }}</td><td>{{ g.incomplete_count }}</td><td>{{ pct(g.win_rate) }}</td><td :class="color(g.net_pnl)">{{ format(g.net_pnl) }}</td><td>{{ format(g.profit_factor) }}</td><td>{{ format(g.expectancy) }}</td></tr></tbody></table></div>
       </div>
       <div class="card overflow-hidden">
         <BaseEmpty v-if="!trades.length" :text="tr('noData')" />
-        <div v-else class="overflow-x-auto"><table class="table"><thead><tr><th>{{ tr('inst') }}</th><th>{{ tr('side') }}</th><th>{{ tr('closeTime') }}</th><th>{{ tr('net') }}</th><th>{{ tr('exitReason') }}</th><th>{{ tr('evidence') }}</th><th>{{ tr('details') }}</th></tr></thead>
-          <tbody><tr v-for="row in trades" :key="row.id"><td>{{ row.inst }}</td><td>{{ tr(row.side) }}</td><td class="num whitespace-nowrap">{{ row.close_time }}</td><td class="num" :class="color(row.net_pnl)">{{ format(row.net_pnl) }}</td><td>{{ row.exit_reason || tr('unknown') }}</td><td>{{ tr(row.exit_evidence || 'unknown') }}<span v-if="!row.cost_complete" class="block text-xs t-faint">{{ tr('incomplete') }}</span></td><td><button class="btn btn-ghost btn-sm" @click="inspectTrade(row.id)">{{ tr('details') }}</button></td></tr></tbody></table></div>
+        <div v-else class="overflow-x-auto"><table class="table" :aria-label="tr('trades')"><thead><tr><th scope="col">{{ tr('inst') }}</th><th scope="col">{{ tr('side') }}</th><th scope="col">{{ tr('closeTime') }}</th><th scope="col">{{ tr('net') }}</th><th scope="col">{{ tr('exitReason') }}</th><th scope="col">{{ tr('evidence') }}</th><th scope="col">{{ tr('details') }}</th></tr></thead>
+          <tbody><tr v-for="row in trades" :key="row.id"><td>{{ row.inst }}</td><td>{{ tr(row.side) }}</td><td class="num whitespace-nowrap">{{ row.close_time }}</td><td class="num" :class="color(row.net_pnl)">{{ format(row.net_pnl) }}</td><td>{{ row.exit_reason || tr('unknown') }}</td><td>{{ tr(row.exit_evidence || 'unknown') }}<span v-if="!row.cost_complete" class="block text-xs t-faint">{{ tr('incomplete') }}</span></td><td><button type="button" class="btn btn-ghost btn-sm" @click="inspectTrade(row.id)">{{ tr('details') }}</button></td></tr></tbody></table></div>
         <BasePager :page="tradePage" :page-count="Math.max(1, Math.ceil(tradeTotal / 20))" :total="tradeTotal" @update:page="changePage('trade', $event)" />
       </div>
     </section>
@@ -405,13 +405,13 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
       <div class="card analysis-compare">
         <label>{{ tr('historical') }}<select v-model="leftId" class="field" :aria-label="tr('historical')"><option value="">{{ tr('selectConfig') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }} · {{ time(c.captured_ms) }}</option></select></label>
         <label>{{ tr('compare') }}<select v-model="rightId" class="field" :aria-label="tr('compare')"><option value="current">{{ tr('current') }}</option><option v-for="c in configOptions" :key="c.id" :value="c.id">{{ c.process }} · {{ c.id.slice(0, 10) }}</option></select></label>
-        <button class="btn btn-ghost" :disabled="!leftId" @click="compare"><GitCompareArrows />{{ tr('compare') }}</button>
+        <button type="button" class="btn btn-ghost" :disabled="!leftId" @click="compare"><GitCompareArrows />{{ tr('compare') }}</button>
       </div>
       <BaseEmpty v-if="!leftId" :text="tr('selectConfig')" />
       <template v-if="leftConfig && rightConfig">
         <div class="card p-3 overflow-x-auto"><h2 class="font-semibold text-sm mb-2">{{ tr('differences') }} · {{ differences.length }}</h2><BaseEmpty v-if="!differences.length" :text="tr('noDifferences')" />
-          <table v-else class="table config-diff"><thead><tr><th>{{ tr('field') }}</th><th>{{ tr('before') }}</th><th>{{ tr('after') }}</th></tr></thead>
-            <tbody><tr v-for="d in differences" :key="d.key"><td>{{ d.key }}</td><td><pre>{{ d.before }}</pre></td><td><pre>{{ d.after }}</pre></td></tr></tbody></table>
+          <table v-else class="table config-diff" :aria-label="tr('differences')"><thead><tr><th scope="col">{{ tr('field') }}</th><th scope="col">{{ tr('before') }}</th><th scope="col">{{ tr('after') }}</th></tr></thead>
+            <tbody><tr v-for="d in differences" :key="d.key"><td>{{ d.key }}</td><td><pre tabindex="0">{{ d.before }}</pre></td><td><pre tabindex="0">{{ d.after }}</pre></td></tr></tbody></table>
         </div>
         <div class="grid lg:grid-cols-2 gap-3"><details class="card p-3"><summary>{{ tr('historical') }} · {{ time(leftConfig.captured_ms) }}</summary><BaseCodeBlock :code="json(leftConfig)" max-height="600px" /></details><details class="card p-3"><summary>{{ tr('compare') }} · {{ time(rightConfig.captured_ms) }}</summary><BaseCodeBlock :code="json(rightConfig)" max-height="600px" /></details></div>
       </template>
@@ -426,7 +426,7 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
       <p class="text-xs t-faint">{{ tr('executionNote') }}</p>
       <div v-if="execution.rejections?.length" class="card p-3"><h2 class="font-semibold text-sm mb-2">{{ tr('rejection') }}</h2><div v-for="r in execution.rejections" :key="r.reason" class="flex justify-between gap-4 py-1 text-xs"><span>{{ r.reason }}</span><strong class="num">{{ r.count }}</strong></div></div>
       <div class="card overflow-hidden"><BaseEmpty v-if="!events.length" :text="tr('emptyEvents')" />
-        <div v-else class="overflow-x-auto"><table class="table"><thead><tr><th>{{ tr('time') }}</th><th>{{ tr('kind') }}</th><th>{{ tr('inst') }}</th><th>{{ tr('status') }}</th><th>{{ tr('evidence') }}</th></tr></thead><tbody><tr v-for="e in events" :key="e.id"><td class="whitespace-nowrap">{{ time(e.occurred_ms) }}</td><td>{{ eventLabel(e.kind) }}<span class="block text-xs t-faint">{{ e.kind }}</span></td><td>{{ e.inst || '—' }}</td><td :class="e.status === 'failed' || e.status === 'rejected' ? 'down' : ''">{{ e.status }}</td><td><button class="btn btn-ghost btn-sm" @click="inspectEvent(e.id)">{{ tr('raw') }}</button></td></tr></tbody></table></div>
+        <div v-else class="overflow-x-auto"><table class="table" :aria-label="tr('execution')"><thead><tr><th scope="col">{{ tr('time') }}</th><th scope="col">{{ tr('kind') }}</th><th scope="col">{{ tr('inst') }}</th><th scope="col">{{ tr('status') }}</th><th scope="col">{{ tr('evidence') }}</th></tr></thead><tbody><tr v-for="e in events" :key="e.id"><td class="whitespace-nowrap">{{ time(e.occurred_ms) }}</td><td>{{ eventLabel(e.kind) }}<span class="block text-xs t-faint">{{ e.kind }}</span></td><td>{{ e.inst || '—' }}</td><td :class="e.status === 'failed' || e.status === 'rejected' ? 'down' : ''">{{ e.status }}</td><td><button type="button" class="btn btn-ghost btn-sm" @click="inspectEvent(e.id)">{{ tr('raw') }}</button></td></tr></tbody></table></div>
         <BasePager :page="eventPage" :page-count="Math.max(1, Math.ceil(eventTotal / 30))" :total="eventTotal" @update:page="changePage('event', $event)" />
       </div>
     </section>
@@ -449,7 +449,7 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
         </dl>
         <details class="card p-3"><summary>{{ tr('body') }}</summary><BaseCodeBlock :code="json(tradeDetail.trade)" /></details>
         <h3 class="text-sm font-semibold">{{ tr('timeline') }}</h3>
-        <div v-for="e in tradeDetail.events" :key="e.id" class="flex items-center gap-2 text-xs border-b py-2" style="border-color: var(--line-1)"><span class="num">{{ time(e.occurred_ms) }}</span><span class="flex-1">{{ eventLabel(e.kind) }} · {{ e.status }}</span><button class="btn btn-ghost btn-sm" @click="inspectEvent(e.id, true)">{{ tr('raw') }}</button></div>
+        <div v-for="e in tradeDetail.events" :key="e.id" class="flex items-center gap-2 text-xs border-b py-2" style="border-color: var(--line-1)"><span class="num">{{ time(e.occurred_ms) }}</span><span class="flex-1">{{ eventLabel(e.kind) }} · {{ e.status }}</span><button type="button" class="btn btn-ghost btn-sm" @click="inspectEvent(e.id, true)">{{ tr('raw') }}</button></div>
       </div>
       <div v-if="evidence" class="space-y-2 mt-4"><h3 class="text-sm font-semibold">{{ evidence.kind }}</h3><BaseCodeBlock :code="json(evidence)" max-height="70vh" /></div>
     </BaseDrawer>
@@ -457,12 +457,12 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
 </template>
 <style scoped>
 .analysis-page { color: var(--ink-1); min-width: 0; }
-.analysis-page label { display: flex; flex-direction: column; min-width: 0; gap: 5px; font-size: var(--text-3xs); color: var(--ink-2); }
+.analysis-page label { display: flex; flex-direction: column; min-width: 0; gap: 6px; font-size: var(--text-3xs); color: var(--ink-2); }
 .analysis-filters {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: end;
-  gap: 14px 16px;
+  gap: 12px 16px;
   padding: 16px;
 }
 .analysis-account { grid-column: span 2; }
@@ -472,7 +472,7 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end;
-  gap: 14px 16px;
+  gap: 12px 16px;
   padding: 16px;
 }
 .analysis-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -491,23 +491,23 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
 @media (max-width: 479px) {
   .analysis-stats { grid-template-columns: minmax(0, 1fr); }
 }
-.analysis-page summary { cursor: pointer; font-size: 12px; padding: 6px 0; }
+.analysis-page summary { cursor: pointer; font-size: var(--text-xs); padding: 6px 0; }
 .config-diff { table-layout: fixed; min-width: 660px; }
 .config-diff td { overflow-wrap: anywhere; vertical-align: top; }
-.config-diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; font-size: 11px; }
+.config-diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; font-size: var(--text-3xs); }
 .curve-wrap { --curve-net: #22a995; --curve-dd: #d47b78; position: relative; }
-.curve-summary span { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--line-1); border-radius: 10px; }
-.curve-summary b { color: var(--ink-3); font-size: 11px; font-weight: 500; }
-.curve-summary strong { color: var(--ink-1); font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.curve-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding: 12px 6px 4px; font-size: 11px; color: var(--ink-3); }
+.curve-summary span { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; background: var(--surface-2); border: 1px solid var(--line-1); border-radius: var(--r-card); }
+.curve-summary b { color: var(--ink-3); font-size: var(--text-3xs); font-weight: 500; }
+.curve-summary strong { color: var(--ink-1); font-size: var(--text-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.curve-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 6px 4px; font-size: var(--text-3xs); color: var(--ink-3); }
 .curve-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.curve-legend i { width: 16px; height: 3px; border-radius: 2px; }
+.curve-legend i { width: 16px; height: 3px; border-radius: var(--r-xs); }
 .curve-key-net { background: var(--curve-net); }
 .curve-key-dd { background: var(--curve-dd); }
 .curve-unit { margin-left: auto; }
 .curve-svg { display: block; width: 100%; height: clamp(240px, 26vw, 360px); cursor: crosshair; }
-.curve-svg:focus-visible { outline: 2px solid var(--curve-net); outline-offset: 3px; border-radius: 8px; }
-.curve-label { fill: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.curve-svg:focus-visible { outline: 2px solid var(--curve-net); outline-offset: 3px; border-radius: var(--r-ctl); }
+.curve-label { fill: var(--ink-3); font-size: var(--text-3xs); font-variant-numeric: tabular-nums; }
 .curve-grid { stroke: var(--line-1); stroke-width: 1; }
 .curve-baseline { stroke: var(--ink-3); opacity: .4; }
 .curve-line { fill: none; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
@@ -515,7 +515,7 @@ onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
 .curve-dd { stroke: var(--curve-dd); stroke-width: 1.5; opacity: .85; }
 .curve-active { pointer-events: none; }
 .curve-active circle { stroke: var(--surface-2); stroke-width: 2; }
-.curve-tooltip { position: absolute; top: 42px; right: 12px; display: grid; gap: 8px; max-width: calc(100% - 24px); padding: 12px 14px; border: 1px solid var(--line-1); border-radius: 10px; background: var(--surface-2); box-shadow: 0 8px 24px #00000010; color: var(--ink-3); font-size: 11px; pointer-events: none; }
+.curve-tooltip { position: absolute; top: 42px; right: 12px; display: grid; gap: 8px; max-width: calc(100% - 24px); padding: 12px 16px; border: 1px solid var(--line-1); border-radius: var(--r-card); background: var(--surface-2); box-shadow: 0 8px 24px #00000010; color: var(--ink-3); font-size: var(--text-3xs); pointer-events: none; }
 .curve-tooltip strong { display: flex; justify-content: space-between; gap: 20px; font-weight: 400; }
 .curve-tooltip b { color: var(--curve-dd); font-variant-numeric: tabular-nums; }
 .curve-tooltip .curve-net-value { color: var(--curve-net); }

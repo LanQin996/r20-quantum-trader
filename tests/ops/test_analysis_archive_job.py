@@ -12,12 +12,12 @@ class ArchiveJobTests(unittest.TestCase):
             value = p.start()
             self.addCleanup(p.stop)
             return value
-        start('r20_backend.analysis_capture.enabled', return_value=True)
-        self.fault = start('r20_backend.analysis_capture.fault')
+        start('astra_backend.analysis_capture.enabled', return_value=True)
+        self.fault = start('astra_backend.analysis_capture.fault')
         self.lock = start('scripts.file_lock.cycle_lock', return_value=nullcontext())
         start('scripts.okx_runtime.current_environment', return_value=SimpleNamespace(configured=True))
         self.positions = start('scripts.okx_rest.positions', return_value=[])
-        self.sync = start('r20_backend.analysis_sync.sync_archive')
+        self.sync = start('astra_backend.analysis_sync.sync_archive')
 
     def test_success_passes_current_positions(self):
         self.assertEqual(main(), 0)

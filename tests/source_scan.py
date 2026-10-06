@@ -30,7 +30,7 @@ from pathlib import Path
 def source_area(module_file: str | Path, *, pkg_name: str | None = None) -> dict[Path, str]:
     """返回「该模块文件 + 同目录下的同名包目录」的全部 .py 源码。
 
-    例：`source_area(r20_backend/council_manager.py)`
+    例：`source_area(astra_backend/council_manager.py)`
         → {council_manager.py, council/__init__.py, council/debate.py, council/policy.py}
         `source_area("scripts/ai_factor_trader.py", pkg_name="trader")`
         → {ai_factor_trader.py, trader/__init__.py, trader/signals.py, trader/factors.py, …}
@@ -514,14 +514,14 @@ def router_domain_source(router_name: str = "strategy", *, root=None) -> str:
     ## 为什么需要它
 
     路由域可以从单模块**拆成包**（第九十六刀：`routers/strategy.py` →
-    `routers/strategy/{council,interceptors,policy,prompts}.py`）。按旧路径
+    `routers/strategy/{council,policy,prompts}.py`）。按旧路径
     `read_text()` 的判据会在拆分后直接抛 `FileNotFoundError` —— 那是"锚点绑死了
     文件位置"，不是"行为回归"。凡"某段代码必须在路由域里"这类判据，一律用本函数
     取域全文（与 `combined()` 同思路：判据绑**域**，不绑**文件**）。
     """
     from pathlib import Path as _P
     base = _P(root) if root else _P(__file__).resolve().parents[1]
-    d = base / "r20_backend" / "routers"
+    d = base / "astra_backend" / "routers"
     single = d / f"{router_name}.py"
     if single.exists():
         return single.read_text(encoding="utf-8")

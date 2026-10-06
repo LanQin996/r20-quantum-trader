@@ -27,7 +27,7 @@ def _signature(path: Path) -> tuple:
 def _load_dotenv() -> dict[str, str]:
     global _cache_sig, _cache_values
     env_path = ROOT / ".env"
-    secret_files = sorted((ROOT / "data").glob(".r20_secret_key")) + sorted((ROOT / "data").glob("r20_secrets.enc"))
+    secret_files = sorted((ROOT / "data").glob(".astra_secret_key")) + sorted((ROOT / "data").glob("astra_secrets.enc"))
     sig = (_signature(env_path), *(_signature(p) for p in secret_files))
     with _cache_lock:
         if sig == _cache_sig:
@@ -40,7 +40,7 @@ def _load_dotenv() -> dict[str, str]:
                     if not line or line.startswith("#") or "=" not in line: continue
                     key, value = line.split("=", 1); values[key.strip()] = value.strip().strip('"').strip("'")
             try:
-                from r20_gateway.secrets import load_secrets
+                from astra_gateway.secrets import load_secrets
                 values.update(load_secrets())
             except Exception:
                 pass
@@ -73,7 +73,7 @@ class OKXEnvironment:
 def selected_environment(values: Mapping[str, str] | None = None) -> OKXEnvironment:
     env = dict(_load_dotenv() if values is None else values)
     legacy_simulated = str(env.get("OKX_IS_SIMULATED", "1")).lower() in {"1", "true", "yes"}
-    mode = str(env.get("R20_OKX_ENV") or ("demo" if legacy_simulated else "live")).lower()
+    mode = str(env.get("ASTRA_OKX_ENV") or ("demo" if legacy_simulated else "live")).lower()
     if mode not in ALLOWED_ENVIRONMENTS: mode = "demo"
     prefix = "OKX_DEMO" if mode == "demo" else "OKX_LIVE"
     # A profile is an atomic credential group. A partially entered profile must

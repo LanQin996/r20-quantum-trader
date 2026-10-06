@@ -1,7 +1,7 @@
 """策略快照门面：**ROOT 必须调用时解析、薄壳必须传"门面自己的"包装、整包标识去重**（第二百八十六刀，开新面 policy_snapshot.py）。
 
 先打印整个文件（295 行）再动笔。B6 拆分后本模块只剩**门面薄壳** + 一段索引重建 + 归档：
-真正的指纹/规范化/整包标识在 `r20_backend/policy/*`。
+真正的指纹/规范化/整包标识在 `astra_backend/policy/*`。
 
 | 语义 | 口径 |
 |---|---|
@@ -21,10 +21,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from r20_backend import policy_snapshot as PS
+from astra_backend import policy_snapshot as PS
 
 _BJ = timezone(timedelta(hours=8))
-_SANDBOX_ROOT = Path("/tmp/r20-facade-sandbox-root")
+_SANDBOX_ROOT = Path("/tmp/astra-facade-sandbox-root")
 
 
 class _Base(unittest.TestCase):
@@ -56,28 +56,20 @@ class RootIsResolvedAtCallTimeTests(_Base):
         PS.extract_evolution_mind_fingerprint({"m": 1})
         core.assert_called_once_with(_SANDBOX_ROOT, {"m": 1}, None)
 
-    def test_interceptors(self):
-        core = self._start(mock.patch.object(PS, "_core_extract_interceptors_fingerprint",
-                                             return_value={}))
-        self._start(mock.patch.object(PS, "ROOT", _SANDBOX_ROOT))
-        PS.extract_interceptors_fingerprint([{"a": 1}], Path("/p"), Path("/r"))
-        core.assert_called_once_with(_SANDBOX_ROOT, [{"a": 1}], Path("/p"), Path("/r"))
-
     def test_generate_policy_snapshot_positional_order(self):
         core = self._start(mock.patch.object(PS, "_core_generate_policy_snapshot",
                                              return_value={}))
         self._start(mock.patch.object(PS, "ROOT", _SANDBOX_ROOT))
-        PS.generate_policy_snapshot(Path("/r"), {"p": 1}, {"m": 1}, [{"i": 1}], {"c": 1},
-                                    Path("/pl"), "9.9.9")
+        PS.generate_policy_snapshot(Path("/r"), {"p": 1}, {"m": 1}, {"c": 1}, "9.9.9")
         core.assert_called_once_with(_SANDBOX_ROOT, Path("/r"), {"p": 1}, {"m": 1},
-                                     [{"i": 1}], {"c": 1}, Path("/pl"), "9.9.9")
+                                     {"c": 1}, "9.9.9")
 
     def test_generate_policy_snapshot_defaults(self):
         core = self._start(mock.patch.object(PS, "_core_generate_policy_snapshot",
                                              return_value={}))
         self._start(mock.patch.object(PS, "ROOT", _SANDBOX_ROOT))
         PS.generate_policy_snapshot()
-        core.assert_called_once_with(_SANDBOX_ROOT, None, None, None, None, None, None,
+        core.assert_called_once_with(_SANDBOX_ROOT, None, None, None, None,
                                      PS.DEFAULT_BASE_VERSION)
 
     def test_current_snapshot(self):
@@ -259,14 +251,14 @@ class RebuildIndexTests(_Base):
     def test_a_broken_archive_is_skipped_with_a_warning(self):
         self._archive("policy_good.json", {"policy_hash": "good"})
         (self.a_dir / "policy_bad.json").write_text("{不是 JSON", encoding="utf-8")
-        with self.assertLogs("r20_backend.policy_snapshot", level="WARNING") as logs:
+        with self.assertLogs("astra_backend.policy_snapshot", level="WARNING") as logs:
             entries = PS._rebuild_index_from_archives(self.a_dir)
         self.assertEqual([e["policy_hash"] for e in entries], ["good"])
         self.assertIn("policy_bad.json", "\n".join(logs.output))
 
     def test_a_non_dict_package_does_not_crash_the_scan(self):
         self._archive("policy_list.json", [1, 2, 3])
-        with self.assertLogs("r20_backend.policy_snapshot", level="WARNING"):
+        with self.assertLogs("astra_backend.policy_snapshot", level="WARNING"):
             self.assertEqual(PS._rebuild_index_from_archives(self.a_dir), [])
 
     def test_entries_are_sorted_newest_first(self):

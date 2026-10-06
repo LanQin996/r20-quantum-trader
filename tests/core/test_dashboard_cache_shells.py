@@ -18,7 +18,7 @@ import time
 import unittest
 from unittest import mock
 
-from r20_backend import dashboard_cache as DC
+from astra_backend import dashboard_cache as DC
 
 
 class FacadeShellTest(unittest.TestCase):
@@ -69,7 +69,7 @@ class FetchJsonTest(unittest.TestCase):
 
     def test_not_configured_says_not_ready_not_a_traceback(self):
         """★ 未配置凭证 ⇒ 给「NOT READY」人话，不是 traceback。"""
-        # ⚠️ `okx_rest` 是**懒子模块**：`from r20_backend import okx_rest` 会 ImportError
+        # ⚠️ `okx_rest` 是**懒子模块**：`from astra_backend import okx_rest` 会 ImportError
         # （第 229 刀踩过同一个坑）⇒ 从已经导入它的模块里取。
         not_configured = DC.okx_rest.OKXNotConfigured
 
@@ -90,7 +90,15 @@ class FetchJsonTest(unittest.TestCase):
         self.assertEqual(err, "ValueError: 上游 502", "类名 + 消息，便于页面呈现")
 
 
-class MacroRegimeFallbackTest(unittest.TestCase):
+class MacroRegimeIsNotComputedTest(unittest.TestCase):
+    """★ 2026-10 用户拍板移除：退役数理引擎的"全市场宏观体制"**不再进载荷**。
+
+    历史接线是"`scripts.calculus_engine` → 顶层 `calculus_engine`"双拼写兜底；
+    该块与提示词里被移除的那一块同源，且缺数据时会凭空编结论（函数内写死
+    `atr_pct=1.5`/`adx=20.0`；实盘 `calculus` 块已不存在）。现在两个拼写都不许被用到：
+    即便硬塞一个会返回内容的合成模块进 `sys.modules`，载荷里也不得出现 `market_regime`。
+    """
+
     def _cycle(self):
         core = (False, 100.0, True, 100.0, 1, [], [], [{"instId": "BTC"}], True, 0,
                 100.0, 0.0, {}, 0.0)
@@ -101,8 +109,6 @@ class MacroRegimeFallbackTest(unittest.TestCase):
         stubs = {
             "collect_core_account_state": mock.Mock(return_value=core),
             "_core_collect_algo_protection": mock.Mock(return_value=None),
-            "_core_collect_cross_venue_positions": mock.Mock(
-                side_effect=lambda p_, pend, l, s_, u, **kw: (l, s_, u)),
             "_core_read_reset_initial_state": mock.Mock(return_value=("", 1000.0)),
             "_fetch_json": mock.Mock(return_value=(True, [], "")),
             "aggregate_bills_and_metrics": mock.Mock(return_value=tuple([0.0] * 22)),
@@ -119,30 +125,22 @@ class MacroRegimeFallbackTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def test_falls_back_to_the_second_spelling(self):
-        """★ 兜底拼写 `calculus_engine` 在测试环境里**不存在** ⇒ 塞一个合成模块进去。
-
-        （实测：`import calculus_engine` ⇒ ModuleNotFoundError。所以我不能"import 它再 patch"，
-        只能在 `sys.modules` 里放一个假模块 —— 这也正好证明兜底走的是**模块导入**这条路径。）
-        """
-        fake = types.ModuleType("calculus_engine")
-        fake.detect_macro_market_regime = lambda factors: {"regime": "牛", "n": len(factors)}
+    def test_a_working_legacy_module_cannot_leak_a_regime_into_the_payload(self):
         self._cycle()
-        DC.CACHE_DATA = {}
-        with mock.patch.dict(sys.modules, {"scripts.calculus_engine": None,
-                                           "calculus_engine": fake}):
-            DC.update_cache_cycle()
-        self.assertEqual(DC.CACHE_DATA["market_regime"], {"regime": "牛", "n": 1})
-
-    def test_both_spellings_missing_means_no_key_at_all(self):
-        """★ 两条导入都不通 ⇒ **不塞假值**，载荷里根本没有这个键。"""
-        self._cycle()
-        DC.CACHE_DATA = {}
-        with mock.patch.dict(sys.modules, {"scripts.calculus_engine": None,
-                                           "calculus_engine": None}):
+        DC.CACHE_DATA.pop("market_regime", None)
+        legacy = types.ModuleType("calculus_engine")
+        legacy.detect_macro_market_regime = lambda factors: {"regime": "legacy"}
+        with mock.patch.dict(sys.modules, {"calculus_engine": legacy,
+                                           "scripts.calculus_engine": None}):
             DC.update_cache_cycle()
         self.assertNotIn("market_regime", DC.CACHE_DATA)
 
+    def test_existing_stale_value_is_dropped_from_the_cache(self):
+        """即便缓存里残留旧值，新一轮也必须把它清掉（不能靠"以前算的"继续展示）。"""
+        self._cycle()
+        DC.CACHE_DATA["market_regime"] = {"regime": "stale-from-last-week"}
+        DC.update_cache_cycle()
+        self.assertNotIn("market_regime", DC.CACHE_DATA)
 
 class BackgroundWorkerTest(unittest.TestCase):
     def setUp(self):
@@ -161,7 +159,7 @@ class BackgroundWorkerTest(unittest.TestCase):
             raise RuntimeError("周期炸了")
         DC._BG_WORKER_RUNNING = True
         with mock.patch.object(DC, "update_cache_cycle", side_effect=_flip), \
-                mock.patch("r20_backend.dashboard_cache.time.sleep", return_value=None):
+                mock.patch("astra_backend.dashboard_cache.time.sleep", return_value=None):
             DC._dashboard_background_worker_loop()   # 不许把异常抛出来
         self.assertEqual(len(calls), 1)
 

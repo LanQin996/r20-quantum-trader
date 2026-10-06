@@ -1,5 +1,6 @@
 /** About & update page copy */
 export const enAdminAbout = {
+  title: 'Version & updates',
   intro: "Verify the version status and run a safe fast-forward update.",
   badge: "Governance · 3/3",
   loading: "Loading component and version data...",
@@ -19,16 +20,21 @@ export const enAdminAbout = {
   behind: "{n} commits behind",
   upToDate: "Up to date",
   ahead: "(ahead {n})",
+  statusDirty: "Working Tree Modified",
+  dirtyFoot: "HEAD {commit} (Uncommitted)",
+  uncommittedChanges: "(Uncommitted changes)",
+  dirtyAlertTitle: "Local Working Tree Has Uncommitted Changes (Dirty)",
+  dirtyAlertDesc: "Detected modified files in the working directory. To protect local changes, remote auto-update is locked. Version tracking reflects the current HEAD commit; please commit your changes to advance the local version.",
   connecting: "Connecting to remote...",
   checkUpdate: "Check remote updates",
   runUpdate: "Run safe update",
   gitOutput: "Git output:",
   safetyNote: "Safety mechanism: updates only allow fast-forward merges; if the working tree has conflicts in uncommitted tracked files, the remote is unreachable, or a fast-forward is impossible, the backend rejects the update to protect system stability.",
-  confirmTitle: "Confirm R20 system update",
-  confirmSubtitle: "About R20: pull the latest main-branch code with fast-forward",
+  confirmTitle: "Confirm AstraQuant system update",
+  confirmSubtitle: "About AstraQuant: pull the latest main-branch code with fast-forward",
   confirmPrefix: "To prevent mistakes, type the confirmation phrase below",
   confirmSuffix: ":",
-  phrasePlaceholder: "Enter UPDATE R20",
+  phrasePlaceholder: "Enter UPDATE ASTRA",
   cancel: "Cancel",
   updating: "Updating...",
   confirmNow: "Confirm and update now",
@@ -36,12 +42,22 @@ export const enAdminAbout = {
   checkUpToDate: "Local code is already up to date and in sync with the remote main branch.",
   updateSuccess: "System updated successfully!",
   updateNoop: "The current branch is already up to date.",
+  commitsTitle: "Pending Updates (Latest Commits):",
 
   // ── added by the rebuild (batch 8) ──
-  productTitle: 'Product',
+  productTitle: 'Product Profile',
+  pitchTitle: 'System Positioning',
+  pitchBody: 'Autonomous OKX perpetual trading system powered by multi-model analysis and deterministic Python physical risk control.',
   bandVersion: 'System version',
   bandControlPlane: 'Gateway control plane',
   bandRuntime: 'Runtime',
-  bandSyncGap: 'Sync gap',  // ── batch 41: localize the update-check failure message ──
+  bandSyncGap: 'Sync gap',
   updateCheckFailed: 'Update check failed: {msg} (cannot tell whether this build is behind; security patches may silently fall out of sync)',
+
+  // ── exchange sign-up channels (2026-09) ──
+  channelsTitle: 'Sign-up channels',
+  channelsSub: 'Account opening & fee binding',
+  channelsLead: 'Registering through the entries below binds that exchange\'s fee rate and rebate; returning users qualify when the exchange\'s win-back conditions are met.',
+  channelOpen: 'Sign-up link',
+  channelUnset: 'Not configured (overridable via env var)',
 };

@@ -58,7 +58,7 @@ class _Sandbox(unittest.TestCase):
         self.addCleanup(pr.stop)
         # ⚠️ `sync_instruments_state` 末尾会 `threading.Thread(...).start()`。
         #    若让它真起线程，**patch 早已退出**、线程才执行 ⇒ 会拿真实 ROOT 去拉起
-        #    生产脚本（本刀实测到过：日志里出现 `/data/dsh/home/r20/scripts/…`）。
+        #    生产脚本（本刀实测到过：日志里出现 `/data/dsh/home/astra/scripts/…`）。
         #    这里把 `Thread` 换成"start 即同步执行"，让后台路径确定且零副作用。
         self._install_sync_thread()
 
@@ -162,11 +162,11 @@ class LeverageCapTests(unittest.TestCase):
 
     def test_an_unimportable_risk_constants_falls_back_to_the_factory_band(self):
         # ★ 第 94 行 —— `from scripts.risk_constants import ...` 抛 ⇒ (2.0, 5.0)。
-        # ⚠️ 环境变量优先于回落常量（`os.getenv("R20_MIN_LEVERAGE")`）⇒
+        # ⚠️ 环境变量优先于回落常量（`os.getenv("ASTRA_MIN_LEVERAGE")`）⇒
         #    必须把它清掉，否则会读到**别的测试留下的**值（本刀在全量里就因此在
         #    单独跑绿、合起来红 —— 典型的测试顺序依赖）。
         clean = {k: v for k, v in os.environ.items()
-                 if k not in ("R20_MIN_LEVERAGE", "R20_MAX_LEVERAGE")}
+                 if k not in ("ASTRA_MIN_LEVERAGE", "ASTRA_MAX_LEVERAGE")}
         with patch.dict(sys.modules, {"scripts.risk_constants": None}), \
              patch.dict(os.environ, clean, clear=True):
             self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum"), 3)
@@ -416,25 +416,25 @@ class ValidatePoolItemsTests(unittest.TestCase):
 class LeverageRealignTests(_Sandbox, unittest.TestCase):
     def test_a_cap_below_the_global_floor_is_realigned(self):
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=1)])
-        with patch.dict(os.environ, {"R20_MIN_LEVERAGE": "2", "R20_MAX_LEVERAGE": "5"}):
+        with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
         self.assertEqual(out[0]["max_leverage"], 3)
 
     def test_a_cap_above_the_global_ceiling_is_realigned(self):
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=99)])
-        with patch.dict(os.environ, {"R20_MIN_LEVERAGE": "2", "R20_MAX_LEVERAGE": "5"}):
+        with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
         self.assertEqual(out[0]["max_leverage"], 3)
 
     def test_a_bluechip_not_tracking_the_ceiling_is_realigned(self):
         self._write_pool([self._item(tier="tier_1_bluechip", max_leverage=2)])
-        with patch.dict(os.environ, {"R20_MIN_LEVERAGE": "2", "R20_MAX_LEVERAGE": "5"}):
+        with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
         self.assertEqual(out[0]["max_leverage"], 5)
 
     def test_a_compliant_cap_is_left_untouched(self):
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=3)])
-        with patch.dict(os.environ, {"R20_MIN_LEVERAGE": "2", "R20_MAX_LEVERAGE": "5"}):
+        with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
         self.assertEqual(out[0]["max_leverage"], 3)
 
@@ -451,7 +451,7 @@ class LeverageRealignTests(_Sandbox, unittest.TestCase):
     def test_an_inverted_global_range_is_clamped_without_crashing(self):
         # ★ 第 264 行 —— 下限高于上限时把下限压到上限
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=3)])
-        with patch.dict(os.environ, {"R20_MIN_LEVERAGE": "9", "R20_MAX_LEVERAGE": "5"}):
+        with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "9", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
         self.assertLessEqual(out[0]["max_leverage"], 5)
 
@@ -460,7 +460,7 @@ class LeverageRealignTests(_Sandbox, unittest.TestCase):
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=3)])
         with patch.dict(sys.modules, {"scripts.risk_constants": None}), \
              patch.dict(os.environ, {}, clear=False):
-            for key in ("R20_MIN_LEVERAGE", "R20_MAX_LEVERAGE"):
+            for key in ("ASTRA_MIN_LEVERAGE", "ASTRA_MAX_LEVERAGE"):
                 os.environ.pop(key, None)
             out = ip.load_instruments()
         self.assertEqual(out[0]["max_leverage"], 3)
@@ -469,19 +469,19 @@ class LeverageRealignTests(_Sandbox, unittest.TestCase):
 # ───────────────────── 锁与写入 ─────────────────────
 class PoolLockTests(_Sandbox, unittest.TestCase):
     def test_the_backend_lock_is_preferred(self):
-        import r20_backend.file_locks as fl
+        import astra_backend.file_locks as fl
         sentinel = object()
         with patch.object(fl, "file_lock", lambda p: sentinel):
             self.assertIs(ip._pool_lock(), sentinel)
 
     def test_an_unavailable_backend_lock_falls_back_to_the_local_lock(self):
         # ★ 第 296 行 —— 绝不在"锁不可用"时静默放行
-        with patch.dict(sys.modules, {"r20_backend.file_locks": None}):
+        with patch.dict(sys.modules, {"astra_backend.file_locks": None}):
             self.assertIs(ip._pool_lock().__class__, local_file_lock(ip.POOL_FILE).__class__)
 
     def test_the_fallback_lock_is_reentrant(self):
         # 兜底不可重入会让 `mutate_instruments` 在锁内调 `save_instruments` 时自锁挂死
-        with patch.dict(sys.modules, {"r20_backend.file_locks": None}):
+        with patch.dict(sys.modules, {"astra_backend.file_locks": None}):
             with ip._pool_lock():
                 with ip._pool_lock():
                     reentered = True
@@ -766,3 +766,46 @@ class SyncPoolLeverageCapsTests(_Sandbox, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewCoinBaselineHasNoMarketReadingsTest(_Sandbox):
+    """★ 2026-10「不许假数据」：池里新增标的的基线**只写系统状态，不写市场观测值**。
+
+    原实现给新币写入 `rsi=50.0 / rsi_7=50.0 / vwap_bias=0.0 / macd_hist=0.0 /
+    obv_flow="NEUTRAL" / bb_bandwidth=0.0 / vol_ratio=1.0 / market_regime="CHOP" /
+    trend_1h="震荡"` —— 这份 `trading_state.json` 会被看板载荷当成池条目（`ins`）
+    直接渲染，于是"这个币还没取过数"显示成"RSI 中性 / 量能正常 / 区间震荡"。
+    """
+
+    MARKET_FIELDS = ("rsi", "rsi_7", "vwap_bias", "macd_hist", "macd_accel",
+                     "obv_flow", "bb_bandwidth", "vol_ratio", "market_regime",
+                     "structure_1h", "trend_1h", "trend_4h")
+
+    def test_new_instrument_gets_system_state_but_no_market_readings(self):
+        self.pool.write_text(json.dumps([
+            {"name": "NEWC", "instId": "NEWC-USDT-SWAP", "type": "crypto",
+             "ctVal": 1.0, "precision": 4, "max_leverage": 10}
+        ]), encoding="utf-8")
+        ip.sync_instruments_state()
+        row = json.loads(self.state.read_text(encoding="utf-8"))["instruments"][0]
+        for field in self.MARKET_FIELDS:
+            self.assertIsNone(row.get(field),
+                              f"{field} 不得在基线里编造（应缺失，等行情与因子引擎填）")
+        # 系统状态类字段保留 —— 它们描述的是"还没有决策"这件事本身
+        self.assertEqual(row["action"], "WAIT")
+        self.assertEqual(row["strategy"], "⚪ 观望")
+        self.assertIn("雷达", row["desc"])
+
+    def test_existing_instrument_row_is_left_alone(self):
+        """已有条目照旧原样保留（基线只用于**新增**标的）。"""
+        existing = [{"name": "BTC", "instId": "BTC-USDT-SWAP", "rsi": 61.2,
+                     "market_regime": "BULL_TREND", "action": "WAIT"}]
+        self.state.write_text(json.dumps({"instruments": existing}), encoding="utf-8")
+        self.pool.write_text(json.dumps([
+            {"name": "BTC", "instId": "BTC-USDT-SWAP", "type": "crypto",
+             "ctVal": 0.01, "precision": 1, "max_leverage": 100}
+        ]), encoding="utf-8")
+        ip.sync_instruments_state()
+        row = json.loads(self.state.read_text(encoding="utf-8"))["instruments"][0]
+        self.assertEqual(row["rsi"], 61.2)
+        self.assertEqual(row["market_regime"], "BULL_TREND")

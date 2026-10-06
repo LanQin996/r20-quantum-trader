@@ -53,6 +53,8 @@ export const enCommon = {
     pageNav: 'Pagination',
     prevPage: 'Previous',
     nextPage: 'Next',
+    prev: 'Previous',
+    next: 'Next',
     remove: 'Remove',
     restore: 'Restore',
     load: 'Load',
@@ -133,11 +135,11 @@ export const enCommon = {
     siteTimeTip: 'Site time: Asia/Shanghai (UTC+8)',
   },
   brand: {
-    name: 'R20 Quantum Trader',
-    nameEn: 'R20 Quantum Trader',
-    tagline: 'AI-Driven Perpetual Swing Terminal',
+    name: 'AstraQuant',
+    nameEn: 'AstraQuant',
+    tagline: 'Institutional Autonomous Quant Trading OS (Adversarial Council · 7-Tier Microstructure Factors · Physical Risk)',
     official: 'Official',
-    license: 'MIT License',
+    license: 'AGPL-3.0 + Commons Clause',
   },
   // batch 39: fullwidth punctuation used to be hardcoded in templates
   // (`}}：{{`, `（{{ ... }}）`), which leaked into the English UI. Values now

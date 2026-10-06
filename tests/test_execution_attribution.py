@@ -20,9 +20,9 @@ for path in (str(ROOT), str(ROOT / "scripts")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from r20_backend.analysis_capture import position_meta  # noqa: E402
-from r20_backend.analysis_store import lifecycle_id, normalize_position  # noqa: E402
-from r20_backend.analysis_sync import infer_exit_reason  # noqa: E402
+from astra_backend.analysis_capture import position_meta  # noqa: E402
+from astra_backend.analysis_store import lifecycle_id, normalize_position  # noqa: E402
+from astra_backend.analysis_sync import infer_exit_reason  # noqa: E402
 from risk_constants import risk_base_balance  # noqa: E402
 
 LIVE_POSITION = {"instId": "LINK-USDT-SWAP", "posId": "3905725476143583232",
@@ -42,15 +42,15 @@ def close_order(ord_id="c1", cl_ord_id="", algo_id="", ord_type="market", px="11
 
 class PositionBindingTests(unittest.TestCase):
     def test_external_venue_events_do_not_share_okx_account(self):
-        from r20_backend.analysis_capture import venue_identity
-        with patch("r20_backend.exchanges.registry.venue_credentials", return_value=("fixture-key", "")):
+        from astra_backend.analysis_capture import venue_identity
+        with patch("astra_backend.exchanges.registry.venue_credentials", return_value=("fixture-key", "")):
             account = venue_identity("binance", "demo")
         self.assertTrue(account.startswith("binance:demo:"))
         self.assertNotIn("fixture-key", account)
 
     def test_capture_uses_the_frozen_cycle_identity(self):
         from types import SimpleNamespace
-        from r20_backend.analysis_capture import resolve_identity
+        from astra_backend.analysis_capture import resolve_identity
         with patch("scripts.okx_runtime.current_environment",
                    return_value=SimpleNamespace(identity="okx:demo:frozen")):
             self.assertEqual(resolve_identity(), "okx:demo:frozen")
@@ -172,15 +172,15 @@ class ReconcileExitAttributionTests(unittest.TestCase):
     def setUp(self):
         import os
         import tempfile
-        from r20_backend.analysis_store import Archive
+        from astra_backend.analysis_store import Archive
         pool = patch("scripts.instrument_pool.load_instruments", return_value=[
             {"instId": "LINK-USDT-SWAP", "ctVal": "1"},
         ])
         pool.start()
         self.addCleanup(pool.stop)
         self.temp = tempfile.TemporaryDirectory()
-        path = Path(self.temp.name) / "r20_quant.db"
-        self.env = patch.dict(os.environ, {"R20_TESTING": "1", "R20_ANALYSIS_DB": str(path)})
+        path = Path(self.temp.name) / "astra_quant.db"
+        self.env = patch.dict(os.environ, {"ASTRA_TESTING": "1", "ASTRA_ANALYSIS_DB": str(path)})
         self.env.start()
         self.archive = Archive(path)
         self.account = "okx:live:attribution-test"
@@ -190,7 +190,7 @@ class ReconcileExitAttributionTests(unittest.TestCase):
         self.temp.cleanup()
 
     def seed(self, closing):
-        from r20_backend.analysis_sync import reconcile
+        from astra_backend.analysis_sync import reconcile
         opened, at = 1788971646086, 1788975000000
         history = {"posId": "77", "instId": "LINK-USDT-SWAP", "direction": "short",
                    "cTime": str(opened), "uTime": str(at + 246086), "type": "2",

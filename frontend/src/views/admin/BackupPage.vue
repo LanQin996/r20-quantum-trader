@@ -18,8 +18,8 @@
  *   POST /api/v1/admin/backups/restore · /api/v1/admin/backups/upload
  *   GET  /api/v1/admin/backups/download/{name}?token=  ← **原生 fetch 双通道下载**，逐字保留
  *
- * ⚠️ 高危门禁逐字保留：立即备份需逐字 `BACKUP R20`；恢复需逐字 `RESTORE R20`（覆盖式不可撤销）。
- * ⚠️ 下载/上传走原生 `fetch`（带 `X-R20-Session` 头、Blob 与降级直链双通道、
+ * ⚠️ 高危门禁逐字保留：立即备份需逐字 `BACKUP ASTRA`；恢复需逐字 `RESTORE ASTRA`（覆盖式不可撤销）。
+ * ⚠️ 下载/上传走原生 `fetch`（带 `X-Astra-Session` 头、Blob 与降级直链双通道、
  *    FormData 上传）——这些都不经 `api()` 封装，本批**一字未动**。
  */
 import { fmtDateTime } from '../../utils/format';
@@ -27,16 +27,44 @@ import { useToast } from '../../composables/useToast'
 import { useConfirm } from '../../composables/useConfirm'
 const toast = useToast()
 const { ask } = useConfirm()
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import PageHeader from '../../components/admin/PageHeader.vue'
+import BaseTabs from '../../components/base/BaseTabs.vue'
+import PolicySnapshotPage from './PolicySnapshotPage.vue'
+import AboutPage from './AboutPage.vue'
+
 import BaseSwitch from '../../components/base/BaseSwitch.vue'
 import BaseEmpty from '../../components/base/BaseEmpty.vue'
 import { useI18n } from '../../composables/useI18n'
+import { useRoute } from 'vue-router'
 const { t } = useI18n()
+
+/**
+ * 系统与灾备页签（2026-09-30 后台精简）：本页是宿主页，吸收了两个原独立页面 ——
+ *   backup  备份归档（本页原有内容：灾备任务、归档清单、远端凭据）
+ *   policy  策略快照与回滚（PolicySnapshotPage；归档/回滚/四单元指纹全部保留）
+ *   version 版本与更新（AboutPage；自更新检查/执行/回滚全部保留）
+ * 三者同属"可恢复性"：数据能回来、策略能回滚、版本能退回。
+ * 旧路径 /admin/policy → ?tab=policy，/admin/about → ?tab=version。
+ */
+type BkTab = 'backup' | 'policy' | 'version';
+function resolveBkTab(raw: unknown): BkTab {
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  const s = String(v);
+  return s === 'policy' || s === 'version' ? (s as BkTab) : 'backup';
+}
+const route = useRoute();
+const activeTab = ref<BkTab>(resolveBkTab(route.query.tab));
+watch(() => route.query.tab, (v) => { activeTab.value = resolveBkTab(v); });
+const tabs = computed(() => [
+  { key: 'backup', label: t('admin.backup.tabBackup') },
+  { key: 'policy', label: t('admin.policySnapshot.title') },
+  { key: 'version', label: t('admin.about.title') },
+]);
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { HardDrive, RefreshCw, PlugZap, Save, PlayCircle, Archive, Download,
-  Upload, RotateCcw, AlertTriangle, Loader2, MapPin, Clock, CalendarClock, History } from 'lucide-vue-next'
+  Upload, RotateCcw, AlertTriangle, Loader2, MapPin, Clock, CalendarClock, History, Trash2 } from 'lucide-vue-next'
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi()
@@ -44,7 +72,7 @@ const auth = useAuthStore()
 
 const loading = ref(true)
 const loadError = ref('')
-const busy = ref<'test' | 'save' | 'run' | 'restore' | 'upload' | ''>('')
+const busy = ref<'test' | 'save' | 'run' | 'restore' | 'upload' | 'delete' | ''>('')
 const downloadingArchive = ref<string>('')
 
 const simple = ref<any>(null)
@@ -148,18 +176,18 @@ async function save() {
 
 async function runNow() {
   // 批C(2026-09-13)：prompt() → 项目确认服务（移动端 prompt 常被浏览器弱化/难用），
-  // 短语仍由用户逐字输入，与后端 `BACKUP R20` 契约一致。
+  // 短语仍由用户逐字输入，与后端 `BACKUP ASTRA` 契约一致。
   const _ok = await ask({
     title: t('admin.backup.runNowTitle'),
     desc: t('admin.backup.runNowDesc'),
     danger: true,
-    confirmPhrase: 'BACKUP R20',
+    confirmPhrase: 'BACKUP ASTRA',
     okText: t('common.execute'),
   })
   if (!_ok) return
   busy.value = 'run'
   try {
-    const res = await api('/api/v1/admin/backups/run', { method: 'POST', body: JSON.stringify({ confirmation: 'BACKUP R20' }) })
+    const res = await api('/api/v1/admin/backups/run', { method: 'POST', body: JSON.stringify({ confirmation: 'BACKUP ASTRA' }) })
     toast.ok(t('admin.backup.runOk', undefined, { n: (res.output || '').length }))
     await load()
   } catch (e: any) {
@@ -174,14 +202,14 @@ async function downloadArchive(archiveName: string) {
   downloadingArchive.value = clean
   toast.ok(t('admin.backup.connecting', undefined, { file: clean }))
 
-  const token = auth.token || localStorage.getItem('r20.admin.session.id') || ''
+  const token = auth.token || localStorage.getItem('astra.admin.session.id') || ''
   const directUrl = `/api/v1/admin/backups/download/${encodeURIComponent(clean)}${token ? `?token=${encodeURIComponent(token)}` : ''}`
 
   try {
     // 双通道策略 1：通过 Fetch Blob 在内存中获取并检查状态
     const resp = await fetch(directUrl, {
       headers: {
-        ...(token ? { 'X-R20-Session': token } : {})
+        ...(token ? { 'X-Astra-Session': token } : {})
       }
     })
 
@@ -243,7 +271,7 @@ async function onFileSelected(e: Event) {
     const resp = await fetch('/api/v1/admin/backups/upload', {
       method: 'POST',
       headers: {
-        ...(auth.token ? { 'X-R20-Session': auth.token } : {})
+        ...(auth.token ? { 'X-Astra-Session': auth.token } : {})
       },
       body: formData
     })
@@ -264,12 +292,12 @@ async function onFileSelected(e: Event) {
 async function restoreArchive(archiveName: string) {
   const clean = archiveName.split('/').pop() || archiveName
   // 批C(2026-09-13)：prompt+alert → 项目确认服务。恢复备份是覆盖式破坏操作
-  // （解压覆盖当前配置/历史数据/策略），短语逐字输入，与后端 `RESTORE R20` 契约一致。
+  // （解压覆盖当前配置/历史数据/策略），短语逐字输入，与后端 `RESTORE ASTRA` 契约一致。
   const _ok = await ask({
     title: t('admin.backup.restoreConfirmTitle'),
     desc: t('admin.backup.restoreConfirmDesc', undefined, { file: clean }),
     danger: true,
-    confirmPhrase: 'RESTORE R20',
+    confirmPhrase: 'RESTORE ASTRA',
     okText: t('common.overwriteRestore'),
   })
   if (!_ok) return
@@ -279,13 +307,36 @@ async function restoreArchive(archiveName: string) {
       method: 'POST',
       body: JSON.stringify({
         archive_name: clean,
-        confirmation: 'RESTORE R20'
+        confirmation: 'RESTORE ASTRA'
       })
     })
     toast.ok(t('admin.backup.restoreOk', undefined, { file: clean, n: res.restored_count }))
     await load()
   } catch (e: any) {
     toast.err(t('admin.backup.restoreFailed', undefined, { msg: e.message }))
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function deleteArchive(archiveName: string) {
+  const clean = archiveName.split('/').pop() || archiveName
+  const ok = await ask({
+    title: t('admin.backup.deleteConfirmTitle'),
+    desc: t('admin.backup.deleteConfirmDesc', undefined, { file: clean }),
+    danger: true,
+    okText: t('admin.backup.confirmDelete'),
+  })
+  if (!ok) return
+  busy.value = 'delete'
+  try {
+    await api(`/api/v1/admin/backups/${encodeURIComponent(clean)}`, {
+      method: 'DELETE',
+    })
+    toast.ok(t('admin.backup.deleteOk', undefined, { file: clean }))
+    await load()
+  } catch (e: any) {
+    toast.err(t('admin.backup.deleteFailed', undefined, { msg: e.message }))
   } finally {
     busy.value = ''
   }
@@ -356,7 +407,7 @@ onMounted(load)
 
 <template>
   <div class="bk">
-    <PageHeader :title="t('nav.admin.backup')" :description="t('admin.backup.intro')">
+    <PageHeader :title="t('nav.admin.backup')">
       <template #actions>
         <span class="badge" :class="simple?.configured ? 'badge-up' : 'badge-warn'">
           {{ simple?.configured ? t('admin.backup.targetConfigured') : t('admin.backup.targetNotConfigured') }}
@@ -368,6 +419,10 @@ onMounted(load)
         </button>
       </template>
     </PageHeader>
+
+    <BaseTabs v-model="activeTab" :items="tabs" :label="t('admin.backup.tabsLabel')" baseId="bk" />
+
+    <div v-if="activeTab === 'backup'" id="bk-panel-backup" role="tabpanel" aria-labelledby="bk-tab-backup" tabindex="0" class="bk-panel">
 
     <div v-if="loadError && !simple" role="alert" class="state-block is-error">
       <span class="state-icon"><AlertTriangle :size="17" /></span>
@@ -580,6 +635,15 @@ onMounted(load)
                   >
                     <RotateCcw :size="13" />
                   </button>
+                  <button type="button"
+                    v-if="auth.isSuperadmin"
+                    class="btn btn-quiet btn-sm is-danger"
+                    :disabled="busy === 'delete'"
+                    :title="t('admin.backup.deleteTitle')"
+                    @click="deleteArchive(a.name)"
+                  >
+                    <Trash2 :size="13" />
+                  </button>
                 </div>
               </article>
             </div>
@@ -589,11 +653,21 @@ onMounted(load)
         </div>
       </template>
     </template>
+    </div>
+
+    <div v-else-if="activeTab === 'policy'" id="bk-panel-policy" role="tabpanel" aria-labelledby="bk-tab-policy" tabindex="0" class="bk-panel">
+      <PolicySnapshotPage embedded />
+    </div>
+
+    <div v-else id="bk-panel-version" role="tabpanel" aria-labelledby="bk-tab-version" tabindex="0" class="bk-panel">
+      <AboutPage embedded />
+    </div>
   </div>
 </template>
 
 <style scoped>
-.bk {
+.bk,
+.bk-panel {
   display: flex;
   flex-direction: column;
   gap: var(--ds-space-4);

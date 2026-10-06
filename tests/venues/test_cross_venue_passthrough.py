@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import r20_backend.dashboard_cache as dashboard
+import astra_backend.dashboard_cache as dashboard
 
 
 def _load_with(data_dir: str):
@@ -39,9 +39,7 @@ class CrossVenuePassthroughTests(unittest.TestCase):
             self.assertEqual(out["package_count"], 10)
             self.assertIn("binance", out["venues"])
             self.assertEqual(out["symbols"]["BTC"]["okx"], 79000.0)
-            # symbols 单源即可填 by_asset（决策缓存此刻无 xvenue 的过渡态）
-            self.assertEqual(out["by_asset"]["BTC"]["bin_basis_pct"], 0.02)
-            self.assertEqual(out["by_asset"]["BTC"]["gate_last"], "")
+            self.assertEqual(out["by_asset"]["BTC"]["okx_last"], 79000.0)
 
     def test_missing_file_falls_back(self):
         with tempfile.TemporaryDirectory() as td:

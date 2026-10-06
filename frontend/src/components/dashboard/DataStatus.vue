@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * DataStatus.vue · DeepSeek Harness 风格引擎与数据健康状态指示器
+ * DataStatus.vue · AstraQuant 引擎与数据健康状态指示器
  * 熔断检测、引擎在线状态、调度周期与实时数据更新心跳
  */
 import { computed } from 'vue';
@@ -62,7 +62,7 @@ const cycleMinutes = computed<number | null>(() => {
 
     <div
       class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-3xs font-mono border"
-      style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-2)"
+      style="background-color: var(--surface-2); border-color: var(--line-2); color: var(--ink-2)"
     >
       <span class="dsh-status-dot" :class="engine.dot" aria-hidden="true" />
       <span class="font-medium" style="color: var(--ink-1)">{{ engine.label }}</span>

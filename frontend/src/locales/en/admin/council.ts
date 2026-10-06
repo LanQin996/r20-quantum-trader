@@ -12,8 +12,8 @@ export const enAdminCouncil = {
   export: 'Export configuration',
   importTitle: 'Import a council configuration JSON package (current configuration is backed up first)',
   import: 'Import configuration',
-  importHint: 'Select an r20-council-config JSON export package, or paste its contents directly. Your current configuration is backed up before import (the last 10 copies are kept). Model IDs bound to seats are restored verbatim from the package; if no local model has the same name, rebind it on the seat card after importing.',
-  importPlaceholder: 'Paste the export package JSON: {"format":"r20-council-config","version":1,"config":{...}}',
+  importHint: 'Select an astra-council-config JSON export package, or paste its contents directly. Your current configuration is backed up before import (the last 10 copies are kept). Model IDs bound to seats are restored verbatim from the package; if no local model has the same name, rebind it on the seat card after importing.',
+  importPlaceholder: 'Paste the export package JSON: {"format":"astra-council-config","version":1,"config":{...}}',
   importReadFileFailed: 'File read failed — please retry or paste the JSON content directly.',
   importJsonInvalid: 'Invalid JSON format — please check the contents of the export package.',
   importFailed: 'Import failed: {msg}',
@@ -72,7 +72,7 @@ export const enAdminCouncil = {
   slotNews: 'News intel',
   insertSlotHint: 'Only these variables are really rendered (same source as the trader); anything else renders as [UNKNOWN_VARIABLE:x]',
   slotMacro4h: '4H macro',
-  slotCalculus1h: 'Calculus momentum',
+  slotCalculus1h: 'MACD momentum',
   slotSmartMoney: 'Smart money',
   slotOrderbook: 'Order book depth',
   slotSentiment: 'Sentiment shift',
@@ -102,7 +102,7 @@ export const enAdminCouncil = {
   entryLimit: 'Entry limit',
   stopLabel: '2.0x stop',
   takeProfitLabel: '2.0R target',
-  waitNote: 'Holding the defensive flat stance: trend pullback or calculus burst conditions not met.',
+  waitNote: 'Holding the defensive flat stance: trend pullback or MACD momentum burst conditions not met.',
   defaultReason: 'Following the council’s consolidated verdict.',
 
   // ── added by the rebuild (batch 4) ──
@@ -164,4 +164,10 @@ export const enAdminCouncil = {
   // ── batch 67: seat prompt and import JSON textareas lacked accessible names ──
   seatPromptAria: 'Seat prompt',
   importJsonAria: 'Council configuration JSON',
+  // ── seat performance ──
+  perfAdopted: 'Adopted Times',
+  perfWinRate: 'Win Rate',
+  perfTotalTrades: 'Closed Trades',
+  perfPnl: 'Cumulative PnL',
+  perfTitle: 'Seat Live Performance',
 };

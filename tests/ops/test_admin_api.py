@@ -6,9 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-import r20_backend.app as app_module
-from r20_backend.admin_auth import AdminAuthStore
-from r20_backend.version import __version__
+import astra_backend.app as app_module
+from astra_backend.admin_auth import AdminAuthStore
+from astra_backend.version import __version__
 
 
 class AdminApiTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class AdminApiTests(unittest.TestCase):
     def login(self, username: str, password: str) -> dict[str, str]:
         response = self.client.post("/api/v1/admin/auth/login", json={"username": username, "password": password})
         self.assertEqual(response.status_code, 200, response.text)
-        return {"X-R20-Session": response.json()["session_token"]}
+        return {"X-Astra-Session": response.json()["session_token"]}
 
     def test_login_session_and_logout(self):
         headers = self.login("admin", "InitialAdmin123456")
@@ -58,7 +58,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(versions["FastAPI Control Plane"], __version__)
 
     def test_legacy_header_disabled_after_initialization(self):
-        response = self.client.get("/api/v1/admin/overview", headers={"X-R20-Admin-Token": "InitialAdmin123456"})
+        response = self.client.get("/api/v1/admin/overview", headers={"X-Astra-Admin-Token": "InitialAdmin123456"})
         self.assertEqual(response.status_code, 401)
 
     def test_vue_console_endpoints_require_session_and_return_data(self):
@@ -79,7 +79,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("decisions", runtime.json())
         logs = self.client.get("/api/v1/admin/logs?source=backend&lines=30", headers=headers)
         self.assertEqual(logs.status_code, 200)
-        self.assertEqual(logs.json()["file"], "uvicorn.log")  # 审计①#6：r20_backend.log 从无写入方（死文件），已指向真实日志
+        self.assertEqual(logs.json()["file"], "uvicorn.log")  # 审计①#6：astra_backend.log 从无写入方（死文件），已指向真实日志
         self.assertEqual(self.client.get("/api/v1/admin/logs?source=../../etc/passwd", headers=headers).status_code, 400)
         library = self.client.get("/api/v1/admin/prompt-library", headers=headers)
         self.assertEqual(library.status_code, 200)
@@ -136,7 +136,7 @@ class AdminApiTests(unittest.TestCase):
         import os
         from unittest.mock import patch
         import scripts.okx_runtime as runtime
-        import r20_gateway.secrets as secrets
+        import astra_gateway.secrets as secrets
         trio = ({"OKX_DEMO_API_KEY": "fake-demo-key",
                  "OKX_DEMO_SECRET_KEY": "fake-demo-secret",
                  "OKX_DEMO_PASSPHRASE": "fake-demo-pass"}
@@ -144,11 +144,11 @@ class AdminApiTests(unittest.TestCase):
 
         @contextlib.contextmanager
         def scope():
-            with tempfile.TemporaryDirectory(prefix="r20-us012-env-") as tmp, \
+            with tempfile.TemporaryDirectory(prefix="astra-us012-env-") as tmp, \
                     patch.object(runtime, "ROOT", Path(tmp)), \
                     patch.object(runtime, "_FROZEN_ENVIRONMENT", None), \
                     patch.object(secrets, "load_secrets", lambda: {}), \
-                    patch.dict(os.environ, {"R20_OKX_ENV": "demo", **trio}, clear=True):
+                    patch.dict(os.environ, {"ASTRA_OKX_ENV": "demo", **trio}, clear=True):
                 yield
         return scope()
 
@@ -185,27 +185,25 @@ class AdminApiTests(unittest.TestCase):
             self.assertNotIn(retired, ready_body)
         self.assertEqual(ready_body["base_url"], "https://www.okx.com")
 
-    def test_interceptor_endpoints_and_sandbox_execution(self):
-        self.assertEqual(self.client.get("/api/v1/admin/interceptors").status_code, 401)
+    def test_interceptor_endpoints_are_removed(self):
+        """2026-10：策略插件系统整套裁撤 —— 插件接口必须彻底下线。
+
+        旧用例验证的是「列表 / 详情 / 沙箱试跑」三条接口的行为；接口删除后改为
+        钉住"根本不存在"：前端已无入口，接口若悄悄复活就是一条**无界面的暗门**
+        （能读写插件代码 = 能改写决策链路）。故此处用 404 而不是 401 断言 ——
+        认证失败会返回 401，只有"路由不存在"才返回 404。
+        """
         headers = self.login("admin", "InitialAdmin123456")
-        res = self.client.get("/api/v1/admin/interceptors", headers=headers)
-        self.assertEqual(res.status_code, 200)
-        plugins = res.json()["plugins"]
-        self.assertGreaterEqual(len(plugins), 4)
-        names = [p["filename"] for p in plugins]
-        self.assertIn("01_macro_trend_filter.py", names)
-        self.assertIn("02_confidence_gatekeeper.py", names)
-
-        # Test single detail
-        detail = self.client.get("/api/v1/admin/interceptors/01_macro_trend_filter.py", headers=headers)
-        self.assertEqual(detail.status_code, 200)
-        self.assertIn("check_risk", detail.json()["code"])
-
-        # Test sandbox test execution
-        test_res = self.client.post("/api/v1/admin/interceptors/test", headers=headers, json={})
-        self.assertEqual(test_res.status_code, 200)
-        self.assertEqual(test_res.json()["status"], "success")
-        self.assertGreaterEqual(len(test_res.json()["results"]), 4)
+        for path in ("/api/v1/admin/interceptors",
+                     "/api/v1/admin/interceptors/01_macro_trend_filter.py"):
+            self.assertEqual(self.client.get(path, headers=headers).status_code, 404, path)
+        for path in ("/api/v1/admin/interceptors/test",
+                     "/api/v1/admin/interceptors/reorder"):
+            self.assertEqual(self.client.post(path, headers=headers, json={}).status_code, 404, path)
+        self.assertEqual(self.client.put("/api/v1/admin/interceptors/toggle",
+                                         headers=headers, json={}).status_code, 404)
+        self.assertEqual(self.client.delete("/api/v1/admin/interceptors/01_macro_trend_filter.py",
+                                            headers=headers).status_code, 404)
 
     def test_policy_admin_endpoints_rbac_and_exception_handling(self):
         root = self.login("admin", "InitialAdmin123456")
@@ -274,7 +272,7 @@ class AdminApiTests(unittest.TestCase):
 
         # 1. Anonymous access returns 401
         self.assertEqual(self.client.get("/api/v1/admin/prompt-library").status_code, 401)
-        self.assertEqual(self.client.put("/api/v1/admin/prompt-library", json={"active_style": "stable"}).status_code, 401)
+        self.assertEqual(self.client.put("/api/v1/admin/prompt-library", json={"active_style": "allpattern_swing"}).status_code, 401)
         self.assertEqual(self.client.get("/api/v1/admin/prompt-profiles").status_code, 401)
         self.assertEqual(self.client.post("/api/v1/admin/prompt-profiles", json={"name": "test"}).status_code, 401)
         self.assertEqual(self.client.get("/api/v1/admin/prompts").status_code, 401)
@@ -286,11 +284,11 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/admin/prompts", headers=operator).status_code, 200)
 
         # Operator forbidden on PUT prompt-library and PUT prompts (403)
-        self.assertEqual(self.client.put("/api/v1/admin/prompt-library", headers=operator, json={"active_style": "stable"}).status_code, 403)
+        self.assertEqual(self.client.put("/api/v1/admin/prompt-library", headers=operator, json={"active_style": "allpattern_swing"}).status_code, 403)
         self.assertEqual(self.client.put("/api/v1/admin/prompts", headers=operator, json={"content": "test"}).status_code, 403)
 
         # 3. Superadmin can PUT prompt-library and prompts
-        put_lib = self.client.put("/api/v1/admin/prompt-library", headers=root, json={"active_style": "stable", "trading_system": "", "trading_user": "", "evolution_system": "", "evolution_user": ""})
+        put_lib = self.client.put("/api/v1/admin/prompt-library", headers=root, json={"active_style": "allpattern_swing", "trading_system": "", "trading_user": "", "evolution_system": "", "evolution_user": ""})
         self.assertEqual(put_lib.status_code, 200)
 
         put_prompts = self.client.put("/api/v1/admin/prompts", headers=root, json={"content": ""})
@@ -312,7 +310,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(bad_import.status_code, 400)
 
         # Whitespace-only profile name creation -> 422
-        bad_create = self.client.post("/api/v1/admin/prompt-profiles", headers=root, json={"name": "   ", "source_id": "stable"})
+        bad_create = self.client.post("/api/v1/admin/prompt-profiles", headers=root, json={"name": "   ", "source_id": "allpattern_swing"})
         self.assertEqual(bad_create.status_code, 422)
 
     def test_admin_update_endpoints_and_status(self):
@@ -336,7 +334,7 @@ class AdminApiTests(unittest.TestCase):
 
             # 4. POST /api/v1/admin/update with correct confirmation
             with patch.object(app_module, "git", return_value="Already up to date."):
-                res_ok = self.client.post("/api/v1/admin/update", headers=root, json={"confirmation": "UPDATE R20"})
+                res_ok = self.client.post("/api/v1/admin/update", headers=root, json={"confirmation": "UPDATE ASTRA"})
                 self.assertEqual(res_ok.status_code, 200)
                 self.assertIn("git_output", res_ok.json())
 
@@ -345,7 +343,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/admin/backups/download/nonexistent.tar.gz").status_code, 401)
 
         root = self.login("admin", "InitialAdmin123456")
-        token = root["X-R20-Session"]
+        token = root["X-Astra-Session"]
 
         # Create a dummy backup file in backups/local/
         backups_dir = app_module.ROOT / "backups" / "local"

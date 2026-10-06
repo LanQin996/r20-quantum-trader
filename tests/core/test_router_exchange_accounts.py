@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from r20_backend.routers import exchanges as R
+from astra_backend.routers import exchanges as R
 
 FIELDS = ("equity", "available", "positions_count", "open_orders_count")
 
@@ -45,10 +45,8 @@ class VenueAccountUnknownTest(unittest.TestCase):
                          "输出只多出状态、原因与同步时间三个元字段")
 
     def test_listing_env_map_knows_the_venue_specific_naming(self):
-        """沙箱档位**各所叫法不同**（gate 是 sandbox，另两所是 demo）—— 混用会把实盘当沙箱。"""
-        self.assertEqual(R._LISTING_ENV_MAP["gate"]["demo"], "sandbox")
         self.assertEqual(R._LISTING_ENV_MAP["okx"]["demo"], "demo")
-        self.assertEqual(R._LISTING_ENV_MAP["binance"]["live"], "live")
+        self.assertEqual(R._LISTING_ENV_MAP["okx"]["live"], "live")
 
 
 class PositionsRouteTest(unittest.TestCase):
@@ -73,7 +71,7 @@ class PositionsRouteTest(unittest.TestCase):
         fake_okx = MagicMock()
         fake_okx.positions.side_effect = RuntimeError("网关超时")
         with patch("scripts.okx_runtime.current_environment", return_value=self._env(True)), \
-             patch("r20_backend.dependencies.okx", fake_okx):
+             patch("astra_backend.dependencies.okx", fake_okx):
             with self.assertRaises(HTTPException) as ctx:
                 R.positions(None)
         self.assertEqual(ctx.exception.status_code, 502)
@@ -84,7 +82,7 @@ class PositionsRouteTest(unittest.TestCase):
         fake_okx = MagicMock()
         fake_okx.positions.side_effect = OKXNotConfigured("三件套不全")
         with patch("scripts.okx_runtime.current_environment", return_value=self._env(True)), \
-             patch("r20_backend.dependencies.okx", fake_okx):
+             patch("astra_backend.dependencies.okx", fake_okx):
             with self.assertRaises(HTTPException) as ctx:
                 R.positions(None)
         self.assertEqual(ctx.exception.status_code, 503)
@@ -94,7 +92,7 @@ class PositionsRouteTest(unittest.TestCase):
         fake_okx = MagicMock()
         fake_okx.positions.return_value = [{"instId": "BTC-USDT-SWAP"}]
         with patch("scripts.okx_runtime.current_environment", return_value=self._env(True)), \
-             patch("r20_backend.dependencies.okx", fake_okx):
+             patch("astra_backend.dependencies.okx", fake_okx):
             out = R.positions(None)
         self.assertEqual(out["positions"], [{"instId": "BTC-USDT-SWAP"}])
         self.assertEqual(out["source"], "OKX REST", "数据来源必须标明")

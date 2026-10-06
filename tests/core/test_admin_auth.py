@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from r20_backend import admin_auth as AA
+from astra_backend import admin_auth as AA
 
 GOOD = "abcd1234efgh"          # 12 位、含字母与数字
 
@@ -84,9 +84,9 @@ class _StoreBase(unittest.TestCase):
         return started
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="r20-auth-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="astra-auth-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.db = self.tmp / "data" / "r20_admin.db"
+        self.db = self.tmp / "data" / "astra_admin.db"
         self._start(mock.patch.object(AA, "DB_PATH", self.db))
         self._start(mock.patch.object(AA, "_hash_password", _fast_hash))
         self.now = 1_700_000_000
@@ -355,6 +355,18 @@ class SessionTests(_StoreBase):
         self.assertIsNone(self.store.validate_session("not-a-real-token"))
         self.now += AA.SESSION_SECONDS + 1
         self.assertIsNone(self.store.validate_session(token))
+
+    def test_sliding_session_renews_active_session(self):
+        self._user()
+        token = self.store.login("admin", GOOD)["session_token"]
+        # Advance time by more than half of SESSION_SECONDS (e.g. 60%)
+        self.now += int(AA.SESSION_SECONDS * 0.6)
+        user = self.store.validate_session(token)
+        self.assertIsNotNone(user)
+        # Verify expires_at was renewed
+        with self.store.connect() as connection:
+            row = connection.execute("SELECT expires_at FROM admin_sessions").fetchone()
+        self.assertEqual(row["expires_at"], self.now + AA.SESSION_SECONDS)
 
     def test_disabling_the_user_invalidates_the_session(self):
         user = self._user()

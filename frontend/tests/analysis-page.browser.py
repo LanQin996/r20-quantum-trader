@@ -23,7 +23,7 @@ from playwright.sync_api import expect, sync_playwright
 FRONTEND = Path(__file__).resolve().parents[1]
 ACCOUNT = "okx:live:browser-fixture"
 CONFIG = {"id": "fixture-config", "source": "runtime", "process": "trader", "captured_ms": 1789866000000}
-OUTPUT = Path(tempfile.gettempdir()) / "r20-analysis-browser"
+OUTPUT = Path(tempfile.gettempdir()) / "astra-analysis-browser"
 OUTPUT.mkdir(exist_ok=True)
 
 
@@ -102,7 +102,7 @@ def run():
             data = {"url": url.path.removesuffix("/download") + "/file"}
         elif url.path.endswith("/file") and "/exports/" in url.path:
             route.fulfill(status=200, content_type="application/zip",
-                          headers={"Content-Disposition": 'attachment; filename="r20-analysis.zip"'},
+                          headers={"Content-Disposition": 'attachment; filename="astra-analysis.zip"'},
                           body=b"PK\x05\x06" + b"\0" * 18)
             return
         elif "/exports/" in url.path:
@@ -133,9 +133,9 @@ def run():
             browser = playwright.chromium.launch(headless=True, executable_path=executable)
             context = browser.new_context(viewport={"width": 1440, "height": 1000}, locale="zh-CN")
             context.add_init_script("""
-                localStorage.setItem('r20.admin.session.id', 'browser-fixture');
-                localStorage.setItem('r20.admin.session.user', JSON.stringify({username:'fixture',role:'superadmin'}));
-                localStorage.setItem('r20_theme_v2', 'light');
+                localStorage.setItem('astra.admin.session.id', 'browser-fixture');
+                localStorage.setItem('astra.admin.session.user', JSON.stringify({username:'fixture',role:'superadmin'}));
+                localStorage.setItem('astra_theme_v2', 'light');
             """)
             context.route(lambda url: urlparse(url).path.startswith("/api/"), mock_api)
             page = context.new_page()

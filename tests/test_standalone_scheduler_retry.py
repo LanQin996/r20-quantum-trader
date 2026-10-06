@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-import r20_backend.scheduler as scheduler
+import astra_backend.scheduler as scheduler
 
 BJ = timezone(timedelta(hours=8))
 
@@ -71,12 +71,12 @@ class RunIntervalJobTests(unittest.TestCase):
 class RunScriptTimeoutTests(unittest.TestCase):
     def test_run_script_returns_false_on_timeout(self):
         expired = subprocess.TimeoutExpired(cmd="ai_factor_trader.py", timeout=840)
-        with patch("r20_backend.scheduler.subprocess.run", side_effect=expired):
+        with patch("astra_backend.scheduler.subprocess.run", side_effect=expired):
             self.assertFalse(scheduler.run_script("trader"))
 
     def test_run_script_uses_per_job_timeout(self):
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
-        with patch("r20_backend.scheduler.subprocess.run", return_value=completed) as run:
+        with patch("astra_backend.scheduler.subprocess.run", return_value=completed) as run:
             self.assertTrue(scheduler.run_script("trader"))
             self.assertEqual(run.call_args.kwargs["timeout"], scheduler.JOB_TIMEOUTS["trader"])
             self.assertTrue(scheduler.run_script("factor_library"))

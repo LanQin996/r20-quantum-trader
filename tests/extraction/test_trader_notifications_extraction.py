@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import ast
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.trader import notifications
 
@@ -36,15 +38,32 @@ STRAT = "AI_STRAT"
 REASON = "因为所以"
 
 
-def _legacy_action_message(*, is_long, is_scale_in, name, sz, px, order_ref, tp_px, sl_px):
-    """搬走前 facade 长/空两侧的动作文案（逐字原样，用 is_long 择一）。"""
+def _money_text(margin_usdt, leverage=None):
+    """独立重写的「钱口径」金额段 —— 对拍的一方必须自己实现，不能调被测函数。"""
+    parts = []
+    if margin_usdt is not None and float(margin_usdt) > 0:
+        parts.append(f"保证金 {float(margin_usdt):.2f}U")
+    if leverage is not None and float(leverage) > 0:
+        parts.append(f"{float(leverage):g}x 杠杆")
+    return " · ".join(parts) if parts else "--"
+
+
+def _legacy_action_message(*, is_long, is_scale_in, name, margin_usdt, px, order_ref,
+                           tp_px, sl_px, leverage=None):
+    """动作文案的**约定契约**（2026-09-28 口径统一后）。
+
+    ⚠️ 本仓原以"搬迁前逐字原样"为基线。用户 2026-09-28 拍板「全系统不再用张，
+    一律保证金 + 杠杆」后，`{sz}张@{px}` 已按决策退役，故这里的基线就是**新契约
+    本身**，对拍的是"抽取后的实现 == 约定契约"。
+    """
+    _m = _money_text(margin_usdt, leverage)
     if is_long:
         if is_scale_in:
-            return f"[{name}] 🚀 AI顺势浮盈金字塔加多挂单已提交 {sz}张@{px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
-        return f"[{name}] AI限价多单已提交待成交 {sz}张@{px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
+            return f"[{name}] 🚀 AI顺势浮盈金字塔加多挂单已提交 {_m} @ {px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
+        return f"[{name}] AI限价多单已提交待成交 {_m} @ {px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
     if is_scale_in:
-        return f"[{name}] 🌪️ AI顺势浮盈金字塔加空挂单已提交 {sz}张@{px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
-    return f"[{name}] AI限价空单已提交待成交 {sz}张@{px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
+        return f"[{name}] 🌪️ AI顺势浮盈金字塔加空挂单已提交 {_m} @ {px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
+    return f"[{name}] AI限价空单已提交待成交 {_m} @ {px} (order={order_ref}, TP={tp_px}, SL={sl_px})"
 
 
 def _legacy_failure_message(*, is_long, name, order_ref):
@@ -53,28 +72,43 @@ def _legacy_failure_message(*, is_long, name, order_ref):
     return f"[{name}] AI限价空单提交失败: {order_ref}"
 
 
-def _legacy_trade_open_kwargs(*, is_long, is_scale_in, name, sz, px, strat_tag,
+def _legacy_trade_open_kwargs(*, is_long, is_scale_in, name, margin_usdt, px, strat_tag,
                               ai_reason, tp_px, sl_px):
-    """搬走前 facade 的两处 notify_trade_open(**) 实参（不含 leverage）。"""
+    """`notify_trade_open(**)` 实参的**约定契约**（不含 leverage）。
+
+    `sz=None` 是显式的：载荷里那个字段只作审计留档（各所原生数量单位不同），
+    与展示契约无关 —— 见 `notifications.money_size_text` 的模块说明。
+    """
     if is_long:
         if is_scale_in:
-            return dict(inst=name, side="多 (顺势加多)", sz=sz, px=px,
+            return dict(inst=name, side="多 (顺势加多)", sz=None, px=px,
                         strategy="🚀 顺势金字塔加多", reason=str(ai_reason),
-                        tp_px=tp_px, sl_px=sl_px)
-        return dict(inst=name, side="多", sz=sz, px=px, strategy=strat_tag,
-                    reason=str(ai_reason), tp_px=tp_px, sl_px=sl_px)
+                        tp_px=tp_px, sl_px=sl_px, margin_usdt=margin_usdt)
+        return dict(inst=name, side="多", sz=None, px=px, strategy=strat_tag,
+                    reason=str(ai_reason), tp_px=tp_px, sl_px=sl_px,
+                    margin_usdt=margin_usdt)
     if is_scale_in:
-        return dict(inst=name, side="空 (顺势加空)", sz=sz, px=px,
+        return dict(inst=name, side="空 (顺势加空)", sz=None, px=px,
                     strategy="🌪️ 顺势金字塔加空", reason=str(ai_reason),
-                    tp_px=tp_px, sl_px=sl_px)
-    return dict(inst=name, side="空", sz=sz, px=px, strategy=strat_tag,
-                reason=str(ai_reason), tp_px=tp_px, sl_px=sl_px)
+                    tp_px=tp_px, sl_px=sl_px, margin_usdt=margin_usdt)
+    return dict(inst=name, side="空", sz=None, px=px, strategy=strat_tag,
+                reason=str(ai_reason), tp_px=tp_px, sl_px=sl_px,
+                margin_usdt=margin_usdt)
+
 
 
 class ActionMessageParityTest(unittest.TestCase):
+    def setUp(self):
+        # ⚠️ 单型字（2026-09 起）会读 `ASTRA_ORDER_MODE` ⇒ 对拍必须钉死档位，
+        # 否则运维一切到市价，legacy（限价文案）与实现的逐字对拍就红。
+        # 市价档的独立断言见 `OrderTypeWordingTest`。
+        env = patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"})
+        env.start()
+        self.addCleanup(env.stop)
+
     def _call(self, fn, **kw):
-        base = dict(name="BTC", sz=3, px=79000.0, order_ref="ORD1",
-                    tp_px=80000.0, sl_px=78000.0)
+        base = dict(name="BTC", margin_usdt=420.0, leverage=6, px=79000.0,
+                    order_ref="ORD1", tp_px=80000.0, sl_px=78000.0)
         base.update(kw)
         return fn(**base)
 
@@ -82,10 +116,10 @@ class ActionMessageParityTest(unittest.TestCase):
         for is_long in (True, False):
             for is_scale_in in (True, False):
                 got = notifications.entry_action_message(
-                    is_long=is_long, is_scale_in=is_scale_in, name="BTC", sz=3,
+                    is_long=is_long, is_scale_in=is_scale_in, name="BTC", margin_usdt=420.0, leverage=6,
                     px=79000.0, order_ref="ORD1", tp_px=80000.0, sl_px=78000.0)
                 exp = _legacy_action_message(
-                    is_long=is_long, is_scale_in=is_scale_in, name="BTC", sz=3,
+                    is_long=is_long, is_scale_in=is_scale_in, name="BTC", margin_usdt=420.0, leverage=6,
                     px=79000.0, order_ref="ORD1", tp_px=80000.0, sl_px=78000.0)
                 self.assertEqual(got, exp, f"is_long={is_long} scale_in={is_scale_in} 分叉")
 
@@ -122,9 +156,93 @@ class ActionMessageParityTest(unittest.TestCase):
         self.assertNotIn("金字塔", b)
 
 
+class OrderTypeWordingTest(unittest.TestCase):
+    """单型字必须说对（2026-09 缺陷）。
+
+    实测事故：`.env` 已是 `ASTRA_ORDER_MODE=market`，而 12:45 的 ARB 单
+    （实发市价）在日志与通知里写的是「AI**限价**多单已提交待成交」——
+    **运维/排障无法从日志判断实际发的是哪种单**，本轮排障就被它误导过一次。
+    """
+
+    def _msg(self, mode, **over):
+        kw = dict(is_long=True, is_scale_in=False, name="ARB", margin_usdt=68.95,
+                  px=0.2228, order_ref="337477221", tp_px=0.2444, sl_px=0.2138)
+        kw.update(over)
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": mode}):
+            return notifications.entry_action_message(**kw)
+
+    def test_market_mode_says_market_not_limit(self):
+        msg = self._msg("market")
+        self.assertIn("AI市价多单已提交", msg, "市价档必须写「市价」")
+        self.assertNotIn("限价", msg, "市价档写「限价」= 谎报单型（本次要修的形态）")
+        self.assertNotIn("待成交", msg, "市价单当场成交，「待成交」不成立")
+
+    def test_limit_mode_wording_is_unchanged(self):
+        """限价档逐字保持原样（不许顺手改既有文案）。"""
+        self.assertIn("AI限价多单已提交待成交", self._msg("limit"))
+
+    def test_failure_message_follows_the_mode(self):
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            self.assertIn("AI市价多单提交失败", notifications.entry_failure_message(
+                is_long=True, name="XRP", order_ref="市价锚定拒绝: 现价不可用"))
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
+            self.assertIn("AI限价多单提交失败", notifications.entry_failure_message(
+                is_long=True, name="XRP", order_ref="r"))
+
+    def test_missing_or_garbled_mode_falls_back_to_limit(self):
+        """兜底与真实发单**同源**：读不到/拼错一律按限价 —— 不允许出现
+        "文案说市价、实际发限价"这种反向误导。
+
+        ⚠️ 大小写与首尾空白**不算拼错**：下单路径用的是
+        `str(os.getenv(...)).strip().lower() == "market"`，本模块逐字同源，
+        故 `"Market "` / `"MARKET"` 都算市价（见下面的正向断言）。
+        """
+        for garbled in ("", "LIMIT", "banana", "marketx"):
+            with self.subTest(mode=garbled):
+                with patch.dict(os.environ, {"ASTRA_ORDER_MODE": garbled}):
+                    self.assertIn("AI限价多单已提交待成交",
+                                  notifications.entry_action_message(
+                                      is_long=True, is_scale_in=False, name="BTC", margin_usdt=10.0,
+                                      px=1.0, order_ref="o", tp_px=2.0, sl_px=0.5))
+        with patch.dict(os.environ):
+            os.environ.pop("ASTRA_ORDER_MODE", None)
+            self.assertIn("AI限价多单已提交待成交",
+                          notifications.entry_action_message(
+                              is_long=True, is_scale_in=False, name="BTC", margin_usdt=10.0,
+                              px=1.0, order_ref="o", tp_px=2.0, sl_px=0.5))
+
+    def test_case_and_whitespace_are_normalised_like_the_order_path(self):
+        """`"Market "` / `"MARKET"` 与发单路径一致地算作市价（不是拼错）。"""
+        for variant in ("Market ", "MARKET", " market "):
+            with self.subTest(mode=variant):
+                with patch.dict(os.environ, {"ASTRA_ORDER_MODE": variant}):
+                    self.assertIn("AI市价多单已提交", notifications.entry_action_message(
+                        is_long=True, is_scale_in=False, name="BTC", margin_usdt=10.0,
+                        px=1.0, order_ref="o", tp_px=2.0, sl_px=0.5))
+
+    def test_wording_matches_what_the_order_path_will_send(self):
+        """文案的单型判据必须与下单路径**逐字同源**（否则又是另一种谎报）。
+
+        直接比对两处的取值口径：同一组 `ASTRA_ORDER_MODE` 下，
+        `notifications._order_word()` 的结论必须与 `order_submit` 的
+        「是否走市价分支」一致。
+        """
+        for mode, expect_market in [("market", True), ("limit", False),
+                                    ("MARKET", True), ("", False), ("x", False)]:
+            with self.subTest(mode=mode):
+                with patch.dict(os.environ, {"ASTRA_ORDER_MODE": mode}):
+                    word = notifications._order_word()
+                    sent_market = (str(os.getenv("ASTRA_ORDER_MODE", "limit"))
+                                   .strip().lower() == "market")
+                self.assertEqual(word == "市价", expect_market)
+                self.assertEqual(sent_market, expect_market,
+                                 "文案与发单路径的档位判据出现分歧")
+                self.assertEqual(word == "市价", sent_market)
+
+
 class TradeOpenKwargsParityTest(unittest.TestCase):
     def _kw(self, **over):
-        base = dict(name="BTC", sz=3, px=79000.0, strat_tag=STRAT,
+        base = dict(name="BTC", margin_usdt=420.0, px=79000.0, strat_tag=STRAT,
                     ai_reason=REASON, tp_px=80000.0, sl_px=78000.0)
         base.update(over)
         return base
@@ -190,7 +308,10 @@ class TradeOpenKwargsParityTest(unittest.TestCase):
                     is_long=is_long, is_scale_in=is_scale_in, **self._kw())
                 notify_trade_open(**kw, leverage=int(5.0))
                 self.assertEqual(seen["leverage"], 5)
-                self.assertEqual(seen["sz"], 3)
+                # `sz` 只作载荷审计留档（各所原生数量单位不同）⇒ 显式 None，
+                # 展示一律走 `margin_usdt`。见 `money_size_text` 的模块说明。
+                self.assertIsNone(seen["sz"])
+                self.assertEqual(seen["margin_usdt"], 420.0)
                 self.assertEqual(seen["px"], 79000.0)
                 self.assertEqual(seen["tp_px"], 80000.0)
                 self.assertEqual(seen["sl_px"], 78000.0)
@@ -279,8 +400,8 @@ class WiringTest(unittest.TestCase):
         # 「门面主执行路径」（门面本体 ∪ 它的阶段函数），不得藏进 notifications 域。
         facade_eff = side_effect_names(FACADE) | side_effect_names(CYCLE_STAGES)
         sub_eff = side_effect_names(SUBMODULE)
-        for name in ("save_trackers", "add", "reserved_slot_count",
-                     "reserved_long_count", "reserved_short_count"):
+        for name in ("save_trackers", "add",
+                     "pending_long_count", "pending_short_count"):
             self.assertIn(name, facade_eff,
                           f"门面主执行路径应保留副作用 {name!r}（门面或 cycle_stages）")
             self.assertNotIn(name, sub_eff, f"子模块不得包含副作用 {name!r}（AST 判定）")
@@ -319,6 +440,78 @@ class WiringTest(unittest.TestCase):
             checked += 1
         self.assertEqual(checked, 10,
                          f"应有 4+2+4=10 处 helper 调用，实际 {checked}")
+
+
+class VenueExecutedFactsTest(unittest.TestCase):
+    """展示只用**钱**口径：`(实提交保证金, 实提交名义额)`。
+
+    2026-09-28 实测缺陷：通知与巡检文案一律用调用方手里的 OKX 张数
+    （`actual_sz`）去报，并用 `sz × px ÷ leverage` 反推"预估保证金"。
+    XRP 那一单：
+
+    | | 文案（旧） | 交易所实况 |
+    |---|---|---|
+    | 数量 | `26.87 张` | `199.9 XRP` |
+    | 保证金 | `预估 ~6.72 U` | `49.9 U` |
+
+    两个数都对不上。用户随后拍板：**全系统不再用张** —— 三所数量单位不同、
+    各币种合约面值算法也不同，张数无法横向比较；保证金才是唯一可比的量。
+    故本函数只回传钱，原生数量连返回值都不再出现。
+    """
+
+    def test_returns_the_real_margin_and_notional(self):
+        ctx = {"venue": "binance", "venue_exec_sz": 199.9,
+               "venue_exec_margin": 49.9, "venue_exec_notional": 299.4}
+        self.assertEqual(notifications.venue_executed_facts(ctx), (49.9, 299.4))
+
+    def test_gate_returns_money_too(self):
+        ctx = {"venue": "gate", "venue_exec_sz": 861.0,
+               "venue_exec_margin": 138.43, "venue_exec_notional": 818.12}
+        self.assertEqual(notifications.venue_executed_facts(ctx), (138.43, 818.12))
+
+    def test_missing_context_returns_none_for_the_caller_to_fall_back(self):
+        """OKX 直签链没有 `venue_exec_*` ⇒ 回 `(None, None)`，由调用方回落计划值。"""
+        for ctx in ({"venue": "okx"}, None, "not-a-dict",
+                    {"venue": "binance", "venue_exec_margin": 0},
+                    {"venue": "binance", "venue_exec_margin": "x"}):
+            self.assertEqual(notifications.venue_executed_facts(ctx), (None, None), ctx)
+
+    def test_never_returns_a_contract_count(self):
+        """★ 回归闸：返回值里不得再出现张数（否则文案层又会捡回去）。"""
+        got = notifications.venue_executed_facts(
+            {"venue": "binance", "venue_exec_sz": 199.9,
+             "venue_exec_margin": 49.9, "venue_exec_notional": 299.4})
+        self.assertEqual(len(got), 2, "又回传了尺寸/单位，展示层会重新用张")
+        self.assertNotIn(199.9, got, "实提交的张数不该出现在展示契约里")
+
+
+class MoneySizeTextTest(unittest.TestCase):
+    """统一金额文案的单一事实源。"""
+
+    def test_margin_and_leverage(self):
+        self.assertEqual(notifications.money_size_text(margin_usdt=420.0, leverage=6),
+                         "保证金 420.00U · 6x 杠杆")
+
+    def test_notional_is_opt_in(self):
+        self.assertEqual(
+            notifications.money_size_text(margin_usdt=420.0, leverage=6,
+                                          notional_usdt=2520.0, with_notional=True),
+            "保证金 420.00U · 6x 杠杆 · 名义 2520U")
+        self.assertNotIn("名义", notifications.money_size_text(
+            margin_usdt=420.0, leverage=6, notional_usdt=2520.0))
+
+    def test_missing_margin_shows_dash_never_a_contract_count(self):
+        """★ 取不到保证金就写 `--`。**绝不**回落张数 —— 那正是本次要根治的形态。"""
+        self.assertEqual(notifications.money_size_text(), "--")
+        self.assertEqual(
+            notifications.money_size_text(margin_usdt=0, leverage=0), "--")
+        for bad in ("x", None, object()):
+            self.assertEqual(
+                notifications.money_size_text(margin_usdt=bad), "--", repr(bad))
+
+    def test_leverage_only_is_still_useful(self):
+        self.assertEqual(notifications.money_size_text(leverage=6), "6x 杠杆")
+
 
 
 if __name__ == "__main__":

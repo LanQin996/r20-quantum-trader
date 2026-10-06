@@ -1,10 +1,10 @@
 /* =========================================================================
    Base · 重置 / 全局排版 / 动效
    -------------------------------------------------------------------------
-   排版规则对齐 DeepSeek Harness：
-     · 正文 line-height 160%（DSH body）· 标题负字距（DSH -0.01 ~ -0.02em）
+   排版规则：
+     · 正文 line-height 160% · 标题微负字距（-0.01 ~ -0.025em）
      · 表格数字 tabular-nums（金融数据基线，跳动不抖）
-     · text-wrap: pretty（DSH body 同款，避免中文孤字换行）
+     · text-wrap: pretty（避免孤字换行）
    ========================================================================= */
 
 *,
@@ -16,13 +16,13 @@
 
 html {
   scrollbar-gutter: stable;
-  background-color: var(--ds-color-bg-page, #121214);
+  background-color: var(--ds-color-bg-page, #07080c);
 }
 
 body {
   margin: 0;
-  background-color: var(--ds-color-bg-page, #121214);
-  background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(120, 119, 198, 0.08), transparent 70%);
+  background-color: var(--ds-color-bg-page, #07080c);
+  background-image: var(--ds-bg-gradient);
   background-attachment: fixed;
   color: var(--ds-color-text-secondary);
   font-family: var(--ds-font-body);
@@ -35,7 +35,7 @@ body {
   min-height: 100vh;
 }
 
-/* —— 标题：负字距梯度，与 DSH heading/title 一致 —— */
+/* —— 标题：负字距梯度 —— */
 /* 批 96：分组选择器里原含 `h5, h6` —— 实测全仓模板 **0 次**使用这两个标签
    （`h1` 9 / `h2` 63 / `h3` 20 / `h4` 10），且无 `v-html` 在运行时生成标题，
    故是死选择器。h5/h6 也没有各自的字号规则（只有 h1~h4 有）。 */
@@ -94,7 +94,7 @@ pre,
   letter-spacing: -0.01em;
 }
 
-/* —— 小标签：DSH 的 +0.09em 大字距 + 弱化色 —— */
+/* —— 小标签：+0.09em 大字距 + 弱化色 —— */
 .label-caps {
   font-size: var(--text-3xs);
   font-weight: 500;
@@ -112,10 +112,10 @@ pre,
 
 ::selection {
   background: var(--ds-color-brand);
-  color: var(--ds-color-text-inverse);
+  color: #07080c;
 }
 
-/* —— 滚动条：DSH --ds-color-scrollbar —— */
+/* —— 滚动条：--ds-color-scrollbar —— */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -145,8 +145,7 @@ table {
 
 /* =========================================================================
    动效
-   —— DSH 全站只有一条 .8s ease-out 入场；此处按控件尺度细分，
-      并统一收敛到 --ease-out，避免出现 DSH 没有的弹跳/发光
+   —— 按控件尺度细分过渡曲线与时长，统一收敛到 --ease-out
    ========================================================================= */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -159,7 +158,7 @@ table {
   }
 }
 
-@keyframes r20-enter {
+@keyframes astra-enter {
   from {
     opacity: 0;
     transform: translateY(5px);
@@ -169,7 +168,7 @@ table {
     transform: none;
   }
 }
-@keyframes r20-fade-in {
+@keyframes astra-fade-in {
   from {
     opacity: 0;
   }
@@ -177,7 +176,7 @@ table {
     opacity: 1;
   }
 }
-@keyframes r20-pop-in {
+@keyframes astra-pop-in {
   from {
     opacity: 0;
     transform: translateY(6px) scale(0.985);
@@ -187,7 +186,7 @@ table {
     transform: translateY(0) scale(1);
   }
 }
-@keyframes r20-slide-in-right {
+@keyframes astra-slide-in-right {
   from {
     transform: translateX(20px);
     opacity: 0.6;
@@ -197,7 +196,7 @@ table {
     opacity: 1;
   }
 }
-@keyframes r20-pulse-dot {
+@keyframes astra-pulse-dot {
   0%,
   100% {
     opacity: 1;
@@ -207,7 +206,7 @@ table {
   }
 }
 
-/* 页面入场：路由切换时给内容一个 DSH 式轻入场 */
+/* 页面入场：路由切换时给内容一个轻盈入场 */
 
 .pop-enter-active,
 .pop-leave-active {

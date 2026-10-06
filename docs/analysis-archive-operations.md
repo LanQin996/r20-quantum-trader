@@ -5,7 +5,7 @@ Analysis never changes trading signals or risk thresholds.
 
 ## Deployment modes (choose one)
 
-- Gateway: set R20_ANALYSIS_STANDALONE=1 for both backend and gateway.
+- Gateway: set ASTRA_ANALYSIS_STANDALONE=1 for both backend and gateway.
   Restart at an operationally safe time. The gateway runs the archive every
   300 seconds with a 180-second timeout and its existing retry policy.
 - Linux systemd: run scripts/sync_analysis_archive.py from the repository
@@ -21,8 +21,8 @@ does not submit orders. Capture-disabled installations skip the job.
 
 ## Production deployment on 2026-09-25
 
-The /home/r20 deployment uses r20-analysis-archive.service and
-r20-analysis-archive.timer. Check service logs with journalctl and timer
+The /home/astra deployment uses astra-analysis-archive.service and
+astra-analysis-archive.timer. Check service logs with journalctl and timer
 health with systemctl. The service records stage timings under
 archive.sync and emits an analysis_archive summary. A successful process
 exit does not prove every exchange history source is complete: also inspect
@@ -31,7 +31,7 @@ analysis_sync source errors and pagination coverage.
 Code backups are stored alongside replaced files with .bak timestamps.
 For rollback, stop the timer and wait for/stop only the archive service,
 then remove data/analysis_archive.standalone and unset
-R20_ANALYSIS_STANDALONE to restore inline archive behavior.
+ASTRA_ANALYSIS_STANDALONE to restore inline archive behavior.
 Never fabricate ledger timestamps or clear risk state as part of rollback.
 
 ## Validation

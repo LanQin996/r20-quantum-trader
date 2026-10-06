@@ -180,7 +180,7 @@ class EndToEndSingleReadTest(unittest.TestCase):
 
     def test_generate_reads_each_data_file_exactly_once(self):
         import types
-        from r20_backend.analysis_store import Archive
+        from astra_backend.analysis_store import Archive
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             snaps, ledger = root / "snapshots.json", root / "trading_ledger.json"
@@ -210,7 +210,7 @@ class EndToEndSingleReadTest(unittest.TestCase):
                  patch.object(sync_web_data.okx_rest, "bills", return_value=None), \
                  patch.object(sync_web_data, "fetch_tickers_bulk", return_value={}), \
                  patch.object(Archive, "trades", return_value=[]), \
-                 patch("r20_backend.analysis_capture.identity", return_value="fixture"):
+                 patch("astra_backend.analysis_capture.identity", return_value="fixture"):
                 sync_web_data.generate_trading_data()
             self.assertTrue(output.exists(), "The generator must reach its final atomic write")
             self.assertEqual(seen, {snaps: 1, ledger: 1})
@@ -279,7 +279,11 @@ class NoRawDualReadTest(unittest.TestCase):
                     out.add(n.module.split(".")[0])
             return out
 
-        added = mods_of(MODULE.read_text(encoding="utf-8")) - mods_of(old.stdout)
+        # ⚠️ 基线取自**改名前**的提交（`r20_backend.*`），直接比会把命名空间迁移
+        #    误判成"新增第三方依赖 `astra_backend`"。用本仓已有的基线归一助手，
+        #    把两侧放到同一命名空间下再比（这是"声明一次"而非临时放行）。
+        from tests.extraction.rename_baseline import normalize
+        added = mods_of(MODULE.read_text(encoding="utf-8")) - mods_of(normalize(old.stdout))
         # ⚠️ 用户约束是"禁止增减**依赖**"，指的是第三方包；标准库不是依赖。
         #    本刀只新增了 `typing`（stdlib），故按 stdlib 白名单放行，
         #    第三方新增仍然会被抓住。

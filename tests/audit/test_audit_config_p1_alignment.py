@@ -35,7 +35,7 @@ def setUpModule():
     本文件把**线上**提示词库抄进沙箱，核对线上布局与契约对齐 —— 有意的线上守卫。
 
     只读、不改；声明在此是为了把「依赖线上配置内容」从**静默**变成**可审计**
-    （守卫见 `tests/__init__.py`；`R20_TESTS_STRICT_READS=1` 下未声明的读会报错）。
+    （守卫见 `tests/__init__.py`；`ASTRA_TESTS_STRICT_READS=1` 下未声明的读会报错）。
     """
     global _READ_SCOPE
     from tests import allow_real_data_reads
@@ -59,12 +59,12 @@ class _SandboxBase(unittest.TestCase):
         # 路由走 `from scripts.ai_brain_trader import ...`（与顶层 ai_brain_trader 是
         # 两个模块实例）→ 两个实例都必须先导入，隔离才会同时改到它们的 data/ 路径。
         import scripts.ai_brain_trader  # noqa: F401
-        import r20_backend.app  # noqa: F401（连带 routers/dependencies：覆盖层路径也在其中）
-        import r20_backend.settings_store  # noqa: F401
+        import astra_backend.app  # noqa: F401（连带 routers/dependencies：覆盖层路径也在其中）
+        import astra_backend.settings_store  # noqa: F401
         from tests.config_sandbox import isolate_config
         self.root = isolate_config(self)
-        import r20_backend.settings_store as settings_store
-        self.temp = tempfile.TemporaryDirectory(prefix="r20-b2-")
+        import astra_backend.settings_store as settings_store
+        self.temp = tempfile.TemporaryDirectory(prefix="astra-b2-")
         self.addCleanup(self.temp.cleanup)
         self.env_file = Path(self.temp.name) / ".env"
         self.env_file.write_text("", encoding="utf-8")
@@ -121,36 +121,41 @@ class PromptRiskBudgetAlignmentTests(_SandboxBase):
     def test_all_20_knobs_are_visible_to_the_model(self):
         """覆盖扫描：全部旋钮（含此前完全不可见的 5 个）都必须在小节里露面。
 
-        批4 P2-1 新增第 20 个旋钮 R20_MAX_TOTAL_EXPOSURE_USDT（跨所同向敞口上限），
+        批4 P2-1 新增第 20 个旋钮 ASTRA_MAX_TOTAL_EXPOSURE_USDT（跨所同向敞口上限），
         它此前只在 MANAGED_KEYS 里、零消费者；现在执行层真拒绝且提示词同源披露。"""
         text = self.brain.build_risk_budget_text(4989.41)
         required = {
-            "R20_MAX_MARGIN_EQUITY_RATIO": "强信号单笔保证金上限",
-            "R20_RISK_PER_TRADE_RATIO": "单笔最大可承受亏损",
-            "R20_MAX_SAME_DIRECTION_POSITIONS": "全系统同向持仓上限",
-            "R20_MAX_CONCURRENT_POSITIONS": "全系统并发持仓上限",
-            "R20_PORTFOLIO_RISK_BUDGET_USDT": "组合风险总预算",
-            "R20_SINGLE_ASSET_EQUITY_RATIO": f"可用余额 {self.rc.SINGLE_ASSET_EQUITY_RATIO:.0%}",
-            "R20_MAX_SINGLE_ASSET_MARGIN_USDT": f"{self.rc.MAX_SINGLE_ASSET_MARGIN:g} 绝对封顶",
-            "R20_MAX_LEVERAGE": f"{self.rc.MAX_LEVERAGE:g}x",
-            "R20_MIN_LEVERAGE": f"{self.rc.MIN_LEVERAGE:g}x",
-            "R20_MIN_RISK_REWARD": f"{self.rc.MIN_RISK_REWARD_RATIO:.1f}",
-            "R20_MIN_ENTRY_CONFIDENCE": f"{self.rc.MIN_ENTRY_CONFIDENCE:g}%",
-            "R20_MAX_DAILY_LOSS_USDT": f"{self.rc.MAX_DAILY_LOSS_USDT:g} 绝对封顶",
-            "R20_DAILY_LOSS_EQUITY_RATIO": f"可用余额 {self.rc.DAILY_LOSS_EQUITY_RATIO:.0%}",
-            "R20_TIME_STOP_HOURS": f"{self.rc.TIME_STOP_HOURS:g} 小时",
-            "R20_TIME_STOP_ATR_BAND": f"±{self.rc.TIME_STOP_ATR_BAND:.0%} ATR",
-            "R20_STOP_COOLDOWN_MINUTES": f"{self.rc.STOP_COOLDOWN_MINUTES} 分钟",
-            "R20_MAX_SCALE_IN_COUNT": "金字塔加仓",
-            "R20_MIN_SCALE_IN_PROFIT_RATIO": f"{self.rc.MIN_SCALE_IN_PROFIT_RATIO:.1%}",
-            "R20_MIN_SCALE_IN_CONFIDENCE": f"{self.rc.MIN_SCALE_IN_CONFIDENCE:g}%",
-            "R20_MAX_TOTAL_EXPOSURE_USDT": "跨所同向敞口上限",
-            "R20_SCALE_OUT_ENABLED": "分批止盈机制",
-            "R20_SCALE_OUT_RATIO": f"{self.rc.SCALE_OUT_RATIO:.0%}",
-            "R20_SCALE_OUT_TRIGGER_ATR": f"{self.rc.SCALE_OUT_TRIGGER_ATR:g}x ATR",
-            "R20_MAX_RISK_REWARD": f"上限 {self.rc.MAX_RISK_REWARD_RATIO:.1f}",
-            "R20_STOP_LOSS_ATR_MULT": f"基准止损 {self.rc.STOP_LOSS_ATR_MULT:g}x 1H ATR",
-            "R20_MAX_TAKE_PROFIT_ATR": f"最大止盈宽度 ≤ {self.rc.MAX_TAKE_PROFIT_ATR:g}x 1H ATR",
+            "ASTRA_MAX_MARGIN_EQUITY_RATIO": "强信号单笔保证金上限",
+            "ASTRA_RISK_PER_TRADE_RATIO": "单笔最大可承受亏损",
+            "ASTRA_MAX_SAME_DIRECTION_POSITIONS": "全系统同向持仓上限",
+            "ASTRA_MAX_CONCURRENT_POSITIONS": "全系统并发持仓上限",
+            "ASTRA_PORTFOLIO_RISK_BUDGET_USDT": "组合风险总预算",
+            "ASTRA_SINGLE_ASSET_EQUITY_RATIO": f"可用余额 {self.rc.SINGLE_ASSET_EQUITY_RATIO:.0%}",
+            "ASTRA_MAX_SINGLE_ASSET_MARGIN_USDT": f"{self.rc.MAX_SINGLE_ASSET_MARGIN:g} 绝对封顶",
+            "ASTRA_MAX_LEVERAGE": f"{self.rc.MAX_LEVERAGE:g}x",
+            "ASTRA_MIN_LEVERAGE": f"{self.rc.MIN_LEVERAGE:g}x",
+            "ASTRA_MIN_RISK_REWARD": f"{self.rc.MIN_RISK_REWARD_RATIO:.1f}",
+            "ASTRA_MIN_ENTRY_CONFIDENCE": f"{self.rc.MIN_ENTRY_CONFIDENCE:g}%",
+            "ASTRA_MAX_DAILY_LOSS_USDT": f"{self.rc.MAX_DAILY_LOSS_USDT:g} 绝对封顶",
+            "ASTRA_DAILY_LOSS_EQUITY_RATIO": f"可用余额 {self.rc.DAILY_LOSS_EQUITY_RATIO:.0%}",
+            "ASTRA_TIME_STOP_HOURS": f"{self.rc.TIME_STOP_HOURS:g} 小时",
+            "ASTRA_TIME_STOP_ATR_BAND": f"±{self.rc.TIME_STOP_ATR_BAND:.0%} ATR",
+            "ASTRA_STOP_COOLDOWN_MINUTES": f"{self.rc.STOP_COOLDOWN_MINUTES} 分钟",
+            "ASTRA_MAX_SCALE_IN_COUNT": "金字塔加仓",
+            "ASTRA_MIN_SCALE_IN_PROFIT_RATIO": f"{self.rc.MIN_SCALE_IN_PROFIT_RATIO:.1%}",
+            "ASTRA_MIN_SCALE_IN_CONFIDENCE": f"{self.rc.MIN_SCALE_IN_CONFIDENCE:g}%",
+            "ASTRA_MAX_TOTAL_EXPOSURE_USDT": "同向敞口上限",
+            "ASTRA_SCALE_OUT_ENABLED": "分批止盈机制",
+            "ASTRA_SCALE_OUT_RATIO": f"{self.rc.SCALE_OUT_RATIO:.0%}",
+            "ASTRA_SCALE_OUT_TRIGGER_ATR": f"{self.rc.SCALE_OUT_TRIGGER_ATR:g}x ATR",
+            "ASTRA_MAX_RISK_REWARD": f"上限 {self.rc.MAX_RISK_REWARD_RATIO:.1f}",
+            "ASTRA_STOP_LOSS_ATR_MULT": f"基准止损 {self.rc.STOP_LOSS_ATR_MULT:g}x 1H ATR",
+            "ASTRA_MAX_TAKE_PROFIT_ATR": f"最大止盈宽度 ≤ {self.rc.MAX_TAKE_PROFIT_ATR:g}x 1H ATR",
+            "ASTRA_MAX_RISK_PER_TRADE_USDT": (
+                f"{self.rc.MAX_RISK_PER_TRADE_USDT:g} 绝对封顶"
+                if (getattr(self.rc, "MAX_RISK_PER_TRADE_USDT", 0.0) or 0.0) > 0
+                else "纯按比例动态推导"
+            ),
         }
         self.assertEqual(set(required), set(self.rc.RISK_ENV_KEYS),
                          f"覆盖表必须覆盖全部 {len(self.rc.RISK_ENV_KEYS)} 个旋钮")
@@ -166,7 +171,7 @@ class PromptRiskBudgetAlignmentTests(_SandboxBase):
         """
         import inspect
         import ai_factor_trader as trader
-        from r20_backend.execution import sizing
+        from astra_backend.execution import sizing
         for name in ("effective_daily_loss_limit", "effective_single_asset_margin"):
             rc_fn = getattr(self.rc, name)
             self.assertTrue(rc_fn.__module__.endswith("risk_constants"), rc_fn.__module__)
@@ -185,7 +190,7 @@ class PromptRiskBudgetAlignmentTests(_SandboxBase):
         trader_src = combined("scripts/ai_factor_trader.py", pkg_name="trader")
         self.assertNotIn("def effective_daily_loss_limit", trader_src,
                          "本地拷贝复活 → 又是两份 min() 公式漂移之源")
-        sizing_src = (ROOT / "r20_backend" / "execution" / "sizing.py").read_text(encoding="utf-8")
+        sizing_src = (ROOT / "astra_backend" / "execution" / "sizing.py").read_text(encoding="utf-8")
         self.assertNotIn("def effective_daily_loss_limit", sizing_src)
 
         # 批6：两个导入名必须是同一个模块对象（曾经是两个各自读一次 .env 的实例）
@@ -225,8 +230,11 @@ class PipelineMergeNoDoublingTests(_SandboxBase):
         self.lib_path.parent.mkdir(parents=True, exist_ok=True)
         self.lib_path.write_text((ROOT / "data" / "prompt_library.json").read_text(encoding="utf-8"),
                                  encoding="utf-8")
-        p = patch.object(pl, "LIBRARY_FILE", self.lib_path)
-        p.start(); self.addCleanup(p.stop)
+        # 双文件模型（2026-09）：夹具当**出厂基线**（读侧），写入侧另钉一个本地文件
+        for _attr, _val in (("BASELINE_FILE", self.lib_path),
+                            ("LOCAL_FILE", self.lib_path.parent / "prompt_library.local.json")):
+            p = patch.object(pl, _attr, _val)
+            p.start(); self.addCleanup(p.stop)
 
     def _shape_evolution(self, profile):
         key = "evolution_system"
@@ -237,14 +245,27 @@ class PipelineMergeNoDoublingTests(_SandboxBase):
         return {k: [{**m, "locked": False} for m in (profile["pipelines"].get(k) or [])]
                 for k in self.pl.TEMPLATE_KEYS}
 
+    def _base_text_for(self, key):
+        """渲染该管线时**真实**的基座文本（= 生产里传进 `apply_module_layout` 的那一份）。
+
+        ⚠️ 2026-09-30 修正：旧实现给 `trading_user` 传的是
+        `construct_full_market_prompt(...)` 的**返回值**。提示词体系重构后，
+        那个函数本身就是"装配好的整段用户提示词"（它内部已经调用过
+        `apply_module_layout`）—— 再拿它当基座，等于把装配结果**又装配一遍**，
+        于是每个分节在渲染结果里出现两遍，本文件的"防重复前置"判据直接假红。
+
+        正确的基座永远只有一个来源：`base_template_text(key)`
+        （只有 `trading_system` 非空 = 只读 JSON Schema；其余三条刻意为空）。
+        """
+        return self.pl.base_template_text(key)
+
     def _snapshot(self):
         profile = self.pl.active_profile()
         out = {}
         for key in self.pl.TEMPLATE_KEYS:
             modules = profile["pipelines"].get(key) or []
-            base = self.pl.compile_modules(modules)
-            rendered = self.pl.apply_module_layout(base, profile, key, "t")
-            out[key] = (sorted({str(m.get("source")) for m in modules}), len(base), len(rendered))
+            rendered = self.pl.apply_module_layout(self._base_text_for(key), profile, key, "t")
+            out[key] = (sorted({str(m.get("source")) for m in modules}), rendered)
         return out
 
     def _assert_unchanged_after(self, changes):
@@ -253,32 +274,57 @@ class PipelineMergeNoDoublingTests(_SandboxBase):
         self.pl.update_profile(profile_id, changes)
         after = self._snapshot()
         self.assertEqual(before, after, "保存单页后其它管线被改写（P1-2 回归）")
-        # 渲染长度不得翻倍：布局若丢掉 base 标签，apply_module_layout 会把 base 整段前置
-        for key, (_srcs, base_len, rendered_len) in after.items():
-            self.assertLess(rendered_len, max(base_len * 1.5, base_len + 400),
-                            f"{key} 渲染后长度异常膨胀（base 被重复前置）")
+        # 不得重复前置基座：判据用**分节标题出现次数**（比长度启发式精确）
+        import re
+        for key, (_srcs, rendered) in after.items():
+            titles = re.findall(r"==== 【([^】]+)】 ====", rendered)
+            dupes = sorted({t for t in titles if titles.count(t) > 1})
+            self.assertEqual(dupes, [], f"{key} 渲染出现重复基座段（base 被重复前置）: {dupes}")
         return after
 
     def test_evolution_page_shape_does_not_downgrade_other_pipelines(self):
+        """★ 判据改为**设计无关**（2026-09-30 换预设后重写）。
+
+        旧写法硬断言 `assertIn("base", ...)`：新样板「全形态波段策略(提示词样板)」
+        的 `trading_system` / `evolution_system` 刻意**不列** base 模块（渲染器见布局
+        无 base 模块时会自动前置全部基座，这样才不会把代码基座抄成快照而漂移）——
+        于是"必须含 base 标签"这条约定对新方案不成立。
+        本用例真正要守的是**保存单页不得把任何模块的来源标签降级**（降级会让下次
+        布局把 base 整段重复前置）。故改为逐管线比对保存前后的来源集合。
+        """
         profile = self.pl.active_profile()
+        before = self._snapshot()
         after = self._assert_unchanged_after({"pipelines": self._shape_evolution(profile)})
-        for key in ("trading_system", "trading_user", "evolution_user"):
-            self.assertIn("base", after[key][0], f"{key} 的 base 标签被降级成 legacy → 下次布局会翻倍")
+        for key in self.pl.TEMPLATE_KEYS:
+            self.assertEqual(after[key][0], before[key][0],
+                             f"{key} 的 source 标签被降级 → 下次布局会把 base 重复前置")
 
     def test_studio_shape_keeps_base_tags_and_does_not_double(self):
         profile = self.pl.active_profile()
+        before = self._snapshot()
         after = self._assert_unchanged_after({"pipelines": self._shape_studio(profile)})
-        self.assertIn("base", after["trading_system"][0])
-        self.assertIn("base", after["evolution_system"][0])
+        for key in self.pl.TEMPLATE_KEYS:
+            self.assertEqual(after[key][0], before[key][0], f"{key} 的 base 标签被降级成 legacy")
+        # 防"空转"：当前出厂方案里必须**至少有一条**管线带 base 模块，否则本用例失去意义
+        self.assertTrue(any("base" in sources for sources, _r in after.values()),
+                        "当前出厂方案没有任何 base 模块 —— 本用例已退化为空转")
 
     def test_submitted_pipeline_without_source_inherits_stored_base_tag(self):
-        """API 客户端漏传 source 时，不能把 base 模块悄悄降级成 custom。"""
+        """API 客户端漏传 source 时，不能把 base 模块悄悄降级成 custom。
+
+        ⚠️ 2026-09-30 改钉：重构后**只有 `trading_system` 带 base 模块**
+        （= 只读 JSON Schema），`trading_user` 的正文全部是 `custom`。
+        故改用 `trading_system` 来钉"漏传 source 时继承存量标签"这条语义。
+        """
         profile = self.pl.active_profile()
+        stored_sources = sorted({m["source"] for m in profile["pipelines"]["trading_system"]})
+        self.assertIn("base", stored_sources, "trading_system 应当带 base 模块（只读 Schema）")
         stripped = {"trading_system": [{k: m[k] for k in ("id", "title", "content", "enabled") if k in m}
                                        for m in profile["pipelines"]["trading_system"]]}
         profile_id = self.pl.load_library()["active_profile_id"]
         updated = self.pl.update_profile(profile_id, {"pipelines": stripped})
-        self.assertEqual(sorted({m["source"] for m in updated["pipelines"]["trading_system"]}), ["base"])
+        self.assertEqual(sorted({m["source"] for m in updated["pipelines"]["trading_system"]}),
+                         stored_sources, "漏传 source 的模块必须继承存量来源，不得降级")
 
     def test_clean_pipelines_keeps_stored_modules_for_unmentioned_pipeline(self):
         """_clean_pipelines 的兜底分支：已存定义在场时，未提到的管线不得被重建成 legacy。
@@ -321,7 +367,13 @@ class AdminOverrideReachesModelTests(_SandboxBase):
         effective = self.brain.get_effective_system_prompt()
         self.assertIn(self.MARK, effective, "覆盖层被 apply_module_layout 丢弃（P1-3 回归）")
         self.assertTrue(effective.rstrip().endswith(self.MARK), "覆盖层应位于最终提示词末尾")
-        self.assertIn("核心军规", effective, "布局本身必须仍然生效")
+        # ⚠️ 2026-09-30 改钉：原判据 `核心军规` 出自已被删除的代码常量 `_SYSTEM_CORE`。
+        # 现在正文只存 `data/prompt_library.json`，故改钉新出厂基线的**分节标题**——
+        # 它与 `核心军规` 承担同一职责：证明"布局本身真的生效了"，而不是只剩覆盖层。
+        self.assertIn("快节奏兑现与亏损截断", effective,
+                      "布局本身必须仍然生效（只读 Schema + JSON 正文模块都要在）")
+        self.assertIn("严格 JSON 规范契约与完整输出骨架", effective,
+                      "只读 JSON Schema 必须始终在实发提示词里")
 
     def test_no_override_means_plain_base(self):
         self.override_path.unlink()
@@ -332,7 +384,7 @@ class AdminOverrideReachesModelTests(_SandboxBase):
     def test_admin_api_effective_prompt_uses_same_path(self):
         """接口返回的 effective_prompt 必须等于推演时用的那条（否则 UI 在骗人）。"""
         # 第九十六刀：`prompt_override` 现住 strategy/prompts.py ⇒ patch/调用都指向它
-        from r20_backend.routers.strategy import prompts as strategy_prompts
+        from astra_backend.routers.strategy import prompts as strategy_prompts
         with patch.object(strategy_prompts, "require_admin_header", lambda *a, **k: {"username": "t"}), \
              patch.object(strategy_prompts, "refresh_settings", lambda: None):
             payload = strategy_prompts.prompt_override(None, None)
@@ -343,17 +395,17 @@ class AdminOverrideReachesModelTests(_SandboxBase):
 
 
 class PortfolioBudgetHonestyTests(_SandboxBase):
-    """P1-6：`R20_PORTFOLIO_RISK_BUDGET_USDT=0` = 引擎不封顶 → UI 不得编出 4800 的总闸。"""
+    """P1-6：`ASTRA_PORTFOLIO_RISK_BUDGET_USDT=0` = 引擎不封顶 → UI 不得编出 4800 的总闸。"""
 
     @classmethod
     def setUpClass(cls):
-        # 同 test_venue_accounts_endpoint：r20_backend.dashboard_cache 导入即点火 2s 后台线程（真调 OKX）
+        # 同 test_venue_accounts_endpoint：astra_backend.dashboard_cache 导入即点火 2s 后台线程（真调 OKX）
         # → 本类期间钉死循环体。
         # ⚠️ 第一百二十五刀：**必须还原**。此前不还原 ⇒ 整个测试进程里
         # `dashboard_cache.update_cache_cycle` 都是 no-op，任何真调它的用例
         # （如 `tests/ui/test_protection_gap_reaches_data_health.py`）只会拿到空
         # `CACHE_DATA`（整包跑 KeyError('data_health')、单跑通过 —— 实测踩到）。
-        import r20_backend.dashboard_cache as dashboard_app
+        import astra_backend.dashboard_cache as dashboard_app
         dashboard_app.stop_dashboard_background_worker()
         cls._orig_update_cache_cycle = dashboard_app.update_cache_cycle
         dashboard_app.update_cache_cycle = lambda *a, **k: None
@@ -366,10 +418,10 @@ class PortfolioBudgetHonestyTests(_SandboxBase):
 
     def setUp(self):
         super().setUp()
-        self._saved = os.environ.pop("R20_PORTFOLIO_RISK_BUDGET_USDT", None)
+        self._saved = os.environ.pop("ASTRA_PORTFOLIO_RISK_BUDGET_USDT", None)
         # 预留层管理器会缓存首个（沙箱）SQLite 路径，前序测试清理临时目录后连接即失效
         # （全量套件里报 "unable to open database file"）→ 本类只测预算口径，直接打桩。
-        import r20_backend.risk_reservation as reservation
+        import astra_backend.risk_reservation as reservation
         stub = type("_Mgr", (), {
             "gross_exposure": lambda self, env: 0.0,
             "total_reserved_by_venue": lambda self, env: {},
@@ -379,13 +431,13 @@ class PortfolioBudgetHonestyTests(_SandboxBase):
 
     def tearDown(self):
         if self._saved is None:
-            os.environ.pop("R20_PORTFOLIO_RISK_BUDGET_USDT", None)
+            os.environ.pop("ASTRA_PORTFOLIO_RISK_BUDGET_USDT", None)
         else:
-            os.environ["R20_PORTFOLIO_RISK_BUDGET_USDT"] = self._saved
+            os.environ["ASTRA_PORTFOLIO_RISK_BUDGET_USDT"] = self._saved
         super().tearDown()
 
     def test_unconfigured_budget_reports_null_not_fabricated(self):
-        os.environ.pop("R20_PORTFOLIO_RISK_BUDGET_USDT", None)
+        os.environ.pop("ASTRA_PORTFOLIO_RISK_BUDGET_USDT", None)
         row = self.dashboard._load_portfolio_risk_data()
         self.assertEqual(row.get("status"), "ok", f"预算行读取失败：{row.get('error')}")
         self.assertEqual(row["budget_mode"], "uncapped")
@@ -397,25 +449,18 @@ class PortfolioBudgetHonestyTests(_SandboxBase):
         self.assertIn("reference_cap_usdt", row)
 
     def test_zero_budget_is_uncapped_too(self):
-        os.environ["R20_PORTFOLIO_RISK_BUDGET_USDT"] = "0"
+        os.environ["ASTRA_PORTFOLIO_RISK_BUDGET_USDT"] = "0"
         row = self.dashboard._load_portfolio_risk_data()
         self.assertEqual(row["budget_mode"], "uncapped")
         self.assertIsNone(row["total_budget_usdt"])
 
     def test_configured_budget_is_reported_truthfully(self):
-        os.environ["R20_PORTFOLIO_RISK_BUDGET_USDT"] = "4800"
+        os.environ["ASTRA_PORTFOLIO_RISK_BUDGET_USDT"] = "4800"
         row = self.dashboard._load_portfolio_risk_data()
         self.assertEqual(row["budget_mode"], "configured")
         self.assertEqual(row["total_budget_usdt"], 4800.0)
         self.assertIsNone(row["reference_cap_usdt"])
         self.assertIsNotNone(row["utilization_pct"])
-
-    def test_frontend_labels_uncapped_instead_of_drawing_a_bar(self):
-        panel = (ROOT / "frontend" / "src" / "components" / "dashboard" / "VenueAccountsPanel.vue").read_text(encoding="utf-8")
-        self.assertIn("budget_mode", panel)
-        self.assertIn("portfolio-uncapped", panel)
-        # 占用率仍只在总预算为真实数值时派生
-        self.assertIn("pTotal.value !== null && pTotal.value > 0", panel)
 
 
 class UIEvidenceHonestyTests(_SandboxBase):

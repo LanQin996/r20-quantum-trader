@@ -1,8 +1,8 @@
 """Regression for linear event indexing without dropping historical evidence."""
 from unittest.mock import patch
 from tests.test_analysis_archive import AnalysisTests, ACCOUNT, START, position
-from r20_backend.analysis_store import lifecycle_id
-from r20_backend.analysis_sync import reconcile
+from astra_backend.analysis_store import lifecycle_id
+from astra_backend.analysis_sync import reconcile
 
 
 class ReconcileIndexTests(AnalysisTests):

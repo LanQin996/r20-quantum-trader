@@ -13,11 +13,11 @@ from unittest.mock import patch
 import zipfile
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from r20_backend.analysis_store import Archive, lifecycle_id, normalize_position, timestamp_ms, sanitize
-from r20_backend.analysis_metrics import summarize, breakdown
-from r20_backend.analysis_sync import sync_source, reconcile
-from r20_backend import analysis_capture as capture, analysis_service as service
-from r20_backend.analysis_routes import install_routes
+from astra_backend.analysis_store import Archive, lifecycle_id, normalize_position, timestamp_ms, sanitize
+from astra_backend.analysis_metrics import summarize, breakdown
+from astra_backend.analysis_sync import sync_source, reconcile
+from astra_backend import analysis_capture as capture, analysis_service as service
+from astra_backend.analysis_routes import install_routes
 
 START = 1788825600000
 ACCOUNT = "okx:live:test-account"
@@ -33,8 +33,8 @@ class AnalysisTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.path = self.root/"r20_quant.db"
-        self.env = patch.dict(os.environ,{"R20_TESTING":"1","R20_ANALYSIS_DB":str(self.path)})
+        self.path = self.root/"astra_quant.db"
+        self.env = patch.dict(os.environ,{"ASTRA_TESTING":"1","ASTRA_ANALYSIS_DB":str(self.path)})
         self.env.start()
         self.archive = Archive(self.path)
         self.saved = patch.object(service,"saved_configuration",return_value={"risk":{"min_rr":2},"prompts":"当前配置"})
@@ -352,13 +352,13 @@ class AnalysisTests(unittest.TestCase):
 
     def test_authenticated_read_api_and_full_export_not_page_only(self):
         app=FastAPI()
-        def auth(x_r20_session=None):
-            if x_r20_session!="test": raise HTTPException(status_code=401)
+        def auth(x_astra_session=None):
+            if x_astra_session!="test": raise HTTPException(status_code=401)
         install_routes(app,auth)
         client=TestClient(app)
         self.archive.upsert_trades(ACCOUNT,[normalize_position(position(i)) for i in range(1,45)])
         query=f"?account={ACCOUNT}&start=2026-09-01&end=2026-10-01"
-        headers={"X-R20-Session":"test"}
+        headers={"X-Astra-Session":"test"}
         for endpoint in ("summary","trades","events","configurations/current","export"):
             self.assertEqual(client.get("/api/v1/admin/analysis/"+endpoint+query).status_code,401)
         response=client.get("/api/v1/admin/analysis/trades"+query,headers=headers)

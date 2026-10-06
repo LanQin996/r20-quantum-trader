@@ -6,8 +6,8 @@
 
 | 表 | 位置 | 作用 |
 |---|---|---|
-| `MANAGED_KEYS` | `r20_backend/settings_store.py` | 后台设置接口可读写的键 |
-| `SECRET_KEYS` | `r20_gateway/secrets.py` | 加密密钥库里允许存的键 |
+| `MANAGED_KEYS` | `astra_backend/settings_store.py` | 后台设置接口可读写的键 |
+| `SECRET_KEYS` | `astra_gateway/secrets.py` | 加密密钥库里允许存的键 |
 | `RISK_ENV_KEYS` | `scripts/risk_constants.py` | 「风控管理页」写入、交易侧读取的键 |
 
 表里多一个**谁都不读**的键 ⇒ 操作者在后台改了它、系统毫无反应（配置假象，比没有更坏）。
@@ -34,15 +34,38 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCAN_DIRS = ("scripts", "r20_backend", "r20_gateway", "plugins")
+SCAN_DIRS = ("scripts", "astra_backend", "astra_gateway", "plugins")
 ENV_DICT_RECEIVERS = {"env", "environment", "env_vars", "_env", "env_map"}
 
-#: 凭证解析器的档位后缀（取自 `r20_backend/exchanges/registry.py::venue_credentials`）
+#: 凭证解析器的档位后缀（取自 `astra_backend/exchanges/registry.py::venue_credentials`）
 TIER_SUFFIXES = ("LIVE", "DEMO", "TESTNET", "SANDBOX")
 CREDENTIAL_FIELDS = ("API_KEY", "SECRET_KEY", "PASSPHRASE")
 
-#: 允许"表里有、确实没人消费"的键（附理由）。当前为空。
-ALLOWLIST: dict[str, str] = {}
+#: 允许"表里有、确实没人消费"的键（附理由）。
+#:
+#: ⚠️ 唯一的例外族是密文库里**已下架场所**的凭证槽位：本系统已收口为 OKX 专用，
+#: `registry.venue_credentials` 只接受已登记场所（OKX）⇒ 这些槽位既没有消费方，
+#: 也**没有写入方**（后台凭证面板与 `secret_map` 已随多所移除）。
+#: 刻意不删它们的理由：`astra_gateway.secrets::_decrypt_store` 按 `SECRET_KEYS`
+#: 白名单过滤读取，**删键位会让下次写入时持久化地丢弃已存密文** —— 凭证清理是
+#: 运营动作（由用户执行），不该被一次代码重构顺手做掉。
+_RETAINED_REMOVED_VENUE_SLOTS = (
+    "BINANCE_API_KEY", "BINANCE_SECRET_KEY",
+    "BINANCE_LIVE_API_KEY", "BINANCE_LIVE_SECRET_KEY",
+    "BINANCE_DEMO_API_KEY", "BINANCE_DEMO_SECRET_KEY",
+    "BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_SECRET_KEY",
+    "GATE_API_KEY", "GATE_SECRET_KEY",
+    "GATE_LIVE_API_KEY", "GATE_LIVE_SECRET_KEY",
+    "GATE_DEMO_API_KEY", "GATE_DEMO_SECRET_KEY",
+    "GATE_TESTNET_API_KEY", "GATE_TESTNET_SECRET_KEY",
+    "GATE_SANDBOX_API_KEY", "GATE_SANDBOX_SECRET_KEY",
+)
+_RETAINED_REASON = (
+    "已下架场所的凭证槽位：系统 OKX 专用后既无消费方也无写入方。"
+    "保留键位是为了不丢失已存密文（`_decrypt_store` 按 SECRET_KEYS 过滤；"
+    "删键会让下次写入时永久丢弃旧凭证）。凭证清理属运营动作，由用户执行。"
+)
+ALLOWLIST: dict[str, str] = {slot: _RETAINED_REASON for slot in _RETAINED_REMOVED_VENUE_SLOTS}
 
 
 def _looks_like_key(name: str) -> bool:
@@ -52,18 +75,18 @@ def _looks_like_key(name: str) -> bool:
 def _tables() -> dict:
     """三张表 → (键集合, 表所在文件, 表占用行区间)。"""
     tables = {}
-    ss = (ROOT / "r20_backend" / "settings_store.py").read_text(encoding="utf-8")
+    ss = (ROOT / "astra_backend" / "settings_store.py").read_text(encoding="utf-8")
     a = ss.index("MANAGED_KEYS = {")
     b = ss.index("}\n", a)
     tables["MANAGED_KEYS"] = (set(re.findall(r'"([A-Z][A-Z0-9_]+)"', ss[a:b])),
-                              "r20_backend/settings_store.py",
+                              "astra_backend/settings_store.py",
                               (ss[:a].count("\n") + 1, ss[:b].count("\n") + 1))
 
-    gw = (ROOT / "r20_gateway" / "secrets.py").read_text(encoding="utf-8")
+    gw = (ROOT / "astra_gateway" / "secrets.py").read_text(encoding="utf-8")
     a2 = gw.index("SECRET_KEYS = {")
     b2 = gw.index("}\n", a2)
     tables["SECRET_KEYS"] = (set(re.findall(r'"([A-Z][A-Z0-9_]+)"', gw[a2:b2])),
-                             "r20_gateway/secrets.py",
+                             "astra_gateway/secrets.py",
                              (gw[:a2].count("\n") + 1, gw[:b2].count("\n") + 1))
 
     rc = (ROOT / "scripts" / "risk_constants.py").read_text(encoding="utf-8")
@@ -124,10 +147,10 @@ def _evidence() -> tuple:
 
 
 #: 解析器认识的场所（`registry.py::venue_credentials` 里 key 由 venue 名大写拼出）。
-#: 新增场所必须同步加进来 —— 否则它的凭证键会被本门判红（刻意的强制函数）。
-VENUES = {"OKX", "BINANCE", "GATE"}
+#: 本系统已收口为 **OKX 专用** ⇒ 只有 OKX 的凭证键是真的可被解析器消费的。
+VENUES = {"OKX"}
 
-#: 凭证字段后缀（**按后缀比对**：`BINANCE_LIVE_API_KEY` 按 `_` 切分后末 token 是 "KEY"，
+#: 凭证字段后缀（**按后缀比对**：`OKX_LIVE_API_KEY` 按 `_` 切分后末 token 是 "KEY"，
 #: 不是 "API_KEY" —— 本门第一版就是这么错判的）
 CREDENTIAL_SUFFIXES = ("_API_KEY", "_SECRET_KEY", "_PASSPHRASE")
 
@@ -181,18 +204,32 @@ class ConfigTablesAreConsumedTest(unittest.TestCase):
         self.assertGreaterEqual(len(literals), 300,
                                 f"大写字面量集合只有 {len(literals)} 个 ⇒ 扫描失效")
         # 档位链通道必须真的在起作用：抽查两个只可能靠它通过的键
-        for cred in ("BINANCE_TESTNET_API_KEY", "GATE_SANDBOX_SECRET_KEY"):
+        for cred in ("OKX_TESTNET_API_KEY", "OKX_SANDBOX_SECRET_KEY",
+                     "OKX_LIVE_API_KEY", "OKX_DEMO_PASSPHRASE"):
             self.assertTrue(tier_pattern_match(cred), f"{cred} 应由档位链通道判定为可消费")
 
     def test_tier_pattern_is_not_a_rubber_stamp(self):
         """牙齿：与凭证档位无关的键不得被档位通道放行。"""
-        for not_cred in ("R20_NOTIFY_QQ_ENABLED", "R20_MAX_LEVERAGE", "LLM_MODEL",
-                         "R20_GATEWAY_DB", "FOO_API_KEY", "BINANCE_LIVE_URL", "OKX_LIVE"):
+        for not_cred in ("ASTRA_NOTIFY_QQ_ENABLED", "ASTRA_MAX_LEVERAGE", "LLM_MODEL",
+                         "ASTRA_GATEWAY_DB", "FOO_API_KEY", "OKX_LIVE_URL", "OKX_LIVE",
+                         # 已下架场所的凭证键**不再**被档位通道放行（单所口径）——
+                         # 它们靠上面的显式登记过门，而不是靠一个万能后缀模式。
+                         "FOO_TESTNET_API_KEY"):
             self.assertFalse(tier_pattern_match(not_cred), f"{not_cred} 不该被档位通道放行")
 
+    def test_retained_removed_venue_slots_are_explicitly_registered(self):
+        """已下架场所的凭证槽位必须**逐条**登记（不得靠放宽 VENUES 混过去）。"""
+        self.assertTrue(ALLOWLIST, "保留槽位登记表不该为空（否则它已过期）")
+        for slot in _RETAINED_REMOVED_VENUE_SLOTS:
+            self.assertFalse(tier_pattern_match(slot),
+                             f"{slot} 不该再被档位通道放行 —— 单所口径下它已无消费方")
+            self.assertIn(slot, ALLOWLIST)
+        for slot, reason in ALLOWLIST.items():
+            self.assertGreaterEqual(len(str(reason).strip()), 20, f"{slot} 的理由太短")
+
     def test_teeth_on_a_dead_table_key(self):
-        reads, literals = {"R20_EXISTING_KNOB": "x:1"}, {"R20_EXISTING_KNOB": "x:1"}
-        key = "R20_NOBODY_CONSUMES_ME"
+        reads, literals = {"ASTRA_EXISTING_KNOB": "x:1"}, {"ASTRA_EXISTING_KNOB": "x:1"}
+        key = "ASTRA_NOBODY_CONSUMES_ME"
         self.assertFalse(key in reads or tier_pattern_match(key) or key in literals,
                          "没人消费的表键必须被判为死键 ⇒ 门没有牙齿")
 

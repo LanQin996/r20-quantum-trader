@@ -9,9 +9,9 @@ if str(ROOT) not in sys.path:
 
 def main():
     from scripts.file_lock import cycle_lock, LockContended
-    from r20_backend.analysis_store import db_path
-    from r20_backend.analysis_capture import enabled, fault
-    from r20_backend.analysis_sync import sync_archive
+    from astra_backend.analysis_store import db_path
+    from astra_backend.analysis_capture import enabled, fault
+    from astra_backend.analysis_sync import sync_archive
     from scripts.okx_runtime import current_environment
     from scripts import okx_rest
     if not enabled():

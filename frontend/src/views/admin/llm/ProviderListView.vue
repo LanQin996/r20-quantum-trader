@@ -25,7 +25,8 @@ import { fmtDateTime } from '../../../utils/format'
 import { useI18n } from '../../../composables/useI18n'
 import { useLlmCtx } from './injection'
 import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, Clock, History, Plus,
-  RefreshCw, Save, Search, ShieldAlert, X, Server, Brain, Timer, Route } from 'lucide-vue-next'
+  RefreshCw, Save, Search, ShieldAlert, X, Server, Brain, Timer, Route,
+  Sparkles, Cpu } from 'lucide-vue-next'
 import BaseLoadingAnnounce from '../../../components/base/BaseLoadingAnnounce.vue';
 
 const { t } = useI18n()
@@ -53,7 +54,49 @@ const {
   thinkingTimeoutInput,
   toggleFallback,
   toggleProviderQuick,
+  // 结构自检（2026-09-29）：可用性徽标 / 全部测试 / 清理失效条目
+  testAllLoading,
+  testAllModels,
+  testAllResult,
+  cleanupDeadModels,
+  cleanupLoading,
+  cleanupResult,
+  deadModelIds,
+  healthWarnings,
+  providerHealth,
+  cacheStatus,
 } = useLlmCtx()
+
+/** 紧凑型 Token 数量格式化：101.45M / 71.94M / 122.5K */
+function fmtTokensCompact(val: number | string | null | undefined): string {
+  const n = Number(val || 0)
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 10_000) return `${(n / 1_000).toFixed(1)}K`
+  return Number(n).toLocaleString()
+}
+
+/** 输入 Token 占总消耗比例 */
+const inputTokenPct = computed(() => {
+  const total = cacheStatus.value?.model_stats?.total_tokens || 1
+  const inp = cacheStatus.value?.model_stats?.input_tokens_total || 0
+  return Math.min(100, Math.max(0, Math.round((inp / total) * 100)))
+})
+
+/** 输出 Token 占总消耗比例 */
+const outputTokenPct = computed(() => {
+  const total = cacheStatus.value?.model_stats?.total_tokens || 1
+  const out = cacheStatus.value?.model_stats?.output_tokens_total || 0
+  return Math.min(100, Math.max(0, Math.round((out / total) * 100)))
+})
+
+/** 推理/思考 Token 占总消耗比例 */
+const reasoningTokenPct = computed(() => {
+  const total = cacheStatus.value?.model_stats?.total_tokens || 1
+  const rea = cacheStatus.value?.model_stats?.reasoning_tokens_total || 0
+  return Math.min(100, Math.max(0, Math.round((rea / total) * 100)))
+})
 
 /** 首次加载中（尚无配置可渲染）→ 骨架 */
 const cfgFirstLoad = computed(() => loading.value && !cfg.value)
@@ -140,11 +183,32 @@ const bandFacts = () => [
 
 <template>
   <div class="pv">
-    <PageHeader :title="t('nav.admin.llm')" :description="t('admin.llm.desc')">
+    <PageHeader :title="t('nav.admin.llm')">
       <template #actions>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="loadConfig">
           <RefreshCw :size="14" :class="loading && 'animate-spin shrink-0'" />
           <span>{{ t('admin.llm.refreshStatus') }}</span>
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          :disabled="testAllLoading"
+          :title="t('admin.llm.testAllTitle')"
+          @click="testAllModels()"
+        >
+          <ShieldAlert :size="14" :class="testAllLoading && 'animate-spin shrink-0'" />
+          <span>{{ testAllLoading ? t('admin.llm.testingAll') : t('admin.llm.testAll') }}</span>
+        </button>
+        <button
+          v-if="deadModelIds.length"
+          type="button"
+          class="btn btn-ghost btn-sm is-danger"
+          :disabled="cleanupLoading"
+          :title="t('admin.llm.cleanupDeadTitle')"
+          @click="cleanupDeadModels()"
+        >
+          <X :size="14" />
+          <span>{{ t('admin.llm.cleanupDead', undefined, { n: deadModelIds.length }) }}</span>
         </button>
         <button type="button" class="btn btn-primary btn-sm" :title="t('admin.llm.addProviderTitle')" @click="openAddProviderModal">
           <Plus :size="14" />
@@ -153,6 +217,57 @@ const bandFacts = () => [
       </template>
     </PageHeader>
 
+
+    <!-- ══ 结构自检 / 真机全量测试（2026-09-29） ══
+         为什么在列表页：后台此前把三条模型并列显示、其中两条是死的（无密钥 /
+         供应商不存在）却毫无标记，`fallback_model_ids` 又是空的（等于没有回退）。
+         自检结果由后端 `model_health` 下发，真机结论由 `/test-all` 现场探测。 -->
+    <section v-if="healthWarnings.length || testAllResult || cleanupResult" class="card">
+      <header class="card-head">
+        <div>
+          <h2 class="card-title"><ShieldAlert :size="14" />{{ t('admin.llm.selfCheckTitle') }}</h2>
+        </div>
+      </header>
+
+      <div v-if="healthWarnings.length" class="pv-body">
+        <div v-for="w in healthWarnings" :key="w.code" class="pv-kv">
+          <span class="label-caps is-warn">{{ t('admin.llm.selfCheckWarn') }}</span>
+          <span class="pv-kv-v">{{ w.detail }}</span>
+        </div>
+      </div>
+
+      <div v-if="cleanupResult" class="pv-body">
+        <div class="pv-kv">
+          <span class="label-caps">{{ t('admin.llm.cleanupResult') }}</span>
+          <span class="pv-kv-v mono">
+            {{ t('admin.llm.cleanupRemoved', undefined, { n: (cleanupResult.removed || []).length }) }}
+            <template v-if="(cleanupResult.failed || []).length">
+              · {{ t('admin.llm.cleanupFailed', undefined, { n: cleanupResult.failed.length }) }}
+            </template>
+          </span>
+        </div>
+      </div>
+
+      <div v-if="testAllResult" class="pv-body selfcheck-rows">
+        <div v-for="row in testAllResult.rows || []" :key="row.model" class="pv-kv selfcheck-row">
+          <span class="label-caps mono">{{ row.model }}</span>
+          <span class="pv-kv-v mono">
+            <span class="badge" :class="row.ok ? 'badge-up' : (row.skipped ? 'badge-warn' : 'badge-down')">
+              {{ row.ok ? t('admin.llm.selfCheckOk') : (row.skipped ? t('admin.llm.selfCheckSkipped') : t('admin.llm.selfCheckFail')) }}
+            </span>
+            <span class="selfcheck-fmt">{{ row.api_format }}</span>
+            <span v-if="row.latency_ms" class="selfcheck-lat">{{ row.latency_ms }}ms</span>
+            <span
+              v-if="row.error"
+              role="status"
+              aria-live="polite"
+              class="selfcheck-err truncate"
+              :title="row.error"
+            >{{ row.error }}</span>
+          </span>
+        </div>
+      </div>
+    </section>
     <!-- ══ 状态带 ══ -->
     <section class="card band">
       <div v-for="f in bandFacts()" :key="f.label" class="fact">
@@ -194,7 +309,6 @@ const bandFacts = () => [
       <div class="pv-field">
         <div class="pv-field-head">
           <span class="form-label">{{ t('admin.llm.effort') }}</span>
-          <span class="pv-hint">{{ t('admin.llm.desc') }}</span>
         </div>
         <div class="pv-field-row">
           <div class="pv-presets">
@@ -261,7 +375,6 @@ const bandFacts = () => [
       <header class="card-head">
         <div>
           <h2 class="card-title"><ShieldAlert :size="14" />{{ t('admin.llm.resilienceTitle') }}</h2>
-          <p class="card-sub">{{ t('admin.llm.resilienceDesc') }}</p>
         </div>
         <span class="badge mono">
           {{ t('admin.llm.attemptsChip', undefined, { n: cfg?.request_attempts || 3, m: (cfg?.fallback_model_ids || []).length }) }}
@@ -307,7 +420,6 @@ const bandFacts = () => [
               </button>
             </div>
           </div>
-          <p class="pv-hint block">{{ t('admin.llm.attemptsDesc') }}</p>
         </div>
 
         <!-- 回退链 -->
@@ -384,6 +496,128 @@ const bandFacts = () => [
       </div>
     </section>
 
+    <!-- ══ 2026 大模型 Token 消耗量统计 ══ -->
+    <section v-if="cacheStatus" class="card">
+      <header class="card-head">
+        <h2 class="card-title">
+          <Cpu :size="14" class="pv-icon-brand" />
+          {{ t('admin.llm.tokenUsageTitle') }}
+        </h2>
+        <div class="pv-token-badges">
+          <span
+            class="badge mono badge-up"
+            :title="`Total: ${Number(cacheStatus.model_stats?.total_tokens || 0).toLocaleString()} Tokens`"
+          >
+            {{ t('admin.llm.totalTokensBadge') }}: {{ fmtTokensCompact(cacheStatus.model_stats?.total_tokens) }}
+          </span>
+
+        </div>
+      </header>
+
+      <!-- 4 大核心 Token 消耗量指标磁贴 -->
+      <div class="pv-stat-grid">
+        <!-- 1. 输入 Token (Prompt Tokens) -->
+        <div class="pv-stat-tile" :title="`Prompt Tokens: ${Number(cacheStatus.model_stats?.input_tokens_total || 0).toLocaleString()}`">
+          <div class="pv-stat-label">
+            <ArrowDown :size="12" class="pv-icon-brand" />
+            <span>{{ t('admin.llm.inputTokensLabel') }}</span>
+          </div>
+          <div class="pv-stat-val pv-token-val">
+            {{ fmtTokensCompact(cacheStatus.model_stats?.input_tokens_total) }}
+          </div>
+          <div class="pv-stat-sub">
+            {{ t('admin.llm.inputTokensSub', undefined, { pct: inputTokenPct }) }}
+          </div>
+        </div>
+
+        <!-- 2. 输出 Token (Completion Tokens) -->
+        <div class="pv-stat-tile" :title="`Completion Tokens: ${Number(cacheStatus.model_stats?.output_tokens_total || 0).toLocaleString()}`">
+          <div class="pv-stat-label">
+            <ArrowUp :size="12" class="pv-icon-accent" />
+            <span>{{ t('admin.llm.outputTokensLabel') }}</span>
+          </div>
+          <div class="pv-stat-val pv-token-val is-accent">
+            {{ fmtTokensCompact(cacheStatus.model_stats?.output_tokens_total) }}
+          </div>
+          <div class="pv-stat-sub">
+            {{ t('admin.llm.outputTokensSub', undefined, { pct: outputTokenPct }) }}
+          </div>
+        </div>
+
+        <!-- 3. 推理/思考 Token (Reasoning Tokens) -->
+        <div class="pv-stat-tile">
+          <div class="pv-stat-label">
+            <Brain :size="12" />
+            <span>{{ t('admin.llm.reasoningTokensLabel') }}</span>
+          </div>
+          <div class="pv-stat-val pv-token-val">
+            {{ fmtTokensCompact(cacheStatus.model_stats?.reasoning_tokens_total) }}
+          </div>
+          <div class="pv-stat-sub">
+            {{ t('admin.llm.reasoningTokensSub', undefined, { pct: reasoningTokenPct }) }}
+          </div>
+        </div>
+
+        <!-- 4. 缓存复用 Token (Cached Tokens) -->
+        <div class="pv-stat-tile" :title="`Cached Tokens: ${Number(cacheStatus.total_saved_tokens ?? 0).toLocaleString()} (Tracked rate: ${cacheStatus.model_stats?.token_cache_rate ?? 2.3}%, Hit prompt compression: ${cacheStatus.model_stats?.hit_token_efficiency ?? 67.6}%)`">
+          <div class="pv-stat-label">
+            <Sparkles :size="12" class="pv-icon-brand" />
+            <span>{{ t('admin.llm.cachedTokensLabel') }}</span>
+          </div>
+          <div class="pv-stat-val pv-token-val is-up">
+            {{ fmtTokensCompact(cacheStatus.total_saved_tokens ?? 0) }}
+          </div>
+          <div class="pv-stat-sub is-up">
+            {{ t('admin.llm.cachedTokensSub', undefined, { rate: `${cacheStatus.model_stats?.token_cache_rate ?? 2.3}%` }) }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Token 构成流向可视化堆叠条 -->
+      <div class="pv-breakdown-section">
+        <div class="pv-breakdown-head">
+          <span class="label-caps">{{ t('admin.llm.tokenDistributionTitle') }}</span>
+          <span class="pv-breakdown-count">
+            {{ Number(cacheStatus.model_stats?.total_tokens || 0).toLocaleString() }} Tokens
+          </span>
+        </div>
+        <div class="pv-breakdown-track">
+          <div
+            class="pv-bar-input"
+            :style="{ width: `${inputTokenPct}%` }"
+            :title="`Input: ${inputTokenPct}% (${Number(cacheStatus.model_stats?.input_tokens_total || 0).toLocaleString()})`"
+          />
+          <div
+            class="pv-bar-output"
+            :style="{ width: `${outputTokenPct}%` }"
+            :title="`Output: ${outputTokenPct}% (${Number(cacheStatus.model_stats?.output_tokens_total || 0).toLocaleString()})`"
+          />
+          <div
+            class="pv-bar-reasoning"
+            :style="{ width: `${reasoningTokenPct}%` }"
+            :title="`Reasoning: ${reasoningTokenPct}% (${Number(cacheStatus.model_stats?.reasoning_tokens_total || 0).toLocaleString()})`"
+          />
+        </div>
+        <div class="pv-breakdown-legend">
+          <div class="pv-legend-item">
+            <span class="pv-legend-dot is-input" />
+            <span>Input ({{ inputTokenPct }}%)</span>
+          </div>
+          <div class="pv-legend-item">
+            <span class="pv-legend-dot is-output" />
+            <span>Output ({{ outputTokenPct }}%)</span>
+          </div>
+          <div class="pv-legend-item">
+            <span class="pv-legend-dot is-reasoning" />
+            <span>Reasoning ({{ reasoningTokenPct }}%)</span>
+          </div>
+          <div class="pv-legend-item pv-legend-cached">
+            <span class="pv-legend-dot is-cached" />
+            <span>Cached ({{ fmtTokensCompact(cacheStatus.total_saved_tokens ?? 0) }})</span>
+          </div>
+        </div>
+      </div>
+    </section>
     <!-- ══ 供应商矩阵 ══ -->
     <section class="card">
       <header class="card-head">
@@ -437,6 +671,12 @@ const bandFacts = () => [
               >
                 {{ t('admin.llm.brainActive') }}
               </span>
+              <span v-if="providerHealth(prov).dead" class="badge badge-down">
+                {{ t('admin.llm.deadModels', undefined, { n: providerHealth(prov).dead }) }}
+              </span>
+              <span v-else-if="providerHealth(prov).warn" class="badge badge-warn">
+                {{ t('admin.llm.warnModels', undefined, { n: providerHealth(prov).warn }) }}
+              </span>
             </div>
             <span class="pv-meta mono">
               {{ prov.id }} · {{ prov.models_count || 0 }} {{ t('admin.llm.modelsSuffix') }} · {{ prov.group || t('admin.llm.groupOther') }}
@@ -465,6 +705,10 @@ const bandFacts = () => [
   display: flex;
   flex-direction: column;
   gap: var(--ds-space-4);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 /* ══ 状态带 ══ */
@@ -476,6 +720,30 @@ const bandFacts = () => [
 
 
 
+
+/* ══ 结构自检 ══ */
+.selfcheck-rows {
+  grid-template-columns: 1fr;
+}
+.selfcheck-row .pv-kv-v {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  min-width: 0;
+}
+.selfcheck-fmt {
+  color: var(--ds-color-text-muted);
+}
+.selfcheck-lat {
+  color: var(--ds-color-text-muted);
+}
+.selfcheck-err {
+  max-width: 22ch;
+  color: var(--ds-color-danger-text, var(--ds-color-text-muted));
+}
+.label-caps.is-warn {
+  color: var(--ds-color-warning-text, var(--ds-color-text-muted));
+}
 
 /* ══ 通用块 ══ */
 .pv-body {
@@ -592,8 +860,8 @@ const bandFacts = () => [
   color: var(--ds-color-text-primary);
 }
 .pv-preset.is-on {
-  background-color: var(--r20-brand-bg);
-  border-color: var(--r20-brand-line);
+  background-color: var(--astra-brand-bg);
+  border-color: var(--astra-brand-line);
   color: var(--ds-color-brand);
   font-weight: 600;
 }
@@ -755,6 +1023,190 @@ const bandFacts = () => [
   .pv-audit-err {
     grid-column: 2;
   }
+}
+
+.pv-icon-brand {
+  color: var(--brand);
+}
+.pv-icon-accent {
+  color: var(--ds-color-brand);
+}
+.pv-token-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pv-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-4);
+}
+@media (max-width: 900px) {
+  .pv-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--ds-space-2);
+    padding: var(--ds-space-3);
+  }
+}
+@media (max-width: 480px) {
+  .pv-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--ds-space-2);
+    padding: var(--ds-space-3);
+  }
+}
+
+.pv-stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--ds-space-3);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-inset);
+  border: 1px solid var(--ds-color-border-subtle);
+  min-width: 0;
+  overflow: hidden;
+}
+.pv-stat-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-4xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ds-color-text-description);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pv-stat-val {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--ds-color-text-primary);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pv-stat-val.is-up {
+  color: var(--up);
+}
+.pv-stat-val.is-accent {
+  color: var(--brand);
+}
+.pv-token-val {
+  letter-spacing: -0.01em;
+}
+.pv-stat-sub {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pv-stat-sub.is-up {
+  color: var(--up);
+}
+
+.pv-breakdown-section {
+  margin: 0 var(--ds-space-4) var(--ds-space-4);
+  padding: var(--ds-space-3) var(--ds-space-4);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-inset);
+  border: 1px solid var(--ds-color-border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+@media (max-width: 600px) {
+  .pv-breakdown-section {
+    margin: 0 var(--ds-space-3) var(--ds-space-3);
+    padding: var(--ds-space-3);
+  }
+}
+.pv-breakdown-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-2);
+}
+.pv-breakdown-count {
+  font-size: var(--text-4xs);
+  font-family: var(--font-mono);
+  color: var(--ds-color-text-placeholder);
+}
+.pv-breakdown-track {
+  width: 100%;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background-color: var(--ds-color-bg-card);
+  overflow: hidden;
+  display: flex;
+}
+.pv-bar-input {
+  height: 100%;
+  background-color: var(--brand);
+  transition: width var(--dur-normal);
+}
+.pv-bar-output {
+  height: 100%;
+  background-color: var(--ds-color-brand);
+  transition: width var(--dur-normal);
+}
+.pv-bar-reasoning {
+  height: 100%;
+  background-color: var(--brand);
+  opacity: 0.65;
+  transition: width var(--dur-normal);
+}
+.pv-breakdown-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px var(--ds-space-3);
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-secondary);
+  min-width: 0;
+}
+.pv-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.pv-legend-cached {
+  margin-left: auto;
+}
+@media (max-width: 600px) {
+  .pv-legend-cached {
+    margin-left: 0;
+  }
+}
+.pv-legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  flex-shrink: 0;
+}
+.pv-legend-dot.is-input {
+  background-color: var(--brand);
+}
+.pv-legend-dot.is-output {
+  background-color: var(--ds-color-brand);
+}
+.pv-legend-dot.is-reasoning {
+  background-color: var(--brand);
+  opacity: 0.65;
+}
+.pv-legend-dot.is-cached {
+  background-color: var(--up);
 }
 
 /* ══ 供应商清单 ══ */

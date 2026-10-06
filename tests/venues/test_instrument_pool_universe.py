@@ -44,7 +44,7 @@ def _fixture_pool(path):
 
 
 def setUpModule():
-    """PoolCapacity 断言同向上限=3（基线）；隔离生产 .env 当前套件值；池换成夹具。"""
+    """PoolCapacity 断言同向上限=4（基线）；隔离生产 .env 当前套件值；池换成夹具。"""
     global _POOL_SCOPE
     pin_baseline_risk_env()
     tmp = tempfile.TemporaryDirectory()
@@ -67,20 +67,20 @@ def tearDownModule():
 
 class InstrumentPoolUniverseTests(unittest.TestCase):
     def setUp(self):
-        self._orig_min = os.environ.get("R20_MIN_LEVERAGE")
-        self._orig_max = os.environ.get("R20_MAX_LEVERAGE")
-        os.environ["R20_MIN_LEVERAGE"] = "2.0"
-        os.environ["R20_MAX_LEVERAGE"] = "5.0"
+        self._orig_min = os.environ.get("ASTRA_MIN_LEVERAGE")
+        self._orig_max = os.environ.get("ASTRA_MAX_LEVERAGE")
+        os.environ["ASTRA_MIN_LEVERAGE"] = "2.0"
+        os.environ["ASTRA_MAX_LEVERAGE"] = "5.0"
 
     def tearDown(self):
         if self._orig_min is not None:
-            os.environ["R20_MIN_LEVERAGE"] = self._orig_min
+            os.environ["ASTRA_MIN_LEVERAGE"] = self._orig_min
         else:
-            os.environ.pop("R20_MIN_LEVERAGE", None)
+            os.environ.pop("ASTRA_MIN_LEVERAGE", None)
         if self._orig_max is not None:
-            os.environ["R20_MAX_LEVERAGE"] = self._orig_max
+            os.environ["ASTRA_MAX_LEVERAGE"] = self._orig_max
         else:
-            os.environ.pop("R20_MAX_LEVERAGE", None)
+            os.environ.pop("ASTRA_MAX_LEVERAGE", None)
 
     def test_evaluate_instrument_tier(self):
         self.assertEqual(ip.evaluate_instrument_tier("BTC-USDT-SWAP", "BTC"), "tier_1_bluechip")
@@ -135,12 +135,12 @@ class InstrumentPoolUniverseTests(unittest.TestCase):
 class PoolCapacityNotHardcodedTests(unittest.TestCase):
     """后台曾把标的池上限硬编码为 6，加第 7 个币直接被 409 拒绝 —— 部署者反馈「扩容跑不起来」的真凶。"""
 
-    APP = Path(__file__).resolve().parent.parent.parent / "r20_backend" / "app.py"
+    APP = Path(__file__).resolve().parent.parent.parent / "astra_backend" / "app.py"
     SEC = Path(__file__).resolve().parent.parent.parent / "frontend" / "src" / "views" / "admin" / "SecurityPage.vue"
 
     def test_backend_uses_configurable_pool_cap(self):
         src = self.APP.read_text(encoding="utf-8")
-        self.assertIn('os.getenv("R20_MAX_POOL_SIZE"', src, "池容量上限必须可由环境变量配置")
+        self.assertIn('os.getenv("ASTRA_MAX_POOL_SIZE"', src, "池容量上限必须可由环境变量配置")
         self.assertIn("len(current) >= MAX_POOL_SIZE", src, "添加校验必须使用常量而非字面量 6")
         self.assertNotIn("len(current) >= 6", src, "检测到硬编码的 6 个币种上限回归")
         self.assertNotIn("最多允许 6 个币种", src, "检测到硬编码错误文案回归")
@@ -178,7 +178,7 @@ class PoolCapacityNotHardcodedTests(unittest.TestCase):
             self.assertGreaterEqual(fixture_pool, 6, "夹具池至少 6 条（本用例的基线前提）")
             cap, same = effective_max_positions(fixture_pool)
             self.assertEqual(cap, fixture_pool, "并发持仓上限应随标的池自动伸缩")
-            self.assertEqual(same, 3, "同向持仓上限应固定为 3(防 Beta 踩踏)，不随池扩容放大")
+            self.assertEqual(same, 4, "同向持仓上限应固定为 4(防 Beta 踩踏)，不随池扩容放大")
 
         live_cap, live_same = effective_max_positions(len(aft.TARGET_INSTRUMENTS))
         self.assertEqual(aft.MAX_CONCURRENT_POSITIONS, live_cap,

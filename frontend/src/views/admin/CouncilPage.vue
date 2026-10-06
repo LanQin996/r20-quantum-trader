@@ -234,7 +234,7 @@ async function exportConfig() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `r20-council-config-${fmtDate(new Date())}.json`;
+    a.download = `astra-council-config-${fmtDate(new Date())}.json`;
     a.click();
     URL.revokeObjectURL(url);
     toast.ok(t('admin.council.exportOk'));
@@ -360,6 +360,10 @@ async function resetRole(roleId: string) {
   }
 }
 
+function seatPerformanceOf(roleId: string) {
+  return (councilConfig.value as any)?.seat_performance?.roles?.[roleId] || null;
+}
+
 async function runDebateTest() {
   testing.value = true;
   testResult.value = null;
@@ -410,7 +414,7 @@ onMounted(loadData);
 
 <template>
   <div class="cn">
-    <PageHeader :title="t('nav.admin.council')" :description="t('admin.council.desc')">
+    <PageHeader :title="t('nav.admin.council')">
       <template #actions>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="!auth.isSuperadmin" @click="exportConfig">
           <Download :size="14" />
@@ -499,7 +503,7 @@ onMounted(loadData);
         <header class="card-head">
           <div>
             <h2 class="card-title">{{ t('admin.council.consensusLabel') }}</h2>
-            <p class="card-sub">{{ t('admin.council.timeoutHint') }}</p>
+            <p class="card-sub">{{ t('admin.council.desc') }}</p>
           </div>
           <div class="cn-head-actions">
             <button type="button" class="btn btn-ghost btn-sm" :disabled="!auth.isSuperadmin" @click="applySuite('hedge_fund_desk')">
@@ -647,6 +651,28 @@ onMounted(loadData);
             <p class="cn-desc">
               {{ selectedRole.description || t('admin.council.seatDescFallback') }}
             </p>
+            <div v-if="seatPerformanceOf(expandedRole)" class="cn-perf-strip">
+              <div class="cn-perf-item">
+                <span class="cn-perf-label">{{ t('admin.council.perfAdopted') }}:</span>
+                <span class="cn-perf-val num">{{ seatPerformanceOf(expandedRole).adopted_count }}</span>
+              </div>
+              <div class="cn-perf-item">
+                <span class="cn-perf-label">{{ t('admin.council.perfTotalTrades') }}:</span>
+                <span class="cn-perf-val num">{{ seatPerformanceOf(expandedRole).total_trades }}</span>
+              </div>
+              <div class="cn-perf-item">
+                <span class="cn-perf-label">{{ t('admin.council.perfWinRate') }}:</span>
+                <span class="cn-perf-val num" :class="seatPerformanceOf(expandedRole).win_rate >= 50 ? 'cn-up' : ''">
+                  {{ seatPerformanceOf(expandedRole).win_rate }}%
+                </span>
+              </div>
+              <div class="cn-perf-item">
+                <span class="cn-perf-label">{{ t('admin.council.perfPnl') }}:</span>
+                <span class="cn-perf-val num" :class="seatPerformanceOf(expandedRole).total_pnl_usdt >= 0 ? 'cn-up' : 'cn-down'">
+                  {{ seatPerformanceOf(expandedRole).total_pnl_usdt >= 0 ? '+' : '' }}{{ seatPerformanceOf(expandedRole).total_pnl_usdt }} U
+                </span>
+              </div>
+            </div>
             <p v-if="modelMissing(selectedRole)" class="cn-warn">
               <AlertTriangle :size="13" />
               <span>{{ t('admin.council.modelMissingHint') }}</span>
@@ -1103,6 +1129,9 @@ onMounted(loadData);
   display: flex;
   flex-direction: column;
   padding: var(--ds-space-1) 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .cn-seat {
   display: flex;
@@ -1153,7 +1182,7 @@ onMounted(loadData);
 }
 .cn-avatar.is-cio {
   color: var(--brand);
-  background-color: var(--r20-brand-bg);
+  background-color: var(--astra-brand-bg);
 }
 .cn-avatar.is-muted {
   opacity: 0.45;
@@ -1214,6 +1243,28 @@ onMounted(loadData);
   font-size: var(--text-xs);
   line-height: var(--leading-body);
   color: var(--ds-color-text-description);
+}
+.cn-perf-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ds-space-3);
+  margin: var(--ds-space-2) var(--ds-space-4) 0;
+  padding: 8px 12px;
+  border-radius: var(--r-ctl);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--ds-color-border-subtle);
+}
+.cn-perf-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-3xs);
+}
+.cn-perf-label {
+  color: var(--ds-color-text-description);
+}
+.cn-perf-val {
+  font-weight: 600;
 }
 .cn-warn {
   display: flex;

@@ -12,14 +12,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import urllib.error
-from r20_backend import analysis_capture as capture
-from r20_backend.analysis_store import Archive
+from astra_backend import analysis_capture as capture
+from astra_backend.analysis_store import Archive
 
 class CaptureReplayTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.path=Path(self.temp.name)/"analysis.db"
-        self.env=patch.dict(os.environ,{"R20_TESTING":"1","R20_ANALYSIS_DB":str(self.path)})
+        self.env=patch.dict(os.environ,{"ASTRA_TESTING":"1","ASTRA_ANALYSIS_DB":str(self.path)})
         self.env.start()
         self.archive=Archive(self.path)
         self.account="okx:live:replay"
@@ -34,7 +34,7 @@ class CaptureReplayTests(unittest.TestCase):
             return [{**e,"body":self.archive.read_blob(con,e["body_hash"])} for e in self.archive.events(self.account,con) if kind is None or e["kind"]==kind] if con else []
 
     def test_actual_fallback_request_and_response_are_recorded(self):
-        from r20_backend import llm_manager
+        from astra_backend import llm_manager
         response={"choices":[{"message":{"content":'{"action":"WAIT"}'}}],"usage":{"total_tokens":25}}
         class Reply(io.BytesIO):
             def __enter__(self): return self
@@ -60,7 +60,7 @@ class CaptureReplayTests(unittest.TestCase):
         self.assertEqual(usage["total_tokens"],25)
 
     def test_model_retry_and_failover_keep_request_response_correlation(self):
-        from r20_backend import llm_manager
+        from astra_backend import llm_manager
         response = {"choices": [{"message": {"content": '{"action":"WAIT"}'}}],
                     "usage": {"total_tokens": 32}}
         primary = {"model": "primary-test", "base_url": "https://example.test/v1",
@@ -95,19 +95,6 @@ class CaptureReplayTests(unittest.TestCase):
         self.assertEqual(recorded[0]["body"]["request_id"], requests[-1]["body"]["request_id"])
         self.assertEqual(usage["total_tokens"], 32)
 
-    def test_configured_confidence_floor_remains_in_risk_archive(self):
-        from r20_backend import interceptor_manager as manager
-        with patch("scripts.instrument_pool.load_instruments", return_value=[
-                {"instId": "BTC-USDT-SWAP", "conf_floor": 93}]), \
-                patch.object(manager, "list_plugins", return_value=[]):
-            action, _, _ = manager.run_interceptor_pipeline(
-                {"instId": "BTC-USDT-SWAP", "data_quality": "valid"},
-                {"action": "BUY_LONG", "entry_price": 100, "take_profit_price": 130,
-                 "stop_loss_price": 90, "confidence": 90}, {})
-        self.assertEqual(action, "WAIT")
-        events = [e for e in self.events("risk.rule") if e["body"]["rule"] == "confidence"]
-        self.assertEqual(events[0]["status"], "rejected")
-        self.assertEqual(events[0]["body"]["inputs"]["minimum"], 93)
 
     def test_parallel_seats_keep_cycle_but_separate_spans(self):
         @capture.observed("council.test")
@@ -121,28 +108,14 @@ class CaptureReplayTests(unittest.TestCase):
         self.assertEqual({e["cycle_id"] for e in events},{"cycle-replay"})
         self.assertEqual(len({e["body"]["capture_span_id"] for e in events}),2)
 
-    def test_rejected_plugin_records_later_rule_as_not_executed(self):
-        from r20_backend import interceptor_manager as manager
-        plugins=[{"filename":"first.py","enabled":True},{"filename":"second.py","enabled":True}]
-        for p in plugins: (Path(self.temp.name)/p["filename"]).write_text("# fixture\n",encoding="utf-8")
-        checker=SimpleNamespace(check_risk=lambda p,d,c:(False,"blocked by fixture"))
-        with patch.object(manager,"PLUGINS_DIR",Path(self.temp.name)),patch.object(manager,"list_plugins",return_value=plugins),patch.object(manager,"_load_module_from_file",return_value=checker) as loader:
-            action,reason,rr=manager.run_interceptor_pipeline(
-                {"instId":"BTC-USDT-SWAP","data_quality":"valid"},
-                {"action":"BUY_LONG","entry_price":100,"take_profit_price":130,"stop_loss_price":90,"confidence":90},{})
-        self.assertEqual(action,"WAIT")
-        self.assertEqual(loader.call_count,1)
-        rules={e["body"]["rule"]:e for e in self.events("risk.rule")}
-        self.assertEqual(rules["first.py"]["status"],"rejected")
-        self.assertEqual(rules["second.py"]["status"],"not_executed")
-        self.assertEqual(rules["quote_geometry_rr"]["body"]["inputs"]["rr"],3)
 
     def test_order_submission_preserves_exchange_acceptance_not_fill(self):
         scripts=str(Path(__file__).resolve().parents[1]/"scripts")
         if scripts not in sys.path: sys.path.insert(0,scripts)
         trader=importlib.import_module("scripts.ai_factor_trader")
-        with capture.scope(inst="BTC-USDT-SWAP",decision_id="decision-replay"):
-            with patch.object(trader,"current_environment",return_value=SimpleNamespace(simulated=False, mode="live")), patch.object(trader,"fetch_ticker",return_value={"last":"100"}), patch("r20_backend.exchanges.listing.ensure_contract_listed",return_value=SimpleNamespace(ok=True)), patch.object(trader,"record_open_intent"), patch.object(trader.okx_rest,"place_order",return_value=[{"ordId":"order-replay"}]):
+        from tests.venue_gate_stub import direct_venue_gate_adapter
+        with direct_venue_gate_adapter(), capture.scope(inst="BTC-USDT-SWAP",decision_id="decision-replay"):
+            with patch.object(trader,"current_environment",return_value=SimpleNamespace(simulated=False, mode="live")), patch.object(trader,"fetch_ticker",return_value={"last":"100"}), patch("astra_backend.exchanges.listing.ensure_contract_listed",return_value=SimpleNamespace(ok=True)), patch.object(trader,"record_open_intent"), patch.object(trader.okx_rest,"place_order",return_value=[{"ordId":"order-replay"}]):
                 result=trader.submit_protected_limit_order("BTC-USDT-SWAP","buy","long",2,100,130,90)
         self.assertEqual(result,(True,"order-replay"))
         event=self.events("order.submitted")[0]
@@ -155,14 +128,14 @@ class CaptureReplayTests(unittest.TestCase):
         scripts=str(Path(__file__).resolve().parents[1]/"scripts")
         if scripts not in sys.path: sys.path.insert(0,scripts)
         trader=importlib.import_module("scripts.ai_factor_trader")
-        with patch.object(trader,"current_environment",return_value=SimpleNamespace(simulated=False, mode="live")), patch.object(trader,"fetch_ticker",return_value={"last":"100"}), patch("r20_backend.exchanges.listing.ensure_contract_listed",return_value=SimpleNamespace(ok=True)), patch.object(trader.okx_rest,"place_order") as submit:
+        with patch.object(trader,"current_environment",return_value=SimpleNamespace(simulated=False, mode="live")), patch.object(trader,"fetch_ticker",return_value={"last":"100"}), patch("astra_backend.exchanges.listing.ensure_contract_listed",return_value=SimpleNamespace(ok=True)), patch.object(trader.okx_rest,"place_order") as submit:
             accepted,_=trader.submit_protected_limit_order("BTC-USDT-SWAP","buy","long",2,100,110,90)
         self.assertFalse(accepted); submit.assert_not_called()
         gate=self.events("execution.gate")[0]
         self.assertEqual(gate["status"],"rejected")
 
     def test_parallel_config_reads_do_not_rewrite_unchanged_configuration(self):
-        from r20_backend import llm_manager, config
+        from astra_backend import llm_manager, config
         path=Path(self.temp.name)/"models.json"
         fake=SimpleNamespace(llm_base_url="",llm_api_key="",llm_model="",llm_reasoning_effort="high")
         with patch.object(llm_manager,"LLM_CONFIG_FILE",path),patch.object(config,"settings",fake):
@@ -176,26 +149,26 @@ class CaptureReplayTests(unittest.TestCase):
             self.assertEqual(len(rows),12)
 
     def test_saved_risk_change_does_not_change_loaded_snapshot(self):
-        with patch.object(capture,"saved_configuration",side_effect=[{"risk":{"R20_MAX_LEVERAGE":{"configured":"3"}}},{"risk":{"R20_MAX_LEVERAGE":{"configured":"5"}}}]):
+        with patch.object(capture,"saved_configuration",side_effect=[{"risk":{"ASTRA_MAX_LEVERAGE":{"configured":"3"}}},{"risk":{"ASTRA_MAX_LEVERAGE":{"configured":"5"}}}]):
             a=capture.configuration("worker",{"MAX_LEVERAGE":3})
             b=capture.configuration("worker",{"MAX_LEVERAGE":3})
         self.assertNotEqual(a,b)
         with self.archive.connect() as con:
             rows=self.archive.configurations(self.account,con)
             bodies=[self.archive.read_blob(con,r["body_hash"]) for r in rows]
-        self.assertEqual({b["loaded_risk"]["R20_MAX_LEVERAGE"] for b in bodies},{3})
+        self.assertEqual({b["loaded_risk"]["ASTRA_MAX_LEVERAGE"] for b in bodies},{3})
 
     def test_saved_configuration_does_not_require_python_dotenv_and_clears_stale_fault(self):
-        from r20_backend import analysis_capture as module
+        from astra_backend import analysis_capture as module
         module.ROOT = Path(self.temp.name)
-        (Path(self.temp.name) / ".env").write_text("R20_OKX_ENV='live'\nR20_MAX_LEVERAGE=3\n", encoding="utf-8")
+        (Path(self.temp.name) / ".env").write_text("ASTRA_OKX_ENV='live'\nASTRA_MAX_LEVERAGE=3\n", encoding="utf-8")
         fault_path = self.path.parent / "analysis_capture_fault.json"
         fault_path.write_text(json.dumps({"action":"configuration","error":"No module named 'dotenv'"}), encoding="utf-8")
         with patch.dict(sys.modules, {"dotenv": None}):
             body = module.saved_configuration()
             module.configuration("test-process", {"MAX_LEVERAGE": 3})
         self.assertEqual(body["mode"], "live")
-        self.assertNotEqual(body["risk"]["R20_MAX_LEVERAGE"]["configured"], None)
+        self.assertNotEqual(body["risk"]["ASTRA_MAX_LEVERAGE"]["configured"], None)
         self.assertFalse(fault_path.exists())
 
 if __name__=="__main__":

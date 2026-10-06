@@ -24,7 +24,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    R20_DOCKER=1 \
+    ASTRA_DOCKER=1 \
     PYTHONPATH=/app \
     TZ=Asia/Shanghai \
     PORT=8080
@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     procps \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js + official OKX CLI (required by the trading/gateway engine)
@@ -47,28 +48,28 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy Backend, Gateway, Scripts, Plugins and Assets
-COPY r20_backend/ ./r20_backend/
-COPY r20_gateway/ ./r20_gateway/
+# Copy Backend, Gateway, Scripts and Assets
+COPY astra_backend/ ./astra_backend/
+COPY astra_gateway/ ./astra_gateway/
 COPY scripts/ ./scripts/
 COPY fcntl_compat.py ./fcntl_compat.py
-COPY plugins/ ./plugins/
 COPY dashboard/ ./dashboard/
 COPY docs/ ./docs/
 COPY deploy/ ./deploy/
 COPY env.example ./env.example
+COPY data/prompt_library.json ./data/prompt_library.json
 
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # Create non-root runtime user and ensure writable runtime state folders exist.
 # /app is chowned so the backend can atomically rewrite /app/.env when saving config.
-RUN useradd --create-home --shell /bin/bash r20 && \
+RUN useradd --create-home --shell /bin/bash astra && \
     mkdir -p /app/data /app/logs /app/backups && \
     chmod +x /app/deploy/docker-entrypoint.sh && \
-    chown -R r20:r20 /app
+    chown -R astra:astra /app
 
-USER r20
+USER astra
 
 EXPOSE 8080
 

@@ -1,7 +1,7 @@
 """杠杆区间 [下限,上限] 与投委会可用性回归钉扎（2026-09-10 用户双报障）。
 
 1. 风控页上限配 7 但开单永远 3x：根因 = 提示词 JSON 模板示例 `min(3,MAX)` 锚定
-   + 执行层下限钉死 2；修复为 R20_MIN_LEVERAGE/R20_MAX_LEVERAGE 全链路区间。
+   + 执行层下限钉死 2；修复为 ASTRA_MIN_LEVERAGE/ASTRA_MAX_LEVERAGE 全链路区间。
 2. 投委会 0/50 周期成功：60s 总预算 vs 两段串行 LLM（真实 RT 20~250s）必超时
    静默降级；默认预算提至 240s 并补降级原因透明（council_status）。
 """
@@ -24,19 +24,19 @@ for p in (str(ROOT), str(ROOT / "scripts")):
 
 class RiskConstantsLeverageRangeTests(unittest.TestCase):
     def _fresh(self, env: dict):
-        # 隔离生产 .env：r20_backend.config 在 import 期即 load_dotenv（SSOT 设计），
+        # 隔离生产 .env：astra_backend.config 在 import 期即 load_dotenv（SSOT 设计），
         # 故预置假 config 模块，纯验证「环境变量 → risk_constants 解析」契约
         code = (
             "import sys, types;"
-            "_fake = types.ModuleType('r20_backend.config'); _fake.load_dotenv = lambda *a, **k: None;"
-            "_pkg = types.ModuleType('r20_backend'); _pkg.config = _fake;"
-            "sys.modules['r20_backend'] = _pkg; sys.modules['r20_backend.config'] = _fake;"
+            "_fake = types.ModuleType('astra_backend.config'); _fake.load_dotenv = lambda *a, **k: None;"
+            "_pkg = types.ModuleType('astra_backend'); _pkg.config = _fake;"
+            "sys.modules['astra_backend'] = _pkg; sys.modules['astra_backend.config'] = _fake;"
             "sys.path.insert(0, 'scripts');"
             "import risk_constants as rc;"
-            "print(rc.MIN_LEVERAGE, rc.MAX_LEVERAGE, rc.DEFAULTS.get('R20_MIN_LEVERAGE'))"
+            "print(rc.MIN_LEVERAGE, rc.MAX_LEVERAGE, rc.DEFAULTS.get('ASTRA_MIN_LEVERAGE'))"
         )
         import subprocess
-        base_env = {k: v for k, v in os.environ.items() if not k.startswith("R20_")}
+        base_env = {k: v for k, v in os.environ.items() if not k.startswith("ASTRA_")}
         r = subprocess.run([sys.executable, "-c", code], env={**base_env, **env},
                            capture_output=True, text=True, cwd=str(ROOT))
         return r.stdout.strip()
@@ -44,50 +44,50 @@ class RiskConstantsLeverageRangeTests(unittest.TestCase):
     def test_defaults(self):
         # 显式钉默认：risk_constants import 期会加载项目 .env（生产值 7.0），
         # 「默认值」语义用显式传默认来验证解析逻辑本身
-        lo, hi, dft = self._fresh({"R20_MIN_LEVERAGE": "2.0", "R20_MAX_LEVERAGE": "5.0"}).split()
+        lo, hi, dft = self._fresh({"ASTRA_MIN_LEVERAGE": "2.0", "ASTRA_MAX_LEVERAGE": "5.0"}).split()
         self.assertEqual((lo, hi), ("2.0", "5.0"))
         self.assertEqual(dft, "2.0")
 
     def test_explicit_range(self):
-        lo, hi, _ = self._fresh({"R20_MIN_LEVERAGE": "5.0", "R20_MAX_LEVERAGE": "7.0"}).split()
+        lo, hi, _ = self._fresh({"ASTRA_MIN_LEVERAGE": "5.0", "ASTRA_MAX_LEVERAGE": "7.0"}).split()
         self.assertEqual((lo, hi), ("5.0", "7.0"))
 
     def test_missing_min_falls_back_to_default_2(self):
-        # 未设置 R20_MIN_LEVERAGE 时下限取默认 2.0（旧 .env 无此键的账户零迁移）
-        lo, hi, _ = self._fresh({"R20_MAX_LEVERAGE": "7.0"}).split()
+        # 未设置 ASTRA_MIN_LEVERAGE 时下限取默认 2.0（旧 .env 无此键的账户零迁移）
+        lo, hi, _ = self._fresh({"ASTRA_MAX_LEVERAGE": "7.0"}).split()
         self.assertEqual((lo, hi), ("2.0", "7.0"))
 
     def test_inverted_range_fail_safe_clamps_min_to_max(self):
-        lo, hi, _ = self._fresh({"R20_MIN_LEVERAGE": "9.0", "R20_MAX_LEVERAGE": "4.0"}).split()
+        lo, hi, _ = self._fresh({"ASTRA_MIN_LEVERAGE": "9.0", "ASTRA_MAX_LEVERAGE": "4.0"}).split()
         self.assertEqual((lo, hi), ("4.0", "4.0"))
 
     def test_min_key_registered_in_env_keys(self):
         from scripts import risk_constants as rc
-        self.assertIn("R20_MIN_LEVERAGE", rc.RISK_ENV_KEYS)
-        self.assertIn("R20_MIN_LEVERAGE", rc.DEFAULTS)
+        self.assertIn("ASTRA_MIN_LEVERAGE", rc.RISK_ENV_KEYS)
+        self.assertIn("ASTRA_MIN_LEVERAGE", rc.DEFAULTS)
 
 
 class RiskConfigSchemaTests(unittest.TestCase):
     def test_schema_contains_pair_and_suites_valid(self):
-        import r20_backend.risk_config as risk_mod
+        import astra_backend.risk_config as risk_mod
         keys = {p["key"] for p in risk_mod.schema()["params"]}
-        self.assertIn("R20_MIN_LEVERAGE", keys)
-        self.assertIn("R20_MAX_LEVERAGE", keys)
+        self.assertIn("ASTRA_MIN_LEVERAGE", keys)
+        self.assertIn("ASTRA_MAX_LEVERAGE", keys)
         # 导入即自检（越界/suite 断言）不炸说明三套件 MIN≤MAX 与边界全合法
         suites = {s["id"]: s["values"] for s in risk_mod.SUITES}
-        self.assertLessEqual(suites["conservative"]["R20_MIN_LEVERAGE"], suites["conservative"]["R20_MAX_LEVERAGE"])
-        self.assertEqual((suites["aggressive"]["R20_MIN_LEVERAGE"], suites["aggressive"]["R20_MAX_LEVERAGE"]), (5.0, 7.0))
+        self.assertLessEqual(suites["conservative"]["ASTRA_MIN_LEVERAGE"], suites["conservative"]["ASTRA_MAX_LEVERAGE"])
+        self.assertEqual((suites["aggressive"]["ASTRA_MIN_LEVERAGE"], suites["aggressive"]["ASTRA_MAX_LEVERAGE"]), (6.0, 9.9))
 
     def test_normalize_rejects_inverted_leverage_range(self):
-        import r20_backend.risk_config as risk_mod
+        import astra_backend.risk_config as risk_mod
         with self.assertRaises(ValueError) as ctx:
-            risk_mod.normalize({"R20_MIN_LEVERAGE": 8.0, "R20_MAX_LEVERAGE": 5.0})
+            risk_mod.normalize({"ASTRA_MIN_LEVERAGE": 8.0, "ASTRA_MAX_LEVERAGE": 5.0})
         self.assertIn("杠杆下限", str(ctx.exception))
 
     def test_normalize_accepts_valid_pair(self):
-        import r20_backend.risk_config as risk_mod
-        out = risk_mod.normalize({"R20_MIN_LEVERAGE": 5.0, "R20_MAX_LEVERAGE": 7.0})
-        self.assertEqual(out["R20_MIN_LEVERAGE"], "5.0")
+        import astra_backend.risk_config as risk_mod
+        out = risk_mod.normalize({"ASTRA_MIN_LEVERAGE": 5.0, "ASTRA_MAX_LEVERAGE": 7.0})
+        self.assertEqual(out["ASTRA_MIN_LEVERAGE"], "5.0")
 
 
 class BrainPromptAntiAnchorTests(unittest.TestCase):
@@ -100,10 +100,31 @@ class BrainPromptAntiAnchorTests(unittest.TestCase):
         return combined("scripts/ai_brain_trader.py", pkg_name="brain")
 
     def test_template_has_no_static_three_anchor(self):
+        """杠杆示例不得再钉死 3；区间声明必须来自 MIN/MAX 常量，且模型被要求按预算区间自裁。
+
+        ★ 2026-09-30 提示词来源迁移后重钉：旧的杠杆示例文案（含"严禁无差别照抄"）
+        随提示词正文一起搬进了 `data/prompt_library.json`，代码子里已搜不到该短语。
+        同一意图拆成两半守：
+          ① 代码侧：运行期风险预算仍从单一事实源 `rc.MIN_LEVERAGE / rc.MAX_LEVERAGE`
+             派生"单笔杠杆区间"，且不存在写死 3 的 `int(min(3, MAX_LEVERAGE))`；
+          ② 提示词侧（现由 JSON 方案模块承载）：模型被要求按【本周期风险预算】的
+             区间弹性取杠杆，而不是照抄示例数字。
+        """
+        from tests.source_scan import assert_area_looks_real
         src = self._brain_src()
+        assert_area_looks_real(self, src, must_contain="def construct_full_market_prompt")
         self.assertNotIn("int(min(3, MAX_LEVERAGE))", src)
-        self.assertIn("严禁无差别照抄", src)
+        # ① 区间来自 risk_constants 单一事实源（非硬编码）
         self.assertIn("单笔杠杆区间", src)
+        self.assertIn("rc.MIN_LEVERAGE", src)
+        self.assertIn("rc.MAX_LEVERAGE", src)
+        # ② 模型侧指令（JSON 方案模块）要求按预算区间自裁，不得照抄固定档位
+        from scripts.prompt_library import active_profile, apply_module_layout, base_template_text
+        effective = apply_module_layout(base_template_text("trading_system"),
+                                        active_profile(), "trading_system", "x")
+        self.assertGreater(len(effective), 1000, "effective system prompt 为空 —— 定位错了对象")
+        self.assertIn("按置信度弹性取【本周期风险预算】常规区间", effective)
+        self.assertIn("强信号可取上限侧", effective)
 
     def test_rendered_example_is_range_midpoint(self):
         lo, hi = 5.0, 7.0
@@ -134,7 +155,7 @@ class LeverageClampTests(unittest.TestCase):
 
 class CouncilBudgetTests(unittest.TestCase):
     def test_default_timeout_240(self):
-        import r20_backend.council_manager as cm
+        import astra_backend.council_manager as cm
         self.assertEqual(cm.DEFAULT_COUNCIL_TIMEOUT, 240.0)
         src = Path(cm.__file__).read_text(encoding="utf-8")
         self.assertNotIn("timeout: float = 60.0", src)
@@ -143,7 +164,7 @@ class CouncilBudgetTests(unittest.TestCase):
         # A git-ignored deployment config is not a portable test fixture.
         # Exercise the real default -> save -> disk -> reload contract instead.
         from tests.config_sandbox import isolate_config
-        import r20_backend.council_manager as cm
+        import astra_backend.council_manager as cm
         root = isolate_config(self)
         self.assertTrue(cm.COUNCIL_CONFIG_FILE.is_relative_to(root))
         self.assertFalse(cm.COUNCIL_CONFIG_FILE.exists())
@@ -157,25 +178,25 @@ class CouncilBudgetTests(unittest.TestCase):
         """杠杆上下限必须取自 risk_constants 的单一事实源，不得写死 3。
 
         定位说明（结构优化阶段 2 / B5）：契约渲染逻辑随辩论引擎迁到
-        r20_backend/council/debate.py，故改为扫 council 运行时源码整体；
+        astra_backend/council/debate.py，故改为扫 council 运行时源码整体；
         断言强度不变，并加防空断言（否则 assertNotIn 会因读空内容假通过）。
         """
         from tests.source_scan import assert_area_looks_real, combined
-        import r20_backend.council_manager as cm
+        import astra_backend.council_manager as cm
         src = combined(Path(cm.__file__))
         assert_area_looks_real(self, src, must_contain="execute_council_debate")
-        self.assertNotIn("int(min(3, _R20_MAX_LEVERAGE))", src)
-        self.assertIn("_R20_MIN_LEVERAGE", src)
+        self.assertNotIn("int(min(3, _ASTRA_MAX_LEVERAGE))", src)
+        self.assertIn("_ASTRA_MIN_LEVERAGE", src)
 
     def test_debate_stage_budgets_have_90s_floor(self):
         """思考型模型单席提案实测需 60~180s：0.35/0.50 纯比例切分在中低预算下
         会压出 53s 级必死窗口（09-10 05:15 实测），两段预算都必须有 90s 地板。
 
         定位说明（结构优化阶段 2 / B5）：预算切分随辩论引擎迁到
-        r20_backend/council/debate.py，故扫 council 运行时源码整体。"""
+        astra_backend/council/debate.py，故扫 council 运行时源码整体。"""
         import re
         from tests.source_scan import assert_area_looks_real, combined
-        import r20_backend.council_manager as cm
+        import astra_backend.council_manager as cm
         src = combined(Path(cm.__file__))
         assert_area_looks_real(self, src, must_contain="execute_council_debate")
         self.assertNotIn("min(rem * 0.50,", src)

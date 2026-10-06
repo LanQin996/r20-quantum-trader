@@ -1,4 +1,4 @@
-"""Shared non-blocking flock cycle guard for R20 daemon entry points.
+"""Shared non-blocking flock cycle guard for AstraQuant daemon entry points.
 
 Single-cycle daemons (AI brain, factor trader, self-evolution) all guard their
 entry point with the same open/flock/write-pid/unlock pattern. This module

@@ -40,8 +40,8 @@ class SidecarBeforeArchiveTests(unittest.TestCase):
                     raise archive_effect
             with patch.object(sfl, "DATA_DIR", tmp), patch.object(
                 sfl, "_FETCH_STATUS", {"okx": {"status": "failed", "reason": "fixture"}}
-            ), patch("r20_backend.analysis_capture.enabled", return_value=True), patch(
-                "r20_backend.analysis_sync.sync_archive", side_effect=archive
+            ), patch("astra_backend.analysis_capture.enabled", return_value=True), patch(
+                "astra_backend.analysis_sync.sync_archive", side_effect=archive
             ) as sync:
                 if fail_commit:
                     with patch.object(sfl.os, "replace", side_effect=OSError("disk error")):

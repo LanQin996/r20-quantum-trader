@@ -9,7 +9,7 @@ import urllib.error
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from r20_backend import llm_manager as lm
+from astra_backend import llm_manager as lm
 from tests.test_llm_transport import ChunkResponse, Clock, reply, response, sse
 
 

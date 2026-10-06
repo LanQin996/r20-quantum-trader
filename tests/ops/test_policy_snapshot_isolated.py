@@ -1,13 +1,16 @@
 """Isolated offline tests for Policy Snapshot generator and decision traceability.
 
 Verifies:
-1. Field integrity of policy snapshot across all 4 strategy units.
+1. Field integrity of policy snapshot across all 3 strategy units.
 2. Deterministic hashing: identical inputs yield identical policy_hash.
-3. Sensitivity to changes in any of the four strategy units:
+3. Sensitivity to changes in any of the three strategy units:
    - Prompt profile (layout, module content, module toggle, profile ID)
    - Structured self-evolution mind (version hash, enabled count)
-   - Physical interceptor plugins (plugin toggle, order, file hash)
    - Multi-agent model council (enabled state, consensus mode, active roles, model binding)
+
+2026-10：策略插件系统整套裁撤 ⇒ `physical_interceptors` 单元与
+`extract_interceptors_fingerprint` 导出随之下线，相关字段完整性断言、
+"插件改动改哈希"用例一并删除。
 4. Decision assembly in ai_brain_trader correctly binds snapshot version and hash.
 5. FastAPI route GET /api/v1/admin/policy/current-snapshot authentication and response structure.
 """
@@ -17,9 +20,9 @@ import copy
 import json
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from r20_backend.policy_snapshot import (
+from astra_backend.policy_snapshot import (
     compute_layout_hash,
     format_policy_snapshot_summary,
     generate_policy_snapshot,
@@ -37,8 +40,8 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         # 不管它（实测会改写生产 .env）→ 必须显式沙箱化。
         import tempfile
         from unittest.mock import patch
-        import r20_backend.settings_store as settings_store
-        env_tmp = tempfile.TemporaryDirectory(prefix="r20-policytest-")
+        import astra_backend.settings_store as settings_store
+        env_tmp = tempfile.TemporaryDirectory(prefix="astra-policytest-")
         self.addCleanup(env_tmp.cleanup)
         env_patcher = patch.object(settings_store, "ENV_FILE", Path(env_tmp.name) / ".env")
         env_patcher.start()
@@ -74,13 +77,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
             ],
         }
 
-        self.base_interceptor_plugins: List[Dict[str, Any]] = [
-            {"filename": "01_core_safety.py", "enabled": True, "file_hash": "a1b2c3d4"},
-            {"filename": "02_extreme_market.py", "enabled": True, "file_hash": "b2c3d4e5"},
-            {"filename": "03_volatility_shield.py", "enabled": True, "file_hash": "c3d4e5f6"},
-            {"filename": "99_sample_disabled.py", "enabled": False, "file_hash": "d4e5f6a7"},
-        ]
-
         self.base_council_config: Dict[str, Any] = {
             "enabled": False,
             "consensus_mode": "standard",
@@ -97,7 +93,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         return generate_policy_snapshot(
             prompt_profile=self.base_prompt_profile,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=self.base_council_config,
             base_version="v7.3.0",
         )
@@ -122,7 +117,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         units = snap["units"]
         self.assertIn("prompt_profile", units)
         self.assertIn("evolution_mind", units)
-        self.assertIn("physical_interceptors", units)
         self.assertIn("model_council", units)
 
         # Prompt profile unit fields
@@ -137,16 +131,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         self.assertEqual(e_unit["version"], self.base_memory_snapshot["version"])
         self.assertEqual(e_unit["enabled_count"], 3)
         self.assertEqual(e_unit["total_count"], 4)
-
-        # Interceptors unit fields
-        i_unit = units["physical_interceptors"]
-        self.assertEqual(i_unit["enabled_count"], 3)
-        self.assertEqual(i_unit["total_count"], 4)
-        self.assertEqual(
-            i_unit["enabled_plugins"],
-            ["01_core_safety.py", "02_extreme_market.py", "03_volatility_shield.py"],
-        )
-        self.assertTrue(i_unit["plugins_hash"])
 
         # Council unit fields
         c_unit = units["model_council"]
@@ -181,7 +165,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_id = generate_policy_snapshot(
             prompt_profile=prof_diff_id,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=self.base_council_config,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_id["policy_hash"])
@@ -192,7 +175,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_content = generate_policy_snapshot(
             prompt_profile=prof_diff_content,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=self.base_council_config,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_content["policy_hash"])
@@ -203,7 +185,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_toggle = generate_policy_snapshot(
             prompt_profile=prof_diff_toggle,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=self.base_council_config,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_toggle["policy_hash"])
@@ -218,7 +199,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_ver = generate_policy_snapshot(
             prompt_profile=self.base_prompt_profile,
             memory_snapshot=mem_diff_ver,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=self.base_council_config,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_ver["policy_hash"])
@@ -229,51 +209,9 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_count = generate_policy_snapshot(
             prompt_profile=self.base_prompt_profile,
             memory_snapshot=mem_diff_count,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=self.base_council_config,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_count["policy_hash"])
-
-    def test_interceptor_plugins_modifications_change_policy_hash(self) -> None:
-        """Toggling plugins, reordering pipeline, or code edits changes policy_hash."""
-        base_snap = self._generate_baseline()
-
-        # Case 1: Disable a plugin
-        plugins_diff_toggle = copy.deepcopy(self.base_interceptor_plugins)
-        plugins_diff_toggle[1]["enabled"] = False
-        snap_diff_toggle = generate_policy_snapshot(
-            prompt_profile=self.base_prompt_profile,
-            memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=plugins_diff_toggle,
-            council_config=self.base_council_config,
-        )
-        self.assertNotEqual(base_snap["policy_hash"], snap_diff_toggle["policy_hash"])
-
-        # Case 2: Reorder enabled plugins
-        plugins_diff_order = [
-            self.base_interceptor_plugins[1],
-            self.base_interceptor_plugins[0],
-            self.base_interceptor_plugins[2],
-            self.base_interceptor_plugins[3],
-        ]
-        snap_diff_order = generate_policy_snapshot(
-            prompt_profile=self.base_prompt_profile,
-            memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=plugins_diff_order,
-            council_config=self.base_council_config,
-        )
-        self.assertNotEqual(base_snap["policy_hash"], snap_diff_order["policy_hash"])
-
-        # Case 3: Plugin content hash changes (code edit)
-        plugins_diff_code = copy.deepcopy(self.base_interceptor_plugins)
-        plugins_diff_code[0]["file_hash"] = "99999999"
-        snap_diff_code = generate_policy_snapshot(
-            prompt_profile=self.base_prompt_profile,
-            memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=plugins_diff_code,
-            council_config=self.base_council_config,
-        )
-        self.assertNotEqual(base_snap["policy_hash"], snap_diff_code["policy_hash"])
 
     def test_council_modifications_change_policy_hash(self) -> None:
         """Council toggle, consensus mode switch, or model ID binding changes policy_hash."""
@@ -285,7 +223,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_enabled = generate_policy_snapshot(
             prompt_profile=self.base_prompt_profile,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=c_diff_enabled,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_enabled["policy_hash"])
@@ -296,7 +233,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_mode = generate_policy_snapshot(
             prompt_profile=self.base_prompt_profile,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=c_diff_mode,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_mode["policy_hash"])
@@ -307,7 +243,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         snap_diff_model = generate_policy_snapshot(
             prompt_profile=self.base_prompt_profile,
             memory_snapshot=self.base_memory_snapshot,
-            interceptor_plugins=self.base_interceptor_plugins,
             council_config=c_diff_model,
         )
         self.assertNotEqual(base_snap["policy_hash"], snap_diff_model["policy_hash"])
@@ -385,7 +320,7 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
             "policy_hash": "aabb1122",
             "summary": (
                 "Policy[v7.3.0@aabb1122] prompt:stable#1122 "
-                "mind:3344(3) interceptors:5566(3) council:off(standard)"
+                "mind:3344(3) council:off(standard)"
             ),
         }
 
@@ -424,8 +359,8 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         test_app = FastAPI()
 
         @test_app.get("/api/v1/admin/policy/current-snapshot")
-        def endpoint(x_r20_session: str | None = Header(default=None, alias="X-R20-Session")):
-            if not x_r20_session or x_r20_session != "valid_admin_token":
+        def endpoint(x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")):
+            if not x_astra_session or x_astra_session != "valid_admin_token":
                 raise HTTPException(status_code=401, detail="未授权访问")
             snap = generate_policy_snapshot()
             return {
@@ -444,12 +379,12 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         # 2. Authenticated request should be 200 with snapshot
         res_auth = client.get(
             "/api/v1/admin/policy/current-snapshot",
-            headers={"X-R20-Session": "valid_admin_token"},
+            headers={"X-Astra-Session": "valid_admin_token"},
         )
         self.assertEqual(res_auth.status_code, 200)
         data = res_auth.json()
         self.assertTrue(data["ok"])
-        from r20_backend.version import __version__
+        from astra_backend.version import __version__
         self.assertTrue(data["policy_version"].startswith(f"v{__version__}@"))
         self.assertEqual(len(data["policy_hash"]), 8)
         self.assertIn("units", data["snapshot"])
@@ -457,7 +392,7 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
     def test_archive_creation_and_index_tracking(self) -> None:
         """Verify archive creation writes package and updates index with metadata."""
         import tempfile
-        from r20_backend.policy_snapshot import (
+        from astra_backend.policy_snapshot import (
             archive_current_policy,
             archive_policy_snapshot,
             load_archive_index,
@@ -488,7 +423,7 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
     def test_archive_deletion_and_aliases(self) -> None:
         """Verify deletion removes file and index tracking, with alias support."""
         import tempfile
-        from r20_backend.policy_snapshot import (
+        from astra_backend.policy_snapshot import (
             archive_current_policy,
             delete_archived_policy,
             delete_policy_archive,
@@ -518,7 +453,7 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
     def test_one_click_rollback_and_no_partial_state(self) -> None:
         """Verify one-click rollback restores snapshot and reverts on corruption."""
         import tempfile
-        from r20_backend.policy_snapshot import (
+        from astra_backend.policy_snapshot import (
             archive_current_policy,
             get_current_policy_snapshot,
             restore_archived_policy,
@@ -552,7 +487,7 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
     def test_index_locking_and_corrupt_recovery(self) -> None:
         """Verify index detects corrupt json, creates backup, and reconstructs from archives."""
         import tempfile
-        from r20_backend.policy_snapshot import (
+        from astra_backend.policy_snapshot import (
             archive_current_policy,
             load_archive_index,
         )
@@ -583,7 +518,6 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
             "compute_file_hash",
             "extract_prompt_profile_fingerprint",
             "extract_evolution_mind_fingerprint",
-            "extract_interceptors_fingerprint",
             "extract_council_fingerprint",
             "format_policy_snapshot_summary",
             "generate_policy_snapshot",

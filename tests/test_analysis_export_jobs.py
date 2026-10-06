@@ -20,11 +20,11 @@ from fastapi.testclient import TestClient
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.background import BackgroundTask
 
-from r20_backend import analysis_service as service
-from r20_backend.analysis_export import BundleWriter, write_bundle
-from r20_backend.analysis_export_jobs import ExportJobs, ExportBusy
-from r20_backend.analysis_routes import ExportFileResponse, install_routes
-from r20_backend.analysis_store import Archive, sanitize
+from astra_backend import analysis_service as service
+from astra_backend.analysis_export import BundleWriter, write_bundle
+from astra_backend.analysis_export_jobs import ExportJobs, ExportBusy
+from astra_backend.analysis_routes import ExportFileResponse, install_routes
+from astra_backend.analysis_store import Archive, sanitize
 
 
 class ExportJobTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class ExportJobTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "archive.db"
         self.archive = Archive(self.path)
-        self.env = patch.dict(os.environ, {"R20_ANALYSIS_DB": str(self.path), "R20_TESTING": "1"})
+        self.env = patch.dict(os.environ, {"ASTRA_ANALYSIS_DB": str(self.path), "ASTRA_TESTING": "1"})
         self.env.start()
         self.saved = patch.object(service, "saved_configuration", return_value={"prompt": "测试配置"})
         self.saved.start()
@@ -109,7 +109,7 @@ class ExportJobTests(unittest.TestCase):
             entered.set()
             proceed.wait(5)
             progress("events", 1, 10)
-        with patch("r20_backend.analysis_export_jobs.write_bundle", side_effect=slow_export):
+        with patch("astra_backend.analysis_export_jobs.write_bundle", side_effect=slow_export):
             job = self.jobs.start("session", "account", self.query, self.archive)
             self.assertTrue(entered.wait(5))
             duplicate = self.jobs.start("session", "account", self.query, self.archive)
@@ -129,8 +129,8 @@ class ExportJobTests(unittest.TestCase):
         def full(account, query, target, archive, progress):
             target.write(b"partial")
             raise OSError(errno.ENOSPC, "fixture")
-        with patch("r20_backend.analysis_export_jobs.write_bundle", side_effect=full), \
-             self.assertLogs("r20_backend.analysis_export_jobs", level="ERROR"):
+        with patch("astra_backend.analysis_export_jobs.write_bundle", side_effect=full), \
+             self.assertLogs("astra_backend.analysis_export_jobs", level="ERROR"):
             job = self.jobs.start("session", "account", self.query, self.archive)
             result = self.finished(job)
         self.assertEqual((result["state"], result["error"]), ("failed", "disk_full"))
@@ -173,14 +173,14 @@ class ExportJobTests(unittest.TestCase):
     def test_async_api_cookie_download_authentication_retry_and_ranges(self):
         app = FastAPI()
         app.add_middleware(GZipMiddleware, minimum_size=1)
-        def auth(x_r20_session=None):
-            if x_r20_session not in ("session", "other-session"):
+        def auth(x_astra_session=None):
+            if x_astra_session not in ("session", "other-session"):
                 raise HTTPException(status_code=401)
         install_routes(app, auth)
         self.jobs = app.state.analysis_export_jobs
         client = TestClient(app)
         prefix = "/api/v1/admin/analysis/exports"
-        headers = {"X-R20-Session": "session"}
+        headers = {"X-Astra-Session": "session"}
         query = "?account=account&start=2026-09-01&end=2026-10-01"
         self.assertEqual(client.post(prefix + query).status_code, 401)
         with patch.object(service, "export_bundle", side_effect=AssertionError("in-memory ZIP")):
@@ -191,7 +191,7 @@ class ExportJobTests(unittest.TestCase):
         base = prefix + "/" + job["id"]
         for method, path in (("get", base), ("delete", base), ("post", base + "/download"), ("get", base + "/file")):
             self.assertEqual(getattr(client, method)(path).status_code, 401)
-            self.assertEqual(getattr(client, method)(path, headers={"X-R20-Session": "other-session"}).status_code, 404)
+            self.assertEqual(getattr(client, method)(path, headers={"X-Astra-Session": "other-session"}).status_code, 404)
         prepared = client.post(base + "/download", headers=headers)
         self.assertEqual(prepared.status_code, 200)
         cookie = prepared.headers["set-cookie"]

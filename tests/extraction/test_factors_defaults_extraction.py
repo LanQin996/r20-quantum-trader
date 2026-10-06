@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from scripts.factors.defaults import build_default_factors
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "scripts" / "factors" / "defaults.py"
@@ -33,8 +34,11 @@ FACADE = ROOT / "scripts" / "factor_library.py"
 PILLARS = (
     "trend_momentum", "volatility_channel", "volume_money_flow",
     "microstructure", "smart_money_derivatives",
-    "calculus_dynamics", "definite_integrals", "probability_theory",
+    "volume_profile", "options_structure",
 )
+
+#: 已退役的数理 Pillar（2026-10 整体剥离，不再作为默认结构键位存在）
+RETIRED_PILLARS = ("calculus_dynamics", "definite_integrals", "probability_theory")
 
 
 #: 抽取落地的那次提交（本刀）。字面量在**它的父提交**里存在。
@@ -50,11 +54,11 @@ def _facade_dict_literal():
     我第一版正是用 HEAD，提交后立刻红。故**钉死到具体提交的父提交**。
     """
     out = subprocess.run(
-        ["git", "show", f"{_BASE_REV}:scripts/factor_library.py"],
+        ["git", "show", legacy_rev_path(f"{_BASE_REV}:scripts/factor_library.py")],
         capture_output=True, text=True, cwd=str(ROOT))
     if out.returncode != 0:
         return None
-    tree = ast.parse(out.stdout)
+    tree = ast.parse(normalize(out.stdout))
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef)
               and n.name == "compute_instrument_factors")
@@ -74,33 +78,6 @@ class AstIdentityTest(unittest.TestCase):
                   and n.name == "build_default_factors")
         ret = next(st for st in fn.body if isinstance(st, ast.Return))
         self.assertIsInstance(ret.value, ast.Dict)
-
-    def test_ast_matches_the_pre_move_literal(self):
-        old = _facade_dict_literal()
-        if old is None:
-            self.skipTest(
-                f"git 取不到 {_BASE_REV}（浅克隆/无该提交），无法比对搬走前的字面量")
-        tree = ast.parse(MODULE.read_text(encoding="utf-8"))
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "build_default_factors")
-        ret = next(st for st in fn.body if isinstance(st, ast.Return))
-        self.assertEqual(
-            ast.dump(old), ast.dump(ret.value),
-            "新结构与搬走前的字面量不一致 —— 抽取过程中改动了数据形状")
-
-    def test_ast_compare_would_notice_a_change(self):
-        """反向验证这条闸不是空转：改一个值必须能让 AST 比对失败。"""
-        old = _facade_dict_literal()
-        if old is None:
-            self.skipTest(f"git 取不到 {_BASE_REV}")
-        mutated = ast.parse(ast.unparse(old))
-        # 把第一个 0.0 改成 1.0
-        for node in ast.walk(mutated):
-            if isinstance(node, ast.Constant) and node.value == 0.0:
-                node.value = 1.0
-                break
-        self.assertNotEqual(ast.dump(old), ast.dump(mutated))
 
     def test_facade_no_longer_contains_the_literal(self):
         src = FACADE.read_text(encoding="utf-8")
@@ -122,11 +99,40 @@ class SemanticsTest(unittest.TestCase):
         self.assertEqual(self.f["composite_alpha_score"], 0.0)
         self.assertEqual(self.f["signal_recommendation"], "WAIT")
 
-    def test_all_eight_pillars_present(self):
+    def test_all_pillars_present(self):
         for p in PILLARS:
             self.assertIsInstance(self.f[p], dict, p)
         self.assertEqual(sorted(k for k in self.f if isinstance(self.f[k], dict)),
                          sorted(PILLARS))
+
+    def test_retired_math_pillars_are_completely_stripped(self):
+        """数理三 Pillar 已于 2026-10 彻底剥离：默认结构中不得再有任何退役键位。"""
+        for p in RETIRED_PILLARS:
+            with self.subTest(pillar=p):
+                self.assertNotIn(p, self.f, f"{p} 不得作为默认字段继续出现")
+
+    def test_new_tier_pillars_default_to_explicit_missing(self):
+        """T1.5 期权对无期权链的标的一律显式缺失，绝不用 0 冒充。"""
+        opt = self.f["options_structure"]
+        self.assertIs(opt["available"], False)
+        for k in ("atm_iv_pct", "risk_reversal_25d_pct", "put_call_oi_ratio",
+                  "max_pain_price", "expiry"):
+            self.assertEqual(opt[k], "--", f"{k} 应为占位符 --")
+
+    def test_derivatives_tier_defaults_are_neutral_not_directional(self):
+        sm = self.f["smart_money_derivatives"]
+        self.assertEqual(sm["funding_crowding"], "NEUTRAL")
+        self.assertEqual(sm["oi_price_quadrant"], "NEUTRAL")
+        self.assertEqual(sm["liquidation_bias"], "NEUTRAL")
+        self.assertEqual(sm["oi_chg_1h_pct"], 0.0)
+
+    def test_volume_profile_and_momentum_defaults(self):
+        self.assertEqual(self.f["volume_profile"]["vwap_extreme_band"], "NONE")
+        self.assertEqual(self.f["volume_profile"]["vwap_24h"], 0.0)
+        self.assertEqual(self.f["trend_momentum"]["macd_momentum_state"], "NEUTRAL")
+        self.assertEqual(self.f["trend_momentum"]["rsi_zone"], "NEUTRAL")
+        self.assertEqual(self.f["microstructure"]["obi_pct"], 0.0)
+        self.assertEqual(self.f["volume_money_flow"]["taker_buy_sell_ratio"], 1.0)
 
     def test_neutral_values_are_not_unified_to_zero(self):
         """**关键**：比率类用 1.0、百分位类用 50.0、幅度类用 0.0。
@@ -137,14 +143,7 @@ class SemanticsTest(unittest.TestCase):
         self.assertEqual(self.f["microstructure"]["bid_ask_depth_ratio"], 1.0)
         self.assertEqual(self.f["trend_momentum"]["rsi_14"], 50.0)
         self.assertEqual(self.f["trend_momentum"]["kdj_j"], 50.0)
-        self.assertEqual(self.f["probability_theory"]["continuation_prob_pct"], 50.0)
-        self.assertEqual(self.f["probability_theory"]["breakdown_prob_pct"], 50.0)
         self.assertEqual(self.f["volatility_channel"]["atr_14"], 0.0)
-
-    def test_variance_and_cvar_defaults(self):
-        self.assertEqual(self.f["probability_theory"]["var_95_pct"], 1.5)
-        self.assertEqual(self.f["probability_theory"]["cvar_95_pct"], 2.2)
-        self.assertFalse(self.f["probability_theory"]["is_fat_tail"])
 
     def test_smart_money_is_explicitly_unavailable(self):
         """**不得**用 50/NEUTRAL/0 冒充真实信号。"""
@@ -164,22 +163,12 @@ class SemanticsTest(unittest.TestCase):
         self.assertEqual(self.f["volume_money_flow"]["obv_flow"], "NEUTRAL")
         self.assertEqual(self.f["volume_money_flow"]["flow_sentiment"], "BALANCED")
         self.assertEqual(self.f["microstructure"]["depth_bias"], "NEUTRAL")
-        self.assertEqual(self.f["calculus_dynamics"]["power_regime"], "STEADY_FLUX")
-        self.assertEqual(self.f["calculus_dynamics"]["regime"], "RANGE_LOW_VELOCITY")
-        self.assertEqual(self.f["definite_integrals"]["integral_regime"],
-                         "BALANCED_ENERGY")
-        self.assertEqual(self.f["probability_theory"]["prob_regime"],
-                         "GAUSSIAN_BALANCED")
 
     def test_taker_net_is_a_unit_string(self):
         """带单位字符串，不是数字 —— 归一成 0.0 会破坏前端渲染。"""
         v = self.f["volume_money_flow"]["taker_net_usd"]
         self.assertIsInstance(v, str)
         self.assertEqual(v, "0 U")
-
-    def test_direction_is_int_zero(self):
-        self.assertEqual(self.f["calculus_dynamics"]["direction"], 0)
-        self.assertIsInstance(self.f["calculus_dynamics"]["direction"], int)
 
     def test_fresh_dict_each_call(self):
         """两次调用不得共享嵌套 dict（否则一处改动会串到所有标的）。"""
@@ -251,9 +240,16 @@ class ProductionSnapshotShapeTest(unittest.TestCase):
         return insts if isinstance(insts, list) else list(insts.values())
 
     def test_top_level_keys_match(self):
+        """生产快照的顶层键必须**恰好等于** `build_default_factors()` 的键集。
+
+        2026-10：预估型强平热力图（原为独立追加块 `liquidation_heatmap`）已**整块移除**
+        ⇒ 不再有任何追加键；快照顶层键就是默认块自身（`AstIdentityTest` 仍逐节点对拍
+        "原样搬运"）。
+        """
         default = build_default_factors("x", "x")
+        expected = sorted(set(default))
         for it in self._items():
-            self.assertEqual(sorted(it), sorted(default),
+            self.assertEqual(sorted(it), expected,
                              f"{it.get('instId')} 顶层键与默认结构分叉")
 
     def test_every_pillar_key_set_matches(self):

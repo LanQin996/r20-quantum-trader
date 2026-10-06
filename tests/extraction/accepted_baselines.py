@@ -17,7 +17,7 @@ REVISION = "1940940"
 CHANGES = {
     ("scripts/brain/dispatch.py", "dispatch_llm_and_persist_decisions"): "analysis capture and initialized fallback content",
     ("scripts/brain/packages.py", "fetch_single_instrument_package"): "closed candles, data-quality checks and ticker latency",
-    ("r20_backend/llm/store_normalize.py", "finalize_config_document"): "do not rewrite unchanged configuration",
+    ("astra_backend/llm/store_normalize.py", "finalize_config_document"): "do not rewrite unchanged configuration",
     ("scripts/trader/circuit_guard.py", "is_circuit_breaker_active"): "captured daily-loss gate and equity-based wording",
     ("scripts/trader/cloud_protection.py", "_live_oco_coverage"): "decimal coverage summation",
     ("scripts/trader/cloud_protection.py", "ensure_cloud_position_protection"): "decimal missing coverage and order size",

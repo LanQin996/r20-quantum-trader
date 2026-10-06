@@ -1,11 +1,10 @@
 services:
-  r20-quantum-trader:
-    image: ghcr.io/lanqin996/r20-quantum-trader:latest
-    pull_policy: always
-    # 如需本地构建（不用远端镜像），取消下面两行注释，并把 image/pull_policy 注释掉：
-    # build:
-    #   context: .
-    container_name: r20-quantum-trader
+  astraquant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: astraquant:local
+    container_name: astraquant
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -13,7 +12,7 @@ services:
     # 首次使用前先执行: cp env.example .env 并填写密钥。
     # 注意不要用 volumes 单文件挂载 .env —— 后台保存配置时会原子重写 /app/.env，
     # 单文件挂载会导致写入失败。
-    # 后端 lifespan 会自动拉起并守护 r20_gateway.worker 调度子进程
+    # 后端 lifespan 会自动拉起并守护 astra_gateway.worker 调度子进程
     # （15 分钟交易循环 / 60 秒因子 / 10 分钟快讯 / 晨报晚报 / 20:00 自进化 / 02:00 灾备），
     # 无需额外跑调度容器。
     env_file:
@@ -23,16 +22,16 @@ services:
       - TZ=Asia/Shanghai
       - PYTHONPATH=/app
       # OKX 环境总开关：demo=模拟盘（默认，安全）。改实盘前务必确认凭证与风险。
-      - R20_OKX_ENV=demo
+      - ASTRA_OKX_ENV=demo
       # 单容器部署由后端管理网关，不启用上游双容器模式。
-      - R20_STANDALONE_GATEWAY=false
+      - ASTRA_STANDALONE_GATEWAY=false
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./backups:/app/backups
       # 仅当使用 OKX CLI OAuth 登录（而非 API Key 模式）时取消注释，持久化 OAuth 会话
-      # （容器内以非 root 用户 r20 运行，家目录为 /home/r20）：
-      # - ./okx:/home/r20/.okx
+      # （容器内以非 root 用户 astra 运行，家目录为 /home/astra）：
+      # - ./okx:/home/astra/.okx
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
       interval: 30s

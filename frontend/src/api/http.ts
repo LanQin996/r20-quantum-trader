@@ -42,7 +42,7 @@ export async function http<T = any>(path: string, options: RequestInit = {}): Pr
       ...options,
       headers: {
         'Content-Type': 'application/json',
-        ...(auth.token ? { 'X-R20-Session': auth.token } : {}),
+        ...(auth.token ? { 'X-Astra-Session': auth.token } : {}),
         ...(options.headers || {}),
       },
     });
@@ -81,7 +81,7 @@ export async function download(path: string, filename: string): Promise<void> {
   const auth = useAuthStore();
   let resp: Response;
   try {
-    resp = await fetch(path, { headers: auth.token ? { 'X-R20-Session': auth.token } : {} });
+    resp = await fetch(path, { headers: auth.token ? { 'X-Astra-Session': auth.token } : {} });
   } catch {
     throw new HttpError('网络错误，请稍后重试', 0);
   }

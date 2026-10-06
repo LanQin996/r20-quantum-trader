@@ -36,17 +36,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install httpx
+          pip install pytest pytest-xdist pytest-subtests pytest-asyncio
 
-      - name: Build Frontend (Vue3 + Vite)
+      - name: Build & Test Frontend (Vue3 + Vite)
         run: |
           cd frontend
           npm ci
           npm run build
+          node --test tests/*.test.mjs
+          cd ..
 
-      - name: Run Full Test Suite
+      - name: Run Backend Test Suite (Pytest)
         env:
-          R20_TESTING: "1"
+          ASTRA_TESTING: "1"
         run: |
           python -m unittest discover -s tests -t . -p "test_*.py"
 
@@ -69,7 +71,7 @@ jobs:
           file: ./Dockerfile
           push: false
           load: true
-          tags: r20-quantum-trader:${{ github.sha }}
+          tags: astraquant:${{ github.sha }}
 
       - name: Verify Docker image
-        run: docker image inspect r20-quantum-trader:${{ github.sha }}
+        run: docker image inspect astraquant:${{ github.sha }}
