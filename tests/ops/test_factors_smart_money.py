@@ -52,34 +52,45 @@ OKX_TAKER = {"code": "0", "data": [["t", "30000", "10000"]]}
 
 class _HttpMixin:
     def setUp(self):
-        self.urls: list[str] = []
+        self.calls: list[str] = []
 
-    def _opener(self, routes):
-        def opener(req, timeout=None):
-            url = req.full_url
-            self.urls.append(url)
-            for key, value in routes.items():
-                if key in url:
-                    if isinstance(value, Exception):
-                        raise value
-                    return _Resp(value)
-            raise AssertionError(f"未路由的 URL: {url}")
-        return opener
+    @staticmethod
+    def _rows(routes, key):
+        value = routes.get(key)
+        if value is None:
+            return None
+        if isinstance(value, Exception):
+            return None
+        return value.get("data") if isinstance(value, dict) else value
 
-    def _run(self, routes, ccy="BTC", **kw):
-        with patch.object(sm.urllib.request, "urlopen", self._opener(routes)):
-            return sm.fetch_smart_money_for_symbol(ccy, price=100.0, **kw)
+    def _run(self, routes, ccy="BTC", price=100.0, **kw):
+        ratio = self._rows(routes, "long-short-account-ratio")
+        taker = self._rows(routes, "taker-volume")
+        if "okx.com" in routes and isinstance(routes["okx.com"], Exception):
+            ratio = taker = None
+
+        def get_ratio(*_a, **_k):
+            self.calls.append("long-short-account-ratio")
+            return ratio
+
+        def get_taker(*_a, **_k):
+            self.calls.append("taker-volume")
+            return taker
+
+        with patch.object(sm.qf, "fetch_long_short_account_ratio", get_ratio), \
+             patch.object(sm.qf, "fetch_taker_volume", get_taker):
+            return sm.fetch_smart_money_for_symbol(ccy, price=price, **kw)
 
 
 class SourcePreferenceTests(_HttpMixin, unittest.TestCase):
-    """★ OKX Rubik 单源：命中即返回、取不到即 None（无备源链可兜底）。"""
+    """★ 统一走 OKX Rubik 节流/缓存层：缺失时返回 None，不做直连补抓。"""
 
     def test_okx_rubik_is_the_only_source_queried(self):
-        res = self._run({"long-short-pos-ratio": OKX_POS_RATIO,
+        res = self._run({"long-short-account-ratio": OKX_POS_RATIO,
                          "taker-volume": OKX_TAKER})
         self.assertEqual(res["lsRatio"], 1.63)
         self.assertAlmostEqual(res["weighted_long_pct"], 62.0)
-        self.assertTrue(all("okx.com" in u for u in self.urls), self.urls)
+        self.assertEqual(self.calls, ["long-short-account-ratio", "taker-volume"])
 
     def test_single_source_down_returns_none_not_a_neutral_stub(self):
         # ★★ 模块 docstring 第 2 条：**绝不伪造虚假中性信号**
@@ -105,74 +116,70 @@ class SourcePreferenceTests(_HttpMixin, unittest.TestCase):
     def test_blank_currency_short_circuits_without_any_request(self):
         for ccy in ("", "   ", None):
             with self.subTest(ccy=ccy):
-                self.urls = []
+                self.calls = []
                 self.assertIsNone(self._run({}, ccy))
-                self.assertEqual(self.urls, [], "空币种不许发请求")
+                self.assertEqual(self.calls, [], "空币种不许发请求")
 
 
 class OkxRubikSourceTests(_HttpMixin, unittest.TestCase):
     def _okx(self, routes, price=0.0):
-        with patch.object(sm.urllib.request, "urlopen", self._opener(routes)):
-            return sm._fetch_from_okx_rubik("BTC", price=price)
+        return self._run(routes, ccy="BTC", price=price)
 
-    def test_position_ratio_is_tried_first_and_derives_weighted_long(self):
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]}})
+    def test_account_ratio_derives_weighted_long(self):
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "3.0"]]}})
         # 3.0 / (1 + 3.0) = 0.75
         self.assertEqual(res["longShortRatio"]["weightedLongRatio"], 0.75)
         self.assertEqual(res["lsRatio"], 3.0)
 
-    def test_account_ratio_is_the_fallback_endpoint(self):
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": []},
-                         "long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]}})
+    def test_shared_account_ratio_endpoint_is_used(self):
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]}})
         self.assertEqual(res["lsRatio"], 1.0)
-        self.assertTrue(any("long-short-account-ratio" in u for u in self.urls))
+        self.assertEqual(self.calls[0], "long-short-account-ratio")
 
     def test_none_when_both_ratio_endpoints_fail(self):
-        self.assertIsNone(self._okx({"long-short-pos-ratio": OSError("x"),
-                                     "long-short-account-ratio": OSError("x")}))
+        self.assertIsNone(self._okx({"long-short-account-ratio": OSError("x")}))
 
     def test_nonzero_code_is_not_parsed(self):
-        self.assertIsNone(self._okx({"long-short-pos-ratio": {"code": "51001", "data": [["t", "2"]]},
-                                     "long-short-account-ratio": {"code": "51001", "data": []}}))
+        self.assertIsNone(self._okx({"long-short-account-ratio": {"code": "51001", "data": []}}))
 
     def test_taker_net_is_the_bare_difference_never_multiplied_by_price(self):
         # ★★ OKX 口径：taker 是**合约张数差**，**不乘价格**（既有行为，不是笔误）。
         #    钉住它以免被"顺手统一"成金额加权口径。
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]},
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "3.0"]]},
                          "taker-volume": {"code": "0", "data": [["t", "30000", "10000"]]}},
                         price=100.0)
-        self.assertEqual(res["notional"]["netNotionalUsdt"], 20000.0)
-        self.assertEqual(res["takerNetUsd"], "2.0万 U")
+        self.assertEqual(res["notional"]["netNotionalUsdt"], -20000.0)
+        self.assertEqual(res["takerNetUsd"], "-2.0万 U")
 
     def test_taker_uses_the_second_and_third_columns(self):
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "1.0"]]},
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]},
                          "taker-volume": {"code": "0", "data": [["t", "600", "100"]]}})
-        self.assertEqual(res["notional"]["netNotionalUsdt"], 500.0)
+        self.assertEqual(res["notional"]["netNotionalUsdt"], -500.0)
         # 小额分支走 `round(x, 0)` ⇒ float ⇒ 带 ".0"
-        self.assertEqual(res["takerNetUsd"], "500.0 U")
+        self.assertEqual(res["takerNetUsd"], "-500.0 U")
 
     def test_taker_failure_leaves_the_placeholder(self):
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]},
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "3.0"]]},
                          "taker-volume": OSError("x")})
         self.assertEqual(res["takerNetUsd"], "--")
         self.assertEqual(res["notional"]["netNotionalUsdt"], 0.0)
 
     def test_long_short_ratio_is_not_derived_when_the_exchange_gave_one(self):
         # OKX 把交易所给的比值**原样**放进 longShortRatio（不做推导）。
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "2.5"]]}})
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "2.5"]]}})
         self.assertEqual(res["longShortRatio"],
                          {"weightedLongRatio": res["longShortRatio"]["weightedLongRatio"],
                           "longShortRatio": 2.5})
 
     def test_returned_keys_match_the_contract(self):
-        res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]}})
+        res = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "3.0"]]}})
         self.assertEqual(set(res), {"longShortRatio", "notional", "winRate",
                                     "takerNetUsd", "lsRatio", "weighted_long_pct"})
 
     def test_price_argument_does_not_affect_anything_here(self):
         # 显式钉住：该函数收了 price 但**从不使用** —— 上面那条口径的来源
-        a = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]}}, price=1.0)
-        b = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]}}, price=99999.0)
+        a = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "3.0"]]}}, price=1.0)
+        b = self._okx({"long-short-account-ratio": {"code": "0", "data": [["t", "3.0"]]}}, price=99999.0)
         self.assertEqual(a, b)
 
 

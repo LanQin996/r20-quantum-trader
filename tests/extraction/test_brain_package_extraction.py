@@ -99,8 +99,16 @@ class MoveIsLosslessTest(unittest.TestCase):
         靠打印真实 diff 才发现）。延时观测则是**净增行**，故这里必须整行丢弃。
         """
         out = []
+        self._skip_legacy_rubik = False
         for ln in lines:
             stripped = ln.strip()
+            if stripped == "if ccy:":
+                self._skip_legacy_rubik = True
+                continue
+            if stripped.startswith("# 6. OKX ADX Trend Strength"):
+                self._skip_legacy_rubik = False
+            if self._skip_legacy_rubik:
+                continue
             # Independently covered by tests/test_closed_candles.py: incomplete
             # closed history must not be promoted to a valid trading package.
             if stripped in {'and pkg.get("atr_15m", 0) > 0', 'and pkg.get("atr_1h", 0) > 0',
@@ -160,7 +168,7 @@ class MoveIsLosslessTest(unittest.TestCase):
         a_norm = [self._INTENTIONAL_EDITS.get(ln, ln)
                   for ln in _code_lines(original_body[:cut_a])]
         b_norm = _code_lines(moved[:cut_b])
-        self.assertGreater(len(a_norm), 200, "比对区间太短 ⇒ 这条用例在空转")
+        self.assertGreater(len(a_norm), 180, "比对区间太短 ⇒ 这条用例在空转")
         self.assertEqual(len(a_norm), len(b_norm),
                          "退役点之前的代码行数变了 —— 搬运过程中漏行或多行")
         for i, (a, b) in enumerate(zip(a_norm, b_norm)):
@@ -174,15 +182,14 @@ class MoveIsLosslessTest(unittest.TestCase):
         self.assertIn('pkg["quant_factors"] = load_quant_factor_tiers(inst_id)', src)
 
     def test_failure_counters_are_actually_wired(self):
-        """正向断言：6 处静默 except 必须各自接上失败计数（防止上一条的白名单被滥用）。"""
+        """主脑直取源有独立失败计数，Rubik 因子统一走共享节流客户端。"""
         src = "\n".join(_submodule_function_lines())
         kinds = sorted(re.findall(r'note_failure\("([a-z_0-9]+)", exc\)', src))
-        self.assertEqual(kinds, ["okx_adx_1h", "okx_funding_rate", "okx_ls_ratio",
-                                 "okx_open_interest", "okx_taker_volume", "okx_ticker"],
-                         "6 处取数失败的可观测性接线缺失或被改名")
-        # 6 处新接入 + 3 处搬运时就带 `as exc` 的（K线 15m/1H/4H）
-        # ——第 4 处（calculus）已随数理系统退场删除，故由 10 降为 9。
-        self.assertEqual(src.count("except Exception as exc:"), 9)
+        self.assertEqual(kinds, ["okx_adx_1h", "okx_funding_rate",
+                                 "okx_open_interest", "okx_ticker"])
+        self.assertEqual(src.count("except Exception as exc:"), 7)
+        self.assertNotIn("okx_ls_ratio", src)
+        self.assertNotIn("okx_taker_volume", src)
 
     def test_okx_latency_instrumentation_is_actually_wired(self):
         """正向断言：v8.1.0 的 OKX 取数延时观测必须真的在算（防止上一条的

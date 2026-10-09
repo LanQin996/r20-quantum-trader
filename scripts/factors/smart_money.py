@@ -6,12 +6,10 @@
 """
 from __future__ import annotations
 
-import json
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+from . import okx_quant_factors as qf
 
 
 def fetch_smart_money_for_symbol(
@@ -33,55 +31,27 @@ def fetch_smart_money_for_symbol(
 
 
 def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    w_long: Optional[float] = None
-    ls_ratio: Optional[float] = None
+    ratio_rows = qf.fetch_long_short_account_ratio(ccy, timeout=timeout)
+    if not ratio_rows or not isinstance(ratio_rows[0], (list, tuple)) or len(ratio_rows[0]) < 2:
+        return None
+    try:
+        ls_ratio = float(ratio_rows[0][1])
+    except (TypeError, ValueError):
+        return None
+    w_long = round(ls_ratio / (1.0 + ls_ratio), 4)
+
+    taker_rows = qf.fetch_taker_volume(ccy, "5m", timeout=timeout)
     net_notional_usd = 0.0
     taker_str = "--"
-
-    try:
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-pos-ratio?ccy={ccy}&period=5m"
-        req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                raw_ratio = float(d["data"][0][1])
-                ls_ratio = raw_ratio
-                w_long = round(raw_ratio / (1.0 + raw_ratio), 4)
-    except Exception:
-        pass
-
-    if w_long is None:
+    if taker_rows and isinstance(taker_rows[0], (list, tuple)) and len(taker_rows[0]) > 2:
         try:
-            url2 = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m"
-            req2 = urllib.request.Request(url2, headers=_HEADERS)
-            with urllib.request.urlopen(req2, timeout=timeout) as resp:
-                d2 = json.loads(resp.read().decode("utf-8"))
-                if d2.get("code") == "0" and d2.get("data") and len(d2["data"]) > 0:
-                    raw_ratio2 = float(d2["data"][0][1])
-                    ls_ratio = raw_ratio2
-                    w_long = round(raw_ratio2 / (1.0 + raw_ratio2), 4)
-        except Exception:
+            sell_vol, buy_vol = float(taker_rows[0][1]), float(taker_rows[0][2])
+            net_notional_usd = buy_vol - sell_vol
+            taker_str = (f"{round(net_notional_usd / 1e4, 1)}万 U"
+                         if abs(net_notional_usd) >= 1e4
+                         else f"{round(net_notional_usd, 0)} U")
+        except (TypeError, ValueError):
             pass
-
-    if w_long is None:
-        return None
-
-    try:
-        url_t = f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m"
-        req_t = urllib.request.Request(url_t, headers=_HEADERS)
-        with urllib.request.urlopen(req_t, timeout=timeout) as resp:
-            d_t = json.loads(resp.read().decode("utf-8"))
-            if d_t.get("code") == "0" and d_t.get("data") and len(d_t["data"]) > 0:
-                b_vol = float(d_t["data"][0][1])
-                s_vol = float(d_t["data"][0][2])
-                net_notional_usd = b_vol - s_vol
-                taker_str = (
-                    f"{round(net_notional_usd / 1e4, 1)}万 U"
-                    if abs(net_notional_usd) >= 1e4
-                    else f"{round(net_notional_usd, 0)} U"
-                )
-    except Exception:
-        pass
 
     return {
         "longShortRatio": {

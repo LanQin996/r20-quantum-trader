@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 import urllib.error
@@ -747,6 +748,30 @@ class TransportResilienceTest(unittest.TestCase):
             second = qf.fetch_taker_volume("BTC", "5m")
         self.assertEqual(first, second)
         self.assertEqual(calls["n"], 1, "第二次应命中缓存")
+
+    def test_account_ratio_reader_shares_the_derivatives_snapshot_cache(self):
+        calls = []
+
+        class _Resp:
+            def __init__(self, payload): self.payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(self.payload).encode()
+
+        def _urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            if "long-short-account-ratio" in req.full_url:
+                return _Resp({"code": "0", "data": [["t", "1.5"]]})
+            return _Resp({"code": "0", "data": []})
+
+        with mock.patch.object(qf.urllib.request, "urlopen", _urlopen), \
+             mock.patch.object(qf.time, "sleep", lambda _s: None):
+            rows = qf.fetch_long_short_account_ratio("BTC")
+            snap = qf.fetch_derivatives_snapshot("BTC", "BTC-USDT-SWAP", "BTC-USDT")
+
+        self.assertEqual(rows, [["t", "1.5"]])
+        self.assertEqual(snap["long_short_ratio"], 1.5)
+        self.assertEqual(sum("long-short-account-ratio?ccy=BTC" in url for url in calls), 1)
 
 
 class NoFakeDataWhenSourcesFailTest(unittest.TestCase):

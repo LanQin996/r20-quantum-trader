@@ -67,6 +67,22 @@ QUANT_FACTOR_TIERS = (
 )
 
 
+def _market_data_failed_checks(pkg: Dict[str, Any]) -> list[str]:
+    checks = {
+        "price": pkg["price"] > 0,
+        "bid": pkg["bidPx"] > 0,
+        "ask_ge_bid": pkg["askPx"] >= pkg["bidPx"],
+        "15m_closed_candles": len(pkg["recent_15m"]) >= 12,
+        "1h_closed_candles": len(pkg["recent_1h"]) >= 8,
+        "4h_closed_candles": len(pkg["recent_4h"]) >= 8,
+        "atr_15m": pkg.get("atr_15m", 0) > 0,
+        "atr_1h": pkg.get("atr_1h", 0) > 0,
+        "structure_1h": "structure_1h" in pkg,
+        "macro_4h": "macro_4h" in pkg,
+    }
+    return [name for name, passed in checks.items() if not passed]
+
+
 def _factor_snapshot_path() -> str:
     data_dir = os.environ.get("ASTRA_DATA_DIR") or str(_PROJECT_ROOT / "data")
     return os.path.join(data_dir, "factor_library_snapshot.json")
@@ -314,28 +330,6 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         except Exception as exc:
             note_failure("okx_open_interest", exc)
 
-        if ccy:
-            try:
-                req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    d = json.loads(resp.read().decode("utf-8"))
-                    if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                        pkg["lsRatio"] = float(d["data"][0][1])
-            except Exception as exc:
-                note_failure("okx_ls_ratio", exc)
-
-            try:
-                req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    d = json.loads(resp.read().decode("utf-8"))
-                    if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                        b_vol = float(d["data"][0][1])
-                        s_vol = float(d["data"][0][2])
-                        net_diff = b_vol - s_vol
-                        pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
-            except Exception as exc:
-                note_failure("okx_taker_volume", exc)
-
         # 6. OKX ADX Trend Strength Indicator (1H) via direct REST (zero Node CLI fork)
         try:
             adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
@@ -360,7 +354,30 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     #    `pkg["calculus"]` 只保留**显式不可用**的默认占位 —— 键位不动，
     #    供 calculus_snapshot.json / 台账兜底读取链使用；**不再计算任何东西**。
     pkg["quant_factors"] = load_quant_factor_tiers(inst_id)
+    smart_factors = pkg["quant_factors"].get("smart_money_derivatives", {})
+    money_factors = pkg["quant_factors"].get("volume_money_flow", {})
+    ratio = smart_factors.get("long_short_ratio")
+    if ratio not in (None, "", "--"):
+        pkg["lsRatio"] = ratio
+    taker_net = money_factors.get("taker_net_usd")
+    if taker_net not in (None, "", "--"):
+        pkg["takerNetUsd"] = taker_net
+    if smart_factors.get("available"):
+        pkg["smart_money"] = {
+            "available": True,
+            "weighted_long_pct": smart_factors.get("weighted_long_pct", "--"),
+            "net_flow_usdt": smart_factors.get("smart_money_flow_usd", "--"),
+            "avg_long_entry": smart_factors.get("avg_long_entry", "--"),
+            "avg_short_entry": smart_factors.get("avg_short_entry", "--"),
+            "top_win_rate": smart_factors.get("top_win_rate", "--"),
+        }
     pkg["data_quality"] = "valid" if required_market_data else "invalid"
+    failed_checks = _market_data_failed_checks(pkg) if not required_market_data else []
+    if failed_checks:
+        print(f"[AI Brain] ⚠️ {inst_id} data_quality=invalid: "
+              f"failed_checks={','.join(failed_checks)} "
+              f"(15m={len(pkg['recent_15m'])},1h={len(pkg['recent_1h'])},"
+              f"4h={len(pkg['recent_4h'])})")
 
     # 标的体制状态（综合 4H 宏观、1H 结构与 1H ADX 趋势强度）
     m4h = str(pkg.get("macro_4h") or "")

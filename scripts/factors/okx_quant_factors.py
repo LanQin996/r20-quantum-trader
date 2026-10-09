@@ -269,6 +269,18 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None,
     return None
 
 
+def fetch_long_short_account_ratio(ccy: str, *, timeout: float = 4.0) -> Optional[List[Any]]:
+    """Fetch the slow account ratio through the shared Rubik throttle and TTL cache."""
+    base = str(ccy or "").upper().strip()
+    if not base:
+        return None
+    return _public_get(
+        "/api/v5/rubik/stat/contracts/long-short-account-ratio",
+        {"ccy": base, "period": "5m"}, timeout,
+        cache_key=f"lsratio:{base}", ttl=300.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # T4 · 动量：MACD / RSI / 背离（纯计算）
 # ---------------------------------------------------------------------------
@@ -1165,9 +1177,7 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
     # 这不只是省流量：Rubik 限频 5 次/2 秒，本引擎每标的要打 5 个 Rubik 接口，
     # 6 标的池一轮 30 次 —— 加 TTL 后降到 12 次/轮，节流等待从 ~13s 降到 ~5s，
     # 单轮 wall time 从 ~20s 回到 ~12s（实测 max 56s，逼近 60s 调度周期）。
-    rows = _public_get("/api/v5/rubik/stat/contracts/long-short-account-ratio",
-                       {"ccy": base, "period": "5m"}, timeout,
-                       cache_key=f"lsratio:{base}", ttl=300.0)
+    rows = fetch_long_short_account_ratio(base, timeout=timeout)
     if rows and isinstance(rows[0], (list, tuple)) and len(rows[0]) > 1:
         snap["long_short_ratio"] = _sf(rows[0][1])
 

@@ -71,8 +71,9 @@ def _dispatch(mapping, req):
 
 
 def _candles(count=20):
-    """`[ts, o, h, l, c, vol]` —— h=idx2, l=idx3, c=idx4（模块只读这三个）。"""
-    return [[i, 100.0, 110.0 + i, 90.0 - i, 100.0 + i, 5.0] for i in range(count)]
+    """OKX confirmed candle rows: [ts, o, h, l, c, vol, volCcy, volQuote, confirm]."""
+    return [[i, 100.0, 110.0 + i, 90.0 - i, 100.0 + i, 5.0, "0", "0", "1"]
+            for i in range(count)]
 
 
 class _Base(unittest.TestCase):

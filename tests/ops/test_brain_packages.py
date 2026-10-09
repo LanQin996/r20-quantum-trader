@@ -61,7 +61,7 @@ def _candles(n, *, start=100.0, step=1.0, vol=10.0, newest_first=True):
     for i in range(n):
         close = start + i * step
         rows.append([1_700_000_000_000 + i * 60_000, close - 0.5, close + 1.0,
-                     close - 1.0, close, vol])
+                     close - 1.0, close, vol, "0", "0", "1"])
     return list(reversed(rows)) if newest_first else rows
 
 
@@ -73,6 +73,7 @@ class _Base(unittest.TestCase):
         self.candle_routes: dict = {}
         self.indicator_calls: list = []
         self.indicator_result = {"adx": 27.5}
+        self.factor_tiers: dict = {}
         for name, value in (
             ("note_failure", lambda src, exc: self.failures.append((src, str(exc)))),
             ("print", lambda *a, **k: self.printed.append(" ".join(str(x) for x in a))),
@@ -80,6 +81,14 @@ class _Base(unittest.TestCase):
             p = patch.object(bp, name, value)
             p.start()
             self.addCleanup(p.stop)
+        load_tiers = bp.load_quant_factor_tiers
+
+        def isolated_tiers(inst_id, *, path=None):
+            return load_tiers(inst_id, path=path) if path is not None else self.factor_tiers
+
+        p = patch.object(bp, "load_quant_factor_tiers", isolated_tiers)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _item(self, **over):
         item = {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto",
@@ -266,6 +275,7 @@ class MicrostructureTests(_Base, unittest.TestCase):
         """
         rows = _candles(24, vol=10.0, newest_first=False)   # 时间正序，量恒定
         rows[-1][5] = 0.05                                  # 最后一根 = 正在跳动的当前根
+        rows[-1][8] = "0"
         rows[-2][5] = 11.0                                  # 最近一根已收盘
         rows[-3][5] = 9.0
         pkg = self._run(candles={"15m": list(reversed(rows)),
@@ -338,7 +348,8 @@ class StructureTests(_Base, unittest.TestCase):
     def test_one_hour_swing_structure_covers_the_bounce_case(self):
         # 长跌之后一根急弹：末值 > ma7，但 ma7 < ma20 ⇒ 既非 BULL 也非 BEAR ⇒ CHOP
         rows = _candles(24, step=-1.0, newest_first=False)
-        rows.append([1_700_000_000_000 + 24 * 60_000, 89.0, 91.0, 88.0, 90.0, 10.0])
+        rows.append([1_700_000_000_000 + 24 * 60_000, 89.0, 91.0, 88.0,
+                     90.0, 10.0, "0", "0", "1"])
         pkg = self._run(candles={"15m": _candles(24), "1H": list(reversed(rows)),
                                  "4H": _candles(16)})
         self.assertEqual(pkg["structure_1h"], "1H_SWING_CHOP")
@@ -374,13 +385,21 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
         self.assertEqual(pkg["adx_1h"], 0.0)
 
     def test_crypto_queries_all_swap_specific_sources(self):
-        pkg = self._run()
+        self.factor_tiers = {
+            "smart_money_derivatives": {"long_short_ratio": "1.85"},
+            "volume_money_flow": {"taker_net_usd": "1.0万 U"},
+        }
+        with patch.object(bp, "load_quant_factor_tiers",
+                          lambda _inst_id: self.factor_tiers):
+            pkg = self._run()
         urls = " ".join(self.calls)
-        for fragment in ("funding-rate", "open-interest", "long-short-account-ratio",
-                         "taker-volume"):
+        for fragment in ("funding-rate", "open-interest"):
             self.assertIn(fragment, urls)
+        self.assertNotIn("long-short-account-ratio", urls)
+        self.assertNotIn("taker-volume", urls)
         self.assertEqual(pkg["fundingRate"], 0.012)      # 0.00012 * 100
-        self.assertEqual(pkg["lsRatio"], 1.85)
+        self.assertEqual(pkg["lsRatio"], "1.85")
+        self.assertEqual(pkg["takerNetUsd"], "1.0万 U")
         self.assertEqual(pkg["adx_1h"], 27.5)
         self.assertEqual(self.indicator_calls, [("BTC-USDT-SWAP", "ADX", "1H")])
 
@@ -392,9 +411,10 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
             {"oiUsd": "45000.0"}]}})
         self.assertEqual(small["oiUsd"], "4.5万 U")
 
-    def test_taker_net_is_formatted_in_ten_thousands(self):
+    def test_taker_net_is_copied_from_the_factor_snapshot(self):
+        self.factor_tiers = {"volume_money_flow": {"taker_net_usd": "1.0万 U"}}
         pkg = self._run()
-        self.assertEqual(pkg["takerNetUsd"], "1.0万 U")  # (50000-40000)/1e4
+        self.assertEqual(pkg["takerNetUsd"], "1.0万 U")
 
     def test_no_ccy_skips_rubik_queries(self):
         pkg = self._run(item=self._item(ccy=""))
@@ -409,8 +429,9 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
                               "long-short-account-ratio": OSError("l"),
                               "taker-volume": OSError("t")})
         self.assertEqual(sorted(f[0] for f in self.failures),
-                         ["okx_funding_rate", "okx_ls_ratio", "okx_open_interest",
-                          "okx_taker_volume"])
+                         ["okx_funding_rate", "okx_open_interest"])
+        self.assertEqual(pkg["lsRatio"], "N/A")
+        self.assertEqual(pkg["takerNetUsd"], "N/A")
         self.assertEqual(pkg["adx_1h"], 27.5)            # ADX 不受影响
         self.assertTrue(pkg["recent_15m"])               # K线不受影响
 
@@ -461,6 +482,10 @@ class DataQualityTests(_Base, unittest.TestCase):
         pkg = self._run(candles={"15m": _candles(11), "1H": _candles(24),
                                  "4H": _candles(16)})
         self.assertEqual(pkg["data_quality"], "invalid")
+        self.assertTrue(any(
+            "data_quality=invalid" in line and "15m_closed_candles" in line
+            for line in self.printed
+        ))
 
     def test_empty_everything_is_invalid_but_still_returns(self):
         pkg = self._run(candles={"15m": [], "1H": [], "4H": []},

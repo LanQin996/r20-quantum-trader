@@ -1,7 +1,7 @@
 r"""brain 本地快照落盘抽取对拍门（B3·第九十九刀）。
 
-`scripts/ai_brain_trader.py::execute_batch_ai_brain_cycle` 里三处"写本地快照"
-→ `scripts/brain/snapshots.py`（因子库自更新 / 演算快照 / 提示词快照）。
+`scripts/ai_brain_trader.py::execute_batch_ai_brain_cycle` 中仍在使用的本地快照写入
+→ `scripts/brain/snapshots.py`（演算快照已退役；因子库自更新改由网关每分钟任务独占）。
 
 判据：段体 **AST 逐字**（基线 `8002d5c` 的语句下标 21/23/28）、调用点逐个同名恰好一次、
 自由名可解析；另加**三个真实落盘行为例**（文件内容 + 无 `.tmp` 残留），
@@ -27,8 +27,7 @@ PRE = "8002d5c"                  # 本刀动工前最后提交（第九十八刀
 FACADE = ROOT / "scripts" / "ai_brain_trader.py"
 MOD = ROOT / "scripts" / "brain" / "snapshots.py"
 OWNER = "execute_batch_ai_brain_cycle"
-SPECS = {                        # 函数名 -> 基线语句下标
-    "update_factor_library_snapshot": 21,
+SPECS = {                        # 当前 facade 实际调用的函数
     "write_prompt_snapshot": 28,
 }
 

@@ -91,7 +91,6 @@ from scripts.brain.runtime import (
     resolve_llm_runtime,
 )
 from scripts.brain.snapshots import (
-    update_factor_library_snapshot,
     write_prompt_snapshot,
 )
 from scripts.brain.dispatch import (
@@ -763,33 +762,8 @@ def execute_batch_ai_brain_cycle(
     with ThreadPoolExecutor(max_workers=8) as executor:
         packages = list(executor.map(fetch_single_instrument_package, TARGET_INSTRUMENTS))
 
-    # 顶级聪明钱与大户持仓数据接入（OKX Rubik 公开统计，单一来源）
-    try:
-        try:
-            from scripts.factors.smart_money import fetch_smart_money_for_symbol
-        except ImportError:
-            from factors.smart_money import fetch_smart_money_for_symbol
-        for pkg in packages:
-            ccy = pkg.get("ccy") or pkg.get("name") or ""
-            if not ccy and "-" in pkg.get("instId", ""):
-                ccy = pkg["instId"].split("-")[0]
-            sm_data = fetch_smart_money_for_symbol(ccy, price=float(pkg.get("price") or 0.0))
-            if sm_data:
-                if pkg.get("lsRatio") == "N/A" and sm_data.get("lsRatio"):
-                    pkg["lsRatio"] = sm_data["lsRatio"]
-                if pkg.get("takerNetUsd") == "N/A" and sm_data.get("takerNetUsd"):
-                    pkg["takerNetUsd"] = sm_data["takerNetUsd"]
-                pkg["smart_money"] = {
-                    "available": True,
-                    "weighted_long_pct": sm_data.get("weighted_long_pct", "--"),
-                    "net_flow_usdt": sm_data.get("takerNetUsd", "--"),
-                    "avg_long_entry": "--",
-                    "avg_short_entry": "--",
-                    "top_win_rate": "--",
-                }
-    except Exception as exc:
-        print(f"[AI Brain Batch] 聪明钱数据注入降级: {exc}")
-
+    # Factor Library is scheduler-owned (one run/minute); use the snapshot loaded
+    # by package assembly instead of launching a second full Rubik burst here.
     positions_context = active_positions_detail
     active_positions_detail = active_positions_detail or []
 
@@ -815,25 +789,6 @@ def execute_batch_ai_brain_cycle(
     }
     active_position_sides.pop("", None)
     # 审计D(2026-09-13)：package_by_id 死构造清除（全函数无消费）
-
-    # Automatically Update & Persist Comprehensive Factor Library Snapshot
-    update_factor_library_snapshot(
-        WORKSPACE_DIR=WORKSPACE_DIR,
-        os=os,
-        sys=sys    )
-
-    # 刷新本轮数据包中的 7 梯队因子快照，确保发给模型的 Prompt 拥有最新因子
-    try:
-        try:
-            from scripts.brain.packages import load_quant_factor_tiers
-        except ImportError:
-            from brain.packages import load_quant_factor_tiers
-        for _pkg in packages:
-            _fresh_tiers = load_quant_factor_tiers(_pkg.get("instId", ""))
-            if _fresh_tiers:
-                _pkg["quant_factors"] = _fresh_tiers
-    except Exception as _qf_err:
-        print(f"[AI Brain Batch] Quant factor refresh warning: {_qf_err}")
 
     # Fetch live pending limit orders from exchange（V5 直签 REST，行为契约见 fetch_pending_orders_list）
     pending_orders_list = fetch_pending_orders_list()

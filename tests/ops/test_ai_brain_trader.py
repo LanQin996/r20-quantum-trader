@@ -327,9 +327,6 @@ class ExecuteBatchCycleTests(unittest.TestCase):
         # setdefault 返回的是刚存进去的那个（非空）值，恒为真，`or X` 永不生效，
         # 于是桩会把它自己的 kwargs 当成返回值交出去。这类"真值陷阱"只会让
         # 断言以莫名其妙的方式失败（或更糟：静默通过）。
-        def _fl(**kw):
-            self.calls["fl"] = kw
-
         def _prompt(*a, **kw):
             self.calls["prompt_args"] = (a, kw)
             return "PROMPT"
@@ -354,7 +351,6 @@ class ExecuteBatchCycleTests(unittest.TestCase):
         self._patch("capture_policy_snapshot",
                     lambda **kw: ("HASH", {"snap": 1}, "SUMMARY", "VERSION"))
         self._patch("fetch_single_instrument_package", lambda item: dict(packages[0]))
-        self._patch("update_factor_library_snapshot", _fl)
         self._patch("fetch_pending_orders_list", lambda: [{"ordId": "7"}])
         self._patch("construct_full_market_prompt", _prompt)
         self._patch("active_profile", lambda: {"name": "稳健"})
@@ -391,8 +387,8 @@ class ExecuteBatchCycleTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {"BTC-USDT-SWAP": {}})
-        # 智能资金：无 ccy/name ⇒ 从 instId 前段推币种（不是空串去查）
-        self.assertEqual(seen_sm, [("BTC", 0.0)])
+        # 主脑不再为缺失的 Rubik 字段二次外呼；数据只从因子快照复用。
+        self.assertEqual(seen_sm, [])
         # 策略快照：传入的快照被原样带下去，返回的四元组被透传
         dispatch = self.calls["dispatch"]
         self.assertEqual(dispatch["policy_hash"], "HASH")
@@ -409,26 +405,25 @@ class ExecuteBatchCycleTests(unittest.TestCase):
         # 在途持仓 id 已归一后下传
         self.assertEqual(dispatch["active_inst_ids"], {"BTC-USDT-SWAP"})
         self.assertEqual(dispatch["active_position_sides"], {"BTC-USDT-SWAP": "long"})
-        # 各快照步骤都被调用过（演算快照与跨所矩阵快照已随退役面移除）
-        for key in ("fl", "snap"):
-            self.assertIn(key, self.calls)
+        # 实时提示词快照仍落盘；因子快照由独立的每分钟任务更新。
+        self.assertIn("snap", self.calls)
 
-    def test_smart_money_fills_only_na_placeholders(self):
+    def test_smart_money_does_not_refetch_missing_package_fields(self):
         self._wire_common([{"instId": "BTC-USDT-SWAP", "ccy": "BTC", "price": 50.0,
-                            "lsRatio": "N/A", "takerNetUsd": "N/A"}])
+                            "lsRatio": "N/A", "takerNetUsd": "N/A",
+                            "smart_money": {"available": False}}])
         import scripts.factors.smart_money as smart_money
 
-        def fake_smart_money(ccy, price=0.0):
-            return {"lsRatio": "1.50", "takerNetUsd": "999 U", "weighted_long_pct": 61.0}
-
-        with patch.object(smart_money, "fetch_smart_money_for_symbol", fake_smart_money):
+        with patch.object(smart_money, "fetch_smart_money_for_symbol") as fetch, \
+             patch.object(abt.analysis_capture, "emit", return_value=None):
             abt.execute_batch_ai_brain_cycle(active_positions_detail=[])
 
         pkg_calls = self.calls["dispatch"]["packages"]
         self.assertEqual(len(pkg_calls), 1)
-        # 包装配发生在注入之前，dispatch 收到的是同一批对象引用
-        self.assertIn("smart_money", pkg_calls[0])
-        self.assertTrue(pkg_calls[0]["smart_money"]["available"])
+        fetch.assert_not_called()
+        self.assertEqual(pkg_calls[0]["lsRatio"], "N/A")
+        self.assertEqual(pkg_calls[0]["takerNetUsd"], "N/A")
+        self.assertFalse(pkg_calls[0]["smart_money"]["available"])
 
     def test_smart_money_exception_degrades_without_raising(self):
         self._wire_common([{"instId": "BTC-USDT-SWAP", "ccy": "BTC"}])
@@ -438,7 +433,7 @@ class ExecuteBatchCycleTests(unittest.TestCase):
             raise RuntimeError("rubik down")
 
         with patch.object(smart_money, "fetch_smart_money_for_symbol", boom):
-            # 降级不阻塞决策：仍然走到 dispatch
+            # 主脑不调用备用抓取器；决策仍正常完成。
             self.assertEqual(
                 abt.execute_batch_ai_brain_cycle(active_positions_detail=[]),
                 {"BTC-USDT-SWAP": {}},
