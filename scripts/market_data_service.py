@@ -70,6 +70,21 @@ DEFAULT_HEADERS = {
 _SESSION: Optional[requests.Session] = None
 _SESSION_LOCK = threading.Lock()
 
+# Reserve candle request slots before sending, including concurrent callers.
+# Leave room for the independent factor/dashboard processes sharing this IP.
+_CANDLE_LOCK = threading.Lock()
+_CANDLE_LAST_STARTED = 0.0
+_CANDLE_MIN_INTERVAL = 0.12
+
+
+def _throttle_candles() -> None:
+    global _CANDLE_LAST_STARTED
+    with _CANDLE_LOCK:
+        wait = _CANDLE_MIN_INTERVAL - (time.monotonic() - _CANDLE_LAST_STARTED)
+        if wait > 0:
+            time.sleep(wait)
+        _CANDLE_LAST_STARTED = time.monotonic()
+
 # OKX bar 合法字面量（大小写敏感：分钟小写 m，小时/天/周/月大写）
 _OKX_VALID_BARS = {
     "1m", "3m", "5m", "15m", "30m",
@@ -134,27 +149,46 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: flo
     """Try primary then fallback OKX public endpoints."""
     session = get_market_session()
     kind = _call_kind("get", path)
+    is_candles = path == "/api/v5/market/candles"
     for base in OKX_PUBLIC_HOSTS:
         url = f"{base}{path}"
-        started = time.time()
-        try:
-            resp = session.get(url, params=params, timeout=timeout)
-            if resp.status_code == 200:
-                data = resp.json()
-                if str(data.get("code", "0")) == "0":
-                    note_call(kind, time.time() - started, ok=True)
-                    return data
-                reason = f"code={data.get('code')} msg={str(data.get('msg'))[:80]}"
-            else:
-                reason = f"http={resp.status_code}"
+        for attempt in range(3 if is_candles else 1):
+            if attempt:
+                time.sleep(0.5 * attempt)
+            if is_candles:
+                _throttle_candles()
+            started = time.time()
+            retryable = False
+            try:
+                resp = session.get(url, params=params, timeout=timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    code = str(data.get("code", "0"))
+                    if code == "0" and (not is_candles or data.get("data")):
+                        note_call(kind, time.time() - started, ok=True)
+                        return data
+                    reason = f"code={code} msg={str(data.get('msg'))[:80]}"
+                    if code == "0" and is_candles:
+                        reason += " empty candle data"
+                    retryable = code in {"0", "50011", "50004", "50013"}
+                else:
+                    reason = f"http={resp.status_code}"
+                    retryable = resp.status_code in {429, 500, 502, 503, 504}
+                error = MarketDataResponseError(reason)
+            except Exception as exc:
+                error = exc
+                reason = f"{type(exc).__name__}: {str(exc)[:200]}"
+                retryable = isinstance(exc, (requests.RequestException, ValueError))
             note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, MarketDataResponseError(reason))
-        except Exception as exc:
-            # 第 137 刀的教训：静默 `except` 会让"现价恒 0 / 30 小时无信号"。
-            # 取值行为一字不变（仍旧吞掉、仍旧换下一个 host），但**必须留痕**。
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, exc)
-            logger.debug("Public GET %s failed on %s: %s", path, base, exc)
+            note_failure(kind, error)
+            if is_candles:
+                context = params or {}
+                print(f"[行情K线] host={base} instId={context.get('instId')} "
+                      f"bar={context.get('bar')} attempt={attempt + 1} error={reason}",
+                      flush=True)
+            logger.debug("Public GET %s failed on %s: %s", path, base, error)
+            if not retryable:
+                break
     return None
 
 
