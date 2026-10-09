@@ -829,7 +829,7 @@ onMounted(() => {
                     :style="{ width: `${Math.min(100, Math.max(0, (d.confidence || 0) * 100))}%` }"
                   />
                 </div>
-                <span class="font-bold text-[var(--ink-strong)]">{{ fmtPct(d.confidence || 0) }}</span>
+                <span class="font-bold text-[var(--ink-strong)]">{{ fmtPct(Number(d.confidence || 0) * 100, 0, false) }}</span>
               </div>
             </div>
           </div>

@@ -1,7 +1,7 @@
 """High-Performance Zero-Process Direct Public Market Data Service (market_data_service.py).
 
 Public market data harvesting (tickers, orderbooks, indicators, candles) runs on
-persistent connection-pooled HTTP Keep-Alive sessions with pure-Python fallbacks.
+persistent connection-pooled HTTP Keep-Alive sessions with pure-Python indicator fallbacks.
 Failover chain: www.okx.com -> aws.okx.com -> local math.
 Zero process-spawning layers; public endpoints need no credentials.
 """
